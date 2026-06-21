@@ -1,0 +1,13 @@
+[package]
+name = "history-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true

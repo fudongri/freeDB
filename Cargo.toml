@@ -1,0 +1,58 @@
+[workspace]
+members = [
+    "apps/desktop",
+    "crates/app-services",
+    "crates/connection-pool",
+    "crates/connection-store",
+    "crates/core-domain",
+    "crates/driver-api",
+    "crates/driver-mongodb",
+    "crates/driver-mysql",
+    "crates/driver-postgres",
+    "crates/export-service",
+    "crates/history-store",
+    "crates/i18n",
+    "crates/secure-store",
+    "crates/session-manager",
+    "crates/ssh-tunnel",
+]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+csv = "1.4"
+dirs = "6.0"
+eframe = "0.33"
+hex = "0.4"
+egui = "0.33"
+egui_dock = "0.18"
+egui_extras = "0.33"
+muda = "0.16"
+mongodb = "3.2"
+mysql_async = "0.36"
+parking_lot = "0.12"
+raw-window-handle = "0.6"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+regex = "1"
+regex-syntax = "0.8"
+rfd = "0.15"
+rust_xlsxwriter = "0.84"
+rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2.1"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+winres = "0.1"

@@ -1,0 +1,13 @@
+[package]
+name = "driver-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+core-domain = { path = "../core-domain" }
+mongodb.workspace = true
+mysql_async.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true

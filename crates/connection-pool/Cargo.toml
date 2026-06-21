@@ -1,0 +1,17 @@
+[package]
+name = "connection-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-domain = { path = "../core-domain" }
+driver-api = { path = "../driver-api" }
+driver-mongodb = { path = "../driver-mongodb" }
+driver-mysql = { path = "../driver-mysql" }
+driver-postgres = { path = "../driver-postgres" }
+parking_lot.workspace = true
+ssh-tunnel = { path = "../ssh-tunnel" }
+tokio.workspace = true
+tokio-postgres.workspace = true
+tracing.workspace = true

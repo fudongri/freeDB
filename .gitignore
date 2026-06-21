@@ -1,0 +1,27 @@
+# Rust build output
+target/
+
+# macOS
+.DS_Store
+
+# Local data (credentials, database)
+.freedb-data/
+
+# Debug artifacts
+.dbg/
+
+# IDE / editor
+.idea/
+.superpowers/
+.trae/
+.claude/
+CLAUDE.md
+
+# auth files
+auth-qr.png
+
+# Documents
+docs/
+*.md
+!README.md
+!README_zh.md

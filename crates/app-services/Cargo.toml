@@ -1,0 +1,21 @@
+[package]
+name = "app-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+connection-store = { path = "../connection-store" }
+core-domain = { path = "../core-domain" }
+export-service = { path = "../export-service" }
+history-store = { path = "../history-store" }
+i18n = { path = "../i18n" }
+parking_lot.workspace = true
+secure-store = { path = "../secure-store" }
+session-manager = { path = "../session-manager" }
+ssh-tunnel = { path = "../ssh-tunnel" }
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

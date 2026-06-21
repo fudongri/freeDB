@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <?ifdef CargoWixTargetPath ?>
+        <?define FreedbTargetPath = "$(var.CargoWixTargetPath)" ?>
+    <?else?>
+        <?define FreedbTargetPath = "$(var.CargoTargetDir)\freedb.exe" ?>
+    <?endif?>
+
+    <Package
+        Name="FreeDB"
+        Manufacturer="FreeDB Contributors"
+        Version="0.1.0"
+        UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+        Scope="perMachine">
+
+        <SummaryInformation
+            Description="Cross-platform database client for MySQL and PostgreSQL"
+            Manufacturer="FreeDB Contributors" />
+
+        <MajorUpgrade
+            DowngradeErrorMessage="A newer version of FreeDB is already installed."
+            AllowSameVersionUpgrades="yes" />
+
+        <!-- Require admin privileges for per-machine install -->
+        <Property Id="ALLUSERS" Value="1" />
+
+        <!-- Icon for Add/Remove Programs -->
+        <Icon Id="FreedbIcon.exe"
+            SourceFile="$(var.CargoTargetDir)\..\..\apps\desktop\assets\freedb-icon.ico" />
+
+        <!-- Directory structure -->
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Id="APPLICATIONFOLDER" Name="FreeDB" />
+
+            <!-- Main executable -->
+            <Component Id="MainExecutable" Guid="B1A2C3D4-E5F6-7890-ABCD-EF1234567891">
+                <File Id="FreedbExe"
+                    Source="$(var.FreedbTargetPath)"
+                    KeyPath="yes"
+                    Checksum="yes" />
+            </Component>
+
+            <!-- Icon asset -->
+            <Component Id="AppIcon" Guid="C1A2B3D4-E5F6-7890-ABCD-EF1234567892">
+                <File Id="FreedbIconFile"
+                    Source="$(var.CargoTargetDir)\..\..\apps\desktop\assets\freedb-icon.ico"
+                    KeyPath="yes" />
+            </Component>
+        </StandardDirectory>
+
+        <!-- Start Menu shortcut (separate component so it repairs independently) -->
+        <StandardDirectory Id="ProgramMenuFolder">
+            <Component Id="StartMenuShortcutComponent" Guid="E1A2B3C4-D5F6-7890-ABCD-EF1234567894">
+                <Shortcut Id="StartMenuShortcut"
+                    Name="FreeDB"
+                    Description="Cross-platform database client for MySQL and PostgreSQL"
+                    Target="[APPLICATIONFOLDER]freedb.exe"
+                    WorkingDirectory="APPLICATIONFOLDER"
+                    Icon="FreedbIcon.exe" />
+                <RegistryValue
+                    Root="HKCU"
+                    Key="Software\FreeDB"
+                    Name="installed"
+                    Type="integer"
+                    Value="1"
+                    KeyPath="yes" />
+            </Component>
+        </StandardDirectory>
+
+        <!-- Desktop shortcut -->
+        <StandardDirectory Id="DesktopFolder">
+            <Component Id="DesktopShortcutComponent" Guid="F1A2B3C4-D5F6-7890-ABCD-EF1234567895">
+                <Shortcut Id="DesktopShortcut"
+                    Name="FreeDB"
+                    Description="Cross-platform database client for MySQL and PostgreSQL"
+                    Target="[APPLICATIONFOLDER]freedb.exe"
+                    WorkingDirectory="APPLICATIONFOLDER"
+                    Icon="FreedbIcon.exe" />
+            </Component>
+        </StandardDirectory>
+
+        <Feature Id="MainFeature" Title="FreeDB" Level="1"
+            ConfigurableDirectory="APPLICATIONFOLDER">
+            <ComponentRef Id="MainExecutable" />
+            <ComponentRef Id="AppIcon" />
+            <ComponentRef Id="StartMenuShortcutComponent" />
+            <ComponentRef Id="DesktopShortcutComponent" />
+        </Feature>
+
+        <!-- UI: License agreement, install directory, progress -->
+        <UIRef Id="WixUI_InstallDir" />
+        <UIRef Id="WixUI_ErrorProgressText" />
+
+        <WixVariable Id="WixUILicenseRtf"
+            Value="$(var.CargoTargetDir)\..\..\apps\desktop\wix\LICENSE.rtf" />
+
+        <!-- Set default install directory to APPLICATIONFOLDER -->
+        <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
+
+    </Package>
+</Wix>

@@ -1,0 +1,74 @@
+[package]
+name = "desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "freedb"
+path = "src/main.rs"
+
+[[bin]]
+name = "export-icon"
+path = "src/bin/export_icon.rs"
+
+[dependencies]
+app-services = { path = "../../crates/app-services" }
+chrono.workspace = true
+core-domain = { path = "../../crates/core-domain" }
+eframe.workspace = true
+futures-util = "0.3"
+egui.workspace = true
+egui_dock.workspace = true
+egui_extras.workspace = true
+i18n = { path = "../../crates/i18n" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+muda.workspace = true
+open = "5"
+raw-window-handle.workspace = true
+regex.workspace = true
+regex-syntax.workspace = true
+reqwest = { version = "0.12", features = ["json", "native-tls", "stream"], default-features = false }
+rfd.workspace = true
+semver = "1"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+unicode-width = "0.2"
+
+[build-dependencies]
+winres.workspace = true
+
+[package.metadata.bundle]
+copyright = "Copyright © 2025 FreeDB contributors"
+name = "FreeDB"
+identifier = "ai.trae.freedb"
+category = "Developer Tools"
+short_description = "Cross-platform database client for MySQL and PostgreSQL"
+long_description = """
+FreeDB is a cross-platform database client supporting MySQL and PostgreSQL. \
+Features include query execution, connection management, SSH tunneling, \
+and data export capabilities."""
+
+[package.metadata.bundle.bin.freedb]
+name = "FreeDB"
+icon = [
+    "assets/freedb-icon.icns",
+    "assets/freedb-icon.ico",
+    "assets/freedb-icon-256.png",
+]
+resources = [
+    "assets/freedb-icon.icns",
+    "macos/Info.plist",
+]
+
+[package.metadata.bundle.osx]
+icon = "assets/freedb-icon.icns"
+osx_minimum_system_version = "12.0"
+osx_info_plist_exts = ["macos/Info.plist"]
+
+[package.metadata.bundle.windows]
+icon = "assets/freedb-icon.ico"
