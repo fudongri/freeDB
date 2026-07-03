@@ -12,8 +12,10 @@ use eframe::egui::{
 };
 use egui_extras::{Size, StripBuilder, TableBuilder};
 use rfd::FileDialog;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -9229,7 +9231,8 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    let modifiers = ui.ctx().input(|input| input.modifiers);
+                    let ctx = ui.ctx().clone();
+                    let modifiers = ctx.input(|input| input.modifiers);
                     let ctrl_held = modifiers.ctrl || modifiers.command;
                     let mut table = TableBuilder::new(ui)
                         .vscroll(false)
@@ -9256,7 +9259,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 .clip(true),
                         );
                     }
-                    table
+                    let header_cell_rects = Rc::new(RefCell::new(Vec::with_capacity(columns.len())));
+                    let hcr = header_cell_rects.clone();
+                    let table_header = table
                         .header(30.0, |mut header| {
                             // Row number header
                             if show_row_number {
@@ -9264,18 +9269,21 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     let _ = table_header_cell(ui, &palette, "#", false, None, false, false);
                                 });
                             }
-                            for column in &columns {
+                            for (col_idx, column) in columns.iter().enumerate() {
                                 header.col(|ui| {
                                     let is_selected = tab.selected_columns.contains(column);
-                                    let (sort_choice, clicked, _dragged) = table_header_cell(
+                                    let is_dragged = tab.column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
+                                    let (sort_choice, clicked, cell_dragged) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
                                         true,
                                         sort_indicator(&tab.preview_sort, column),
                                         is_selected,
-                                        false,
+                                        is_dragged,
                                     );
+                                    // 收集列头矩形用于拖拽 target 判定
+                                    hcr.borrow_mut().push(ui.max_rect());
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
                                     }
@@ -9290,11 +9298,102 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             tab.selected_columns.clear();
                                             tab.selected_columns.insert(column.clone());
                                         }
-                                        ui.ctx().request_repaint();
+                                        ctx.request_repaint();
+                                    }
+                                    // 拖拽开始：记录原始列位置
+                                    if cell_dragged && tab.column_drag.is_none() {
+                                        tab.column_drag = Some(TableColumnDragState {
+                                            source_index: col_idx,
+                                            target_index: col_idx,
+                                        });
                                     }
                                 });
                             }
-                        })
+                        });
+                    let painter = ctx.debug_painter().clone();
+                // 拖拽中更新 target_index 并绘制插入线
+                    {
+                        let header_cell_rects = header_cell_rects.borrow();
+                        if let Some(drag) = tab.column_drag.as_mut() {
+                            if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
+                                let mut new_target = drag.source_index;
+                                for (i, rect) in header_cell_rects.iter().enumerate() {
+                                    if pointer.x < rect.left() && i == 0 {
+                                        new_target = 0;
+                                        break;
+                                    }
+                                    let mid_x = rect.center().x;
+                                    if pointer.x >= rect.left() && pointer.x < mid_x {
+                                        new_target = i;
+                                        break;
+                                    }
+                                    if pointer.x >= mid_x && pointer.x <= rect.right() {
+                                        new_target = (i + 1).min(header_cell_rects.len());
+                                        break;
+                                    }
+                                    if i == header_cell_rects.len() - 1 && pointer.x > rect.right() {
+                                        new_target = header_cell_rects.len();
+                                    }
+                                }
+                                drag.target_index = new_target;
+                            }
+
+                            // 绘制插入指示线
+                            let line_x = if drag.target_index < header_cell_rects.len() {
+                                let target_rect = header_cell_rects[drag.target_index];
+                                target_rect.left()
+                            } else {
+                                // target 在最后一列之后
+                                header_cell_rects.last().map(|r| r.right()).unwrap_or(0.0)
+                            };
+
+                            let header_bottom = header_cell_rects
+                                .first()
+                                .map(|r| r.bottom())
+                                .unwrap_or(0.0);
+                            let header_top = header_cell_rects
+                                .first()
+                                .map(|r| r.top())
+                                .unwrap_or(0.0);
+                            painter.line_segment(
+                                [egui::pos2(line_x, header_top), egui::pos2(line_x, header_bottom)],
+                                egui::Stroke::new(2.0, palette.selection_bg),
+                            );
+                        }
+                    }
+                    // 列拖拽：ESC 取消
+                    let esc_pressed = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+                    if esc_pressed {
+                        tab.column_drag = None;
+                    }
+                    // 列拖拽释放：应用顺序变更
+                    let column_drag_released = ctx.input(|input| {
+                        input.pointer.button_released(egui::PointerButton::Primary)
+                    });
+                    if column_drag_released {
+                        if let Some(drag) = tab.column_drag.take() {
+                            if drag.source_index != drag.target_index {
+                                // 确保 column_order 已初始化
+                                if tab.column_order.is_empty() {
+                                    tab.column_order = columns.clone();
+                                }
+                                let col_name = &columns[drag.source_index];
+                                // 从 column_order 中移除
+                                if let Some(pos) = tab.column_order.iter().position(|c| c == col_name) {
+                                    tab.column_order.remove(pos);
+                                }
+                                // 计算插入位置（移除后索引可能偏移）
+                                let insert_at = if drag.target_index > drag.source_index {
+                                    (drag.target_index.saturating_sub(1)).min(tab.column_order.len())
+                                } else {
+                                    drag.target_index.min(tab.column_order.len())
+                                };
+                                tab.column_order.insert(insert_at, col_name.clone());
+                                tab.preview_column_widths.clear();
+                            }
+                        }
+                    }
+                    table_header
                         .body(|mut body| {
                                 // Sync PendingInsert editing cell value to pending_row each frame
                                 // (keeps the editor open while updating the backing data)
