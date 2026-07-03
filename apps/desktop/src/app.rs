@@ -4835,7 +4835,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         ui.add_space(8.0);
                                     }
                                     if let Some(result) = &mut tab.result {
-                                        let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search);
+                                        let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
                                     } else {
                                         render_query_empty_state(
                                             ui,
@@ -8946,6 +8946,8 @@ fn render_result_table(
     sql_driven_sort: bool,
     selected_columns: &mut BTreeSet<String>,
     search: &mut TableSearchState,
+    column_order: &mut Vec<String>,
+    column_drag: &mut Option<TableColumnDragState>,
 ) -> Option<(String, bool)> {
     let palette = mac_ui_palette(ui.visuals());
     if result.columns.is_empty() {
@@ -8966,6 +8968,25 @@ fn render_result_table(
     let viewport_width = ui.available_width().max(0.0);
     let viewport_height = ui.available_height().max(220.0);
     let mut sort_click_result = None;
+
+    // 按 column_order 排序的列列表
+    let display_columns: Vec<String> = if column_order.is_empty() {
+        result.columns.clone()
+    } else {
+        let all_set: BTreeSet<&String> = result.columns.iter().collect();
+        let mut ordered: Vec<String> = column_order
+            .iter()
+            .filter(|c| all_set.contains(c))
+            .cloned()
+            .collect();
+        // 追加新列（不在 column_order 中的）
+        for col in &result.columns {
+            if !column_order.contains(col) {
+                ordered.push(col.clone());
+            }
+        }
+        ordered
+    };
 
     egui::Frame::new()
         .fill(palette.card_bg)
@@ -8989,9 +9010,10 @@ fn render_result_table(
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     let mut selected_sort = None;
-                    let modifiers = ui.ctx().input(|input| input.modifiers);
+                    let ctx = ui.ctx().clone();
+                    let modifiers = ctx.input(|input| input.modifiers);
                     let ctrl_held = modifiers.ctrl || modifiers.command;
-                    let column_widths = estimate_result_column_widths(result);
+                    let column_widths = estimate_query_column_widths(&display_columns, &result.rows);
                     let mut table = TableBuilder::new(ui)
                         .vscroll(false)
                         .striped(true)
@@ -9014,22 +9036,26 @@ fn render_result_table(
                                 .clip(true),
                         );
                     }
-                    table.header(30.0, |mut header| {
+                    let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
+                    let table_header = table
+                        .header(30.0, |mut header| {
                             // Row number header
                             header.col(|ui| {
                                 let _ = table_header_cell(ui, &palette, "#", false, None, false, false);
                             });
-                            for column in &result.columns {
+                            for (col_idx, column) in display_columns.iter().enumerate() {
                                 header.col(|ui| {
+                                    let cell_rect = ui.max_rect();
+                                    let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let is_selected = selected_columns.contains(column);
-                                    let (sort_choice, clicked, _dragged) = table_header_cell(
+                                    let (sort_choice, clicked, cell_dragged) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
                                         true,
                                         sort_indicator(sort_state, column),
                                         is_selected,
-                                        false,
+                                        is_dragged,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
@@ -9047,9 +9073,43 @@ fn render_result_table(
                                         }
                                         ui.ctx().request_repaint();
                                     }
+                                    // 拖拽开始
+                                    if cell_dragged && column_drag.is_none() {
+                                        *column_drag = Some(TableColumnDragState {
+                                            source_index: col_idx,
+                                            target_index: col_idx,
+                                        });
+                                    }
+                                    header_cell_rects.push(cell_rect);
                                 });
                             }
-                        })
+                        });
+                    // 拖拽中更新 target_index（不在此处绘制，等 body 完成后绘制）
+                    if let Some(drag) = column_drag.as_mut() {
+                        if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
+                            let mut new_target = drag.source_index;
+                            for (i, rect) in header_cell_rects.iter().enumerate() {
+                                if pointer.x < rect.left() && i == 0 {
+                                    new_target = 0;
+                                    break;
+                                }
+                                let mid_x = rect.center().x;
+                                if pointer.x >= rect.left() && pointer.x < mid_x {
+                                    new_target = i;
+                                    break;
+                                }
+                                if pointer.x >= mid_x && pointer.x <= rect.right() {
+                                    new_target = (i + 1).min(header_cell_rects.len());
+                                    break;
+                                }
+                                if i == header_cell_rects.len() - 1 && pointer.x > rect.right() {
+                                    new_target = header_cell_rects.len();
+                                }
+                            }
+                            drag.target_index = new_target;
+                        }
+                    }
+                    table_header
                         .body(|body| {
                             body.rows(28.0, result.rows.len(), |mut row_ui| {
                                 let index = row_ui.index();
@@ -9085,7 +9145,7 @@ fn render_result_table(
                                     let _ = child_ui.add(label);
                                 });
                                 let row = &result.rows[index];
-                                for (col_idx, column) in result.columns.iter().enumerate() {
+                                for (col_idx, column) in display_columns.iter().enumerate() {
                                     row_ui.col(|ui| {
                                         let column_selected = selected_columns.contains(column);
                                         let search_highlight = search.open && search.matches.iter().any(|&(r, c)| r == index && c == col_idx);
@@ -9105,6 +9165,50 @@ fn render_result_table(
                                 }
                             });
                         });
+                    // 列拖拽释放、ESC 取消、绘制插入线
+                    let esc_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
+                    if esc_pressed {
+                        *column_drag = None;
+                    }
+                    let column_drag_released = ui.input(|input| {
+                        input.pointer.button_released(egui::PointerButton::Primary)
+                    });
+                    if column_drag_released {
+                        if let Some(drag) = column_drag.take() {
+                            if drag.source_index != drag.target_index {
+                                // 确保 column_order 已初始化
+                                if column_order.is_empty() {
+                                    *column_order = display_columns.clone();
+                                }
+                                let col_name = &display_columns[drag.source_index];
+                                // 从 column_order 中移除
+                                if let Some(pos) = column_order.iter().position(|c| c == col_name) {
+                                    column_order.remove(pos);
+                                }
+                                // 计算插入位置（移除后索引可能偏移）
+                                let insert_at = if drag.target_index > drag.source_index {
+                                    (drag.target_index.saturating_sub(1)).min(column_order.len())
+                                } else {
+                                    drag.target_index.min(column_order.len())
+                                };
+                                column_order.insert(insert_at, col_name.clone());
+                            }
+                        }
+                    }
+                    // 绘制拖拽插入线
+                    if let Some(drag) = column_drag.as_ref() {
+                        let line_x = if drag.target_index < header_cell_rects.len() {
+                            header_cell_rects[drag.target_index].left()
+                        } else {
+                            header_cell_rects.last().map(|r| r.right()).unwrap_or(0.0)
+                        };
+                        let header_bottom = header_cell_rects.first().map(|r| r.bottom()).unwrap_or(0.0);
+                        let header_top = header_cell_rects.first().map(|r| r.top()).unwrap_or(0.0);
+                        ui.painter().line_segment(
+                            [egui::pos2(line_x, header_top), egui::pos2(line_x, header_bottom)],
+                            egui::Stroke::new(2.0, palette.selection_bg),
+                        );
+                    }
                     if let Some(sort_request) = selected_sort {
                         sort_click_result = Some(sort_request);
                     }
