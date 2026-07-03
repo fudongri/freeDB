@@ -15989,23 +15989,25 @@ fn render_query_editor(
                         }
 
                                 // 拖选时自动滚动：检测鼠标是否在编辑器边缘
-                                // 仅在真正拖拽（超过拖拽阈值的移动）时触发，避免点击第一行时误触发
-                                let editor_rect = output.response.rect;
+                                // 用非空选区区分拖选和单击，避免点击第一行时误触发
+                                // 用 ui.clip_rect()（可见视口）替代 editor_rect（内容坐标）
+                                let viewport = ui.clip_rect();
                                 if let Some(pointer_pos) = ui.ctx().pointer_latest_pos() {
-                                    let is_dragging = ui.ctx().input(|i| i.pointer.primary_down())
-                                        && ui.ctx().is_being_dragged(output.response.id);
-                                    if is_dragging && output.response.has_focus() && editor_rect.contains(pointer_pos) {
-                                        let edge_zone = row_height * 2.0;
-                                        let rel_y = pointer_pos.y - editor_rect.top();
-                                        let editor_h = editor_rect.height();
+                                    let has_selection = output.cursor_range.as_ref().is_some_and(|r| !r.is_empty());
+                                    let primary_down = ui.ctx().input(|i| i.pointer.primary_down());
+                                    let has_focus = output.response.has_focus();
+                                    let is_dragging = primary_down && has_selection;
+                                    let rel_y = pointer_pos.y - viewport.top();
+                                    let edge_zone = row_height * 2.0;
+                                    if is_dragging && has_focus {
                                         if rel_y < edge_zone {
-                                            // 靠近顶部，向上滚动
+                                            // 靠近顶部，向上滚动（正 delta）
                                             let speed = ((edge_zone - rel_y) / edge_zone * 8.0).ceil();
-                                            ui.scroll_with_delta(egui::vec2(0.0, -speed));
-                                        } else if rel_y > editor_h - edge_zone {
-                                            // 靠近底部，向下滚动
-                                            let speed = ((rel_y - (editor_h - edge_zone)) / edge_zone * 8.0).ceil();
                                             ui.scroll_with_delta(egui::vec2(0.0, speed));
+                                        } else if rel_y > viewport.height() - edge_zone {
+                                            // 靠近底部，向下滚动（负 delta）
+                                            let speed = ((rel_y - (viewport.height() - edge_zone)) / edge_zone * 8.0).ceil();
+                                            ui.scroll_with_delta(egui::vec2(0.0, -speed));
                                         }
                                     }
                                 }
