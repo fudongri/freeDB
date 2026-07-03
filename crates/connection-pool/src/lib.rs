@@ -6,9 +6,10 @@ use ssh_tunnel::SshTunnelManager;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout, Duration};
 
 const POOL_MAX_PER_KEY: usize = 5;
+const PING_TIMEOUT_SECS: u64 = 3;
 
 fn pool_key(profile_id: &str, kind: DatabaseKind, database: Option<&str>) -> String {
     match kind {
@@ -48,6 +49,19 @@ impl ConnectionPool {
         }
     }
 
+    /// 带 3 秒超时的 ping，避免 TCP 超时等待过长
+    async fn timed_ping(&self, handle: &mut ConnectionHandle) -> bool {
+        let provider: &dyn ConnectionProvider = if handle.is_postgres() {
+            &self.postgres
+        } else {
+            &self.mysql
+        };
+        matches!(
+            timeout(Duration::from_secs(PING_TIMEOUT_SECS), provider.ping(handle)).await,
+            Ok(Ok(()))
+        )
+    }
+
     /// 获取一个健康的连接。优先复用空闲连接，池未满则新建，池满则排队等待。
     pub async fn acquire(
         &self,
@@ -59,50 +73,29 @@ impl ConnectionPool {
             .validate(profile.ssh_tunnel.as_ref())
             .map_err(|e| AppError::Validation(e.to_string()))?;
 
-        let provider = self.provider(profile.kind);
         let key = pool_key(&profile.id, profile.kind, database);
 
-        // 尝试找一个空闲连接
+        // 找一个空闲健康连接；一个 ping 失败则全部清掉（链路断开）
         let snapshot = self.snapshot(&key);
         for handle in &snapshot {
             if let Ok(mut guard) = handle.try_lock() {
-                if provider.ping(&mut guard).await.is_ok() {
+                if self.timed_ping(&mut guard).await {
                     tracing::debug!(key = %key, "连接池命中，复用空闲连接");
                     return Ok(handle.clone());
                 }
                 drop(guard);
-                tracing::info!(key = %key, "ping 失败，移除失效连接");
-                self.remove(&key, handle);
+                tracing::info!(key = %key, "ping 失败，清空该 key 下所有连接并重建");
+                self.clear_key(&key);
+                break;
             }
         }
 
-        // 没有空闲连接，池未满则新建
-        let current = self.len(&key);
-        if current < POOL_MAX_PER_KEY {
-            tracing::info!(key = %key, host = %profile.host, port = profile.port, current, max = POOL_MAX_PER_KEY, "连接池新建连接");
-            let new = provider.connect(profile, password, database).await?;
-            let handle = Arc::new(AsyncMutex::new(new));
-            self.push(&key, handle.clone());
-            return Ok(handle);
-        }
-
-        // 池满，排队等待任意连接释放
-        tracing::debug!(key = %key, "连接池已满，等待连接释放");
-        let handle = self.pick_first(&key);
-        let mut guard = handle.lock().await;
-        if provider.ping(&mut guard).await.is_ok() {
-            tracing::debug!(key = %key, "等待后复用连接");
-            Ok(handle.clone())
-        } else {
-            drop(guard);
-            tracing::info!(key = %key, "等待到的连接已失效，移除并重试");
-            self.remove(&key, &handle);
-            // 重连一条新的替换
-            let new = provider.connect(profile, password, database).await?;
-            let handle = Arc::new(AsyncMutex::new(new));
-            self.push(&key, handle.clone());
-            Ok(handle)
-        }
+        // 建新连接
+        tracing::info!(key = %key, host = %profile.host, port = profile.port, "连接池新建连接");
+        let new = self.provider(profile.kind).connect(profile, password, database).await?;
+        let handle = Arc::new(AsyncMutex::new(new));
+        self.push(&key, handle.clone());
+        Ok(handle)
     }
 
     // ── 内部操作 ──
@@ -114,24 +107,6 @@ impl ConnectionPool {
             .get(key)
             .cloned()
             .unwrap_or_default()
-    }
-
-    fn len(&self, key: &str) -> usize {
-        self.entries
-            .lock()
-            .unwrap()
-            .get(key)
-            .map(|v| v.len())
-            .unwrap_or(0)
-    }
-
-    fn pick_first(&self, key: &str) -> ConnHandle {
-        self.entries
-            .lock()
-            .unwrap()
-            .get(key)
-            .and_then(|v| v.first().cloned())
-            .expect("pick_first called on empty pool")
     }
 
     fn push(&self, key: &str, handle: ConnHandle) {
@@ -148,6 +123,10 @@ impl ConnectionPool {
         if let Some(vec) = map.get_mut(key) {
             vec.retain(|h| !Arc::ptr_eq(h, target));
         }
+    }
+
+    fn clear_key(&self, key: &str) {
+        self.entries.lock().unwrap().remove(key);
     }
 
     /// 驱逐某 connection 的所有缓存
@@ -191,16 +170,10 @@ impl ConnectionPool {
         };
         for (key, handle) in snapshot {
             if let Ok(mut guard) = handle.try_lock() {
-                let provider: &dyn ConnectionProvider = if guard.is_postgres() {
-                    &self.postgres as &dyn ConnectionProvider
-                } else {
-                    &self.mysql as &dyn ConnectionProvider
-                };
-                if provider.ping(&mut guard).await.is_err() {
-                    drop(guard);
-                    tracing::info!(key = %key, "keepalive ping 失败，清理死连接");
-                    self.remove(&key, &handle);
-                }
+                if self.timed_ping(&mut guard).await { continue; }
+                drop(guard);
+                tracing::info!(key = %key, "keepalive ping 失败，清理死连接");
+                self.remove(&key, &handle);
             }
         }
     }

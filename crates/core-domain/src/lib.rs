@@ -176,7 +176,7 @@ impl Default for RetryConfig {
             max_retries: 3,
             base_delay_ms: 500,
             max_delay_ms: 5000,
-            keepalive_interval_secs: 60,
+            keepalive_interval_secs: 30,
         }
     }
 }
