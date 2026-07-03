@@ -4883,6 +4883,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 ui.add_space(4.0);
                                                 let available_width = ui.available_width();
                                                 let table = egui_extras::TableBuilder::new(ui)
+                                                    .vscroll(false)
                                                     .striped(true)
                                                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                                                     .column(egui_extras::Column::exact(150.0))  // 时间
@@ -5097,6 +5098,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                         TableBuilder::new(ui)
+                            .vscroll(false)
                             .striped(true)
                             .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
@@ -5268,6 +5270,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                         TableBuilder::new(ui)
+                            .vscroll(false)
                             .striped(true)
                             .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
@@ -9218,6 +9221,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                     let modifiers = ui.ctx().input(|input| input.modifiers);
                     let ctrl_held = modifiers.ctrl || modifiers.command;
                     let mut table = TableBuilder::new(ui)
+                        .vscroll(false)
                         .striped(true)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
@@ -10582,6 +10586,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     TableBuilder::new(ui)
+                        .vscroll(false)
                         .striped(true)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
@@ -11398,6 +11403,7 @@ fn render_index_table(
             let mut delete_existing: Option<usize> = None;
 
             TableBuilder::new(ui)
+                .vscroll(false)
                 .striped(true)
                 .resizable(false)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -11790,6 +11796,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     TableBuilder::new(ui)
+                        .vscroll(false)
                         .striped(true)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
