@@ -15822,49 +15822,19 @@ fn render_query_editor(
         egui::vec2(ui.available_width(), remaining_editor_height),
     );
 
-    // 行号（使用预计算的视觉行数，考虑自动换行）
-    {
-        let painter = ui.painter();
-        painter.rect_filled(gutter_rect, 0.0, palette.gutter_bg);
-        let text_x = gutter_rect.right() - 6.0;
-        let gutter_top_padding = 10.0;
-        let mut y = gutter_rect.top() + gutter_top_padding + gutter_row_height * 0.5;
-        for (line_idx, &rows) in gutter_row_counts.iter().enumerate() {
-            let line = line_idx + 1;
-            let is_current = current_line == line;
-            for visual_row in 0..rows {
-                if visual_row == 0 {
-                    if is_current {
-                        let highlight_rect = egui::Rect::from_min_max(
-                            egui::pos2(gutter_rect.left() + 2.0, y - gutter_row_height * 0.5),
-                            egui::pos2(gutter_rect.right() - 2.0, y + gutter_row_height * 0.5),
-                        );
-                        painter.rect_filled(highlight_rect, 4.0, palette.current_line_bg);
-                    }
-                    painter.text(
-                        egui::pos2(text_x, y),
-                        Align2::RIGHT_CENTER,
-                        line.to_string(),
-                        FontId::new(15.0, FontFamily::Monospace),
-                        if is_current { palette.line_number_active } else { palette.line_number },
-                    );
-                }
-                y += gutter_row_height;
-            }
-        }
-    }
-    ui.allocate_rect(gutter_rect, egui::Sense::hover());
-
     // 编辑器（独立 ScrollArea，不与外层嵌套）
-    ui.allocate_ui_at_rect(editor_rect, |ui| {
+    let scroll_output = ui.allocate_ui_at_rect(editor_rect, |ui| {
         egui::Frame::new()
             .fill(palette.editor_bg)
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
                 let available_height = ui.available_height();
-                egui::ScrollArea::vertical()
+                
+                let scroll_area_output = egui::ScrollArea::vertical()
+                    .id_salt(format!("query-editor-scroll-{}", tab.id))
                     .max_height(available_height)
                     .animated(false)
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let editor_available_width = ui.available_width();
                         // 估算可视区域能容纳的行数，确保 TextEdit 交互区填满整个编辑器
@@ -16239,9 +16209,8 @@ fn render_query_editor(
                                 if output.response.has_focus() {
                                     check_autocomplete_triggers(ui, &output, tab);
                                 }
-                            });
-                    });
-
+                            });  // ScrollArea.show 结束，返回 ScrollAreaOutput
+                    
                     // --- Autocomplete popup rendering (inside Frame, outside ScrollArea) ---
                     if tab.autocomplete.visible {
                         let conn_id = tab.connection_id.as_deref();
@@ -16283,7 +16252,50 @@ fn render_query_editor(
                             }
                         }
                     }
-                });
+                    
+                    scroll_area_output  // 返回ScrollArea的输出给Frame
+            })  // Frame.show 结束，返回 InnerResponse<ScrollAreaOutput>
+    }).inner.inner;  // allocate_ui_at_rect返回InnerResponse，提取最内层的ScrollAreaOutput
+
+    // 行号（使用ScrollArea的滚动偏移量同步滚动）
+    {
+        let scroll_offset = scroll_output.state.offset.y;
+        let painter = ui.painter();
+        // 使用clip_rect限制行号只在gutter区域内绘制
+        let clip_painter = painter.with_clip_rect(gutter_rect);
+        clip_painter.rect_filled(gutter_rect, 0.0, palette.gutter_bg);
+        let text_x = gutter_rect.right() - 6.0;
+        let gutter_top_padding = 10.0;
+        // 行号的起始Y坐标需要减去滚动偏移量
+        let mut y = gutter_rect.top() + gutter_top_padding + gutter_row_height * 0.5 - scroll_offset;
+        for (line_idx, &rows) in gutter_row_counts.iter().enumerate() {
+            let line = line_idx + 1;
+            let is_current = current_line == line;
+            for visual_row in 0..rows {
+                // 只绘制在可见区域内的行号
+                if y + gutter_row_height * 0.5 >= gutter_rect.top() && y - gutter_row_height * 0.5 <= gutter_rect.bottom() {
+                    if visual_row == 0 {
+                        if is_current {
+                            let highlight_rect = egui::Rect::from_min_max(
+                                egui::pos2(gutter_rect.left() + 2.0, y - gutter_row_height * 0.5),
+                                egui::pos2(gutter_rect.right() - 2.0, y + gutter_row_height * 0.5),
+                            );
+                            clip_painter.rect_filled(highlight_rect, 4.0, palette.current_line_bg);
+                        }
+                        clip_painter.text(
+                            egui::pos2(text_x, y),
+                            Align2::RIGHT_CENTER,
+                            line.to_string(),
+                            FontId::new(15.0, FontFamily::Monospace),
+                            if is_current { palette.line_number_active } else { palette.line_number },
+                        );
+                    }
+                }
+                y += gutter_row_height;
+            }
+        }
+    }
+    ui.allocate_rect(gutter_rect, egui::Sense::hover());
 }
 
 /// 已保存查询折叠面板
