@@ -27,12 +27,17 @@ macro_rules! with_pool {
         let mut result = Err(AppError::Connection("retry exhausted".into()));
         for attempt in 0..=$self.retry.max_retries {
             if attempt > 0 {
-                sleep(Duration::from_millis($self.backoff_ms(attempt))).await;
+                let backoff = $self.backoff_ms(attempt);
+                tracing::info!(connection_id = %$profile.id, attempt, backoff_ms = backoff, "重试数据库操作");
+                sleep(Duration::from_millis(backoff)).await;
                 $self.set_reconnecting(&$profile.id, last_err.as_ref());
             }
             let handle = match $self.pool.acquire($profile, $password, $db).await {
                 Ok(h) => h,
-                Err(e) => { last_err = Some(e); continue; }
+                Err(e) => {
+                    tracing::warn!(connection_id = %$profile.id, error = %e, "获取连接失败");
+                    last_err = Some(e); continue;
+                }
             };
             let mut guard = handle.lock().await;
             let $h: &mut driver_api::ConnectionHandle = &mut *guard;
@@ -50,11 +55,13 @@ macro_rules! with_pool {
                 }
                 Err(e) if $self.is_retryable(&e) => {
                     drop(guard);
+                    tracing::warn!(connection_id = %$profile.id, error = %e, "操作失败（可重试），驱逐连接");
                     $self.pool.evict(&$profile.id);
                     last_err = Some(e);
                 }
                 Err(e) => {
                     drop(guard);
+                    tracing::error!(connection_id = %$profile.id, error = %e, "操作失败（不可重试）");
                     $self.set_failed(&$profile.id, &e);
                     result = Err(e);
                     break;
@@ -63,6 +70,7 @@ macro_rules! with_pool {
         }
         if result.is_err() {
             let err = last_err.unwrap_or_else(|| AppError::Connection("retry exhausted".into()));
+            tracing::error!(connection_id = %$profile.id, error = %err, "重试耗尽，操作最终失败");
             $self.set_failed(&$profile.id, &err);
         }
         result

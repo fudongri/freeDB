@@ -19,7 +19,7 @@ impl ConnectionProvider for MySqlDriver {
         &self,
         profile: &ConnectionProfile,
         password: &str,
-        database: Option<&str>,
+        _database: Option<&str>,
     ) -> AppResult<ConnectionHandle> {
         let mut builder = OptsBuilder::default();
         builder = builder
@@ -27,9 +27,7 @@ impl ConnectionProvider for MySqlDriver {
             .tcp_port(profile.port)
             .user(Some(profile.username.clone()))
             .pass(Some(password.to_string()));
-        if let Some(db) = database.or(profile.default_database.as_deref()) {
-            builder = builder.db_name(Some(db.to_string()));
-        }
+        // MySQL 连接跨库共享，初始不指定数据库，各操作通过 USE db 切换
         let conn = Conn::new(builder).await.map_err(map_mysql_error)?;
         Ok(ConnectionHandle::MySql { conn })
     }
