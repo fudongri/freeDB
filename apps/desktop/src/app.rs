@@ -251,6 +251,8 @@ struct QueryTabState {
     last_executed_sql: Option<String>,
     result_sort: TableSortState,
     selected_columns: BTreeSet<String>,
+    column_order: Vec<String>,
+    column_drag: Option<TableColumnDragState>,
     multi_results: Vec<QueryResult>,
     multi_statements: Vec<String>,
     selected_result_index: usize,
@@ -328,6 +330,7 @@ struct TableTabState {
     // 列筛选/排序状态
     hidden_columns: BTreeSet<String>,
     column_order: Vec<String>,
+    column_drag: Option<TableColumnDragState>,
     show_column_filter: bool,
     search: TableSearchState,
 }
@@ -336,6 +339,13 @@ struct TableTabState {
 struct TableSortState {
     column: Option<String>,
     descending: bool,
+}
+
+/// 表头列拖拽排序状态
+#[derive(Clone, Default)]
+struct TableColumnDragState {
+    source_index: usize,
+    target_index: usize,
 }
 
 #[derive(Clone, Default)]
@@ -1807,6 +1817,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             new_index_unique: false,
             hidden_columns: BTreeSet::new(),
             column_order: Vec::new(),
+            column_drag: None,
             show_column_filter: false,
             search: TableSearchState::default(),
         };
@@ -8323,6 +8334,8 @@ impl QueryTabState {
             last_executed_sql: None,
             result_sort: TableSortState::default(),
             selected_columns: BTreeSet::new(),
+            column_order: Vec::new(),
+            column_drag: None,
             multi_results: Vec::new(),
             multi_statements: Vec::new(),
             selected_result_index: 0,
