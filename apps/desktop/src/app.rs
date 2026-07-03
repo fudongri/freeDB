@@ -9206,22 +9206,24 @@ fn render_result_table(
                     if column_drag_released {
                         if let Some(drag) = column_drag.take() {
                             if drag.source_index != drag.target_index {
-                                // 确保 column_order 已初始化
-                                if column_order.is_empty() {
-                                    *column_order = display_columns.clone();
-                                }
+                                // 直接基于 display_columns 计算最终顺序，避免
+                                // target_index (display_columns 空间) 与
+                                // column_order (可能缺新列) 索引不匹配
                                 let col_name = &display_columns[drag.source_index];
-                                // 从 column_order 中移除
-                                if let Some(pos) = column_order.iter().position(|c| c == col_name) {
-                                    column_order.remove(pos);
-                                }
-                                // 计算插入位置（移除后索引可能偏移）
+                                let mut new_display = display_columns.clone();
+                                new_display.remove(drag.source_index);
                                 let insert_at = if drag.target_index > drag.source_index {
-                                    (drag.target_index.saturating_sub(1)).min(column_order.len())
+                                    (drag.target_index - 1).min(new_display.len())
                                 } else {
-                                    drag.target_index.min(column_order.len())
+                                    drag.target_index.min(new_display.len())
                                 };
-                                column_order.insert(insert_at, col_name.clone());
+                                new_display.insert(insert_at, col_name.clone());
+                                // 同步到 column_order：保留新 display_columns
+                                // 中存在的列（跳过不在 column_order 中的新列）
+                                *column_order = new_display
+                                    .into_iter()
+                                    .filter(|c| result.columns.contains(c))
+                                    .collect();
                             }
                         }
                     }
@@ -10072,22 +10074,25 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                     if column_drag_released {
                         if let Some(drag) = tab.column_drag.take() {
                             if drag.source_index != drag.target_index {
-                                // 确保 column_order 已初始化
-                                if tab.column_order.is_empty() {
-                                    tab.column_order = columns.clone();
-                                }
+                                // 直接基于 columns (display order) 计算最终顺序，
+                                // 避免 target_index (columns 空间) 与
+                                // column_order (可能缺 hidden 列) 索引不匹配
                                 let col_name = &columns[drag.source_index];
-                                // 从 column_order 中移除
-                                if let Some(pos) = tab.column_order.iter().position(|c| c == col_name) {
-                                    tab.column_order.remove(pos);
-                                }
-                                // 计算插入位置（移除后索引可能偏移）
+                                let mut new_order = columns.clone();
+                                new_order.remove(drag.source_index);
                                 let insert_at = if drag.target_index > drag.source_index {
-                                    (drag.target_index.saturating_sub(1)).min(tab.column_order.len())
+                                    (drag.target_index - 1).min(new_order.len())
                                 } else {
-                                    drag.target_index.min(tab.column_order.len())
+                                    drag.target_index.min(new_order.len())
                                 };
-                                tab.column_order.insert(insert_at, col_name.clone());
+                                new_order.insert(insert_at, col_name.clone());
+                                // 保留已在 column_order 中但当前 hidden 的列
+                                for c in &tab.column_order {
+                                    if !new_order.contains(c) {
+                                        new_order.push(c.clone());
+                                    }
+                                }
+                                tab.column_order = new_order;
                                 tab.preview_column_widths.clear();
                             }
                         }
