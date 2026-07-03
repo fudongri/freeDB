@@ -8980,6 +8980,7 @@ fn render_result_table(
                     let ctrl_held = modifiers.ctrl || modifiers.command;
                     let column_widths = estimate_result_column_widths(result);
                     let mut table = TableBuilder::new(ui)
+                        .vscroll(false)
                         .striped(true)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
