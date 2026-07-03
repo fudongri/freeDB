@@ -4451,8 +4451,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                                 if toolbar_button(ui, tr!("格式化"), ToolbarButtonKind::Subtle).clicked() {
                                     tab.sql = simple_format_sql(&tab.sql);
-                                    tab.messages.push(tr!("已格式化 SQL").into());
-                                    tab.active_bottom_tab = QueryBottomTab::Messages;
                                 }
                                 // EXPLAIN 按钮（放在格式化后面）
                                 if !is_executing {
@@ -16504,7 +16502,6 @@ fn render_saved_queries_panel(
                                     tab.selected_saved_query_sql = Some(entry.sql_text.clone());
                                     tab.selected_saved_query_connection_id = Some(entry.connection_id.clone());
                                     tab.selected_saved_query_database = entry.database.clone();
-                                    tab.messages.push(tr!("已加载保存查询：{}", entry.title));
                                     *action = TabUiAction::LoadSavedQuery(entry.connection_id.clone());
                                 }
 
