@@ -15989,9 +15989,11 @@ fn render_query_editor(
                         }
 
                                 // 拖选时自动滚动：检测鼠标是否在编辑器边缘
+                                // 仅在真正拖拽（超过拖拽阈值的移动）时触发，避免点击第一行时误触发
                                 let editor_rect = output.response.rect;
                                 if let Some(pointer_pos) = ui.ctx().pointer_latest_pos() {
-                                    let is_dragging = ui.ctx().input(|i| i.pointer.primary_down());
+                                    let is_dragging = ui.ctx().input(|i| i.pointer.primary_down())
+                                        && ui.ctx().is_being_dragged(output.response.id);
                                     if is_dragging && output.response.has_focus() && editor_rect.contains(pointer_pos) {
                                         let edge_zone = row_height * 2.0;
                                         let rel_y = pointer_pos.y - editor_rect.top();
