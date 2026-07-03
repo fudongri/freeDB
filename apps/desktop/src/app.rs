@@ -14300,10 +14300,16 @@ fn simple_format_sql(sql: &str) -> String {
 
             if content_str.is_empty() {
                 // 只有关键词，单独一行
+                if top_level && !lines.is_empty() {
+                    lines.push(String::new());
+                }
                 lines.push(kw.to_string());
             } else {
                 let line = format!("{} {}", kw, content_str);
                 if top_level {
+                    if !lines.is_empty() {
+                        lines.push(String::new());
+                    }
                     lines.push(line.trim_end().to_string());
                 } else {
                     lines.push(format!("  {}", line.trim_end()));
