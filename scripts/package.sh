@@ -45,6 +45,10 @@ mkdir -p "$RESOURCES_DIR"
 cp "$ASSETS_DIR/freedb-icon.icns" "$RESOURCES_DIR/freedb-icon.icns"
 echo "Icon injected into .app bundle"
 
+# Re-sign after modifying bundle contents
+codesign --force --sign - "$TMP_DMG/FreeDB.app" 2>/dev/null
+echo "Re-signed after icon injection"
+
 # Rebuild DMG
 rm -f "$DMG"
 hdiutil create -volname "FreeDB" -srcfolder "$TMP_DMG" -format UDZO -imagekey zlib-level=9 "$DMG" >/dev/null
