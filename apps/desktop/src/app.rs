@@ -3764,7 +3764,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     tab.selected_saved_query_sql = Some(raw_sql);
                     tab.selected_saved_query_connection_id = tab.connection_id.clone();
                     tab.selected_saved_query_database = tab.database.clone();
-                    tab.messages.push(tr!("已更新保存查询").into());
                     tab.active_bottom_tab = QueryBottomTab::History;
                 }
             }
