@@ -5121,7 +5121,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             .header(30.0, |mut header| {
                                 for title in [tr!("字段名"), tr!("类型"), tr!("非空"), "PK", tr!("自增"), tr!("默认值"), tr!("注释"), ""] {
                                     header.col(|ui| {
-                                        table_header_cell(ui, &palette, title, false, None, false);
+                                        table_header_cell(ui, &palette, title, false, None, false, false);
                                     });
                                 }
                             })
@@ -5289,7 +5289,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             .header(30.0, |mut header| {
                                 for title in [tr!("索引名"), tr!("唯一"), tr!("包含列"), ""] {
                                     header.col(|ui| {
-                                        table_header_cell(ui, &palette, title, false, None, false);
+                                        table_header_cell(ui, &palette, title, false, None, false, false);
                                     });
                                 }
                             })
@@ -9017,18 +9017,19 @@ fn render_result_table(
                     table.header(30.0, |mut header| {
                             // Row number header
                             header.col(|ui| {
-                                let _ = table_header_cell(ui, &palette, "#", false, None, false);
+                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false);
                             });
                             for column in &result.columns {
                                 header.col(|ui| {
                                     let is_selected = selected_columns.contains(column);
-                                    let (sort_choice, clicked) = table_header_cell(
+                                    let (sort_choice, clicked, _dragged) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
                                         true,
                                         sort_indicator(sort_state, column),
                                         is_selected,
+                                        false,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
@@ -9260,19 +9261,20 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             // Row number header
                             if show_row_number {
                                 header.col(|ui| {
-                                    let _ = table_header_cell(ui, &palette, "#", false, None, false);
+                                    let _ = table_header_cell(ui, &palette, "#", false, None, false, false);
                                 });
                             }
                             for column in &columns {
                                 header.col(|ui| {
                                     let is_selected = tab.selected_columns.contains(column);
-                                    let (sort_choice, clicked) = table_header_cell(
+                                    let (sort_choice, clicked, _dragged) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
                                         true,
                                         sort_indicator(&tab.preview_sort, column),
                                         is_selected,
+                                        false,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
@@ -10610,11 +10612,11 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                         .column(egui_extras::Column::initial(60.0).at_least(50.0))
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let (_, _) = table_header_cell(ui, &palette, "#", false, None, false);
+                                let (_, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false);
                             });
                             for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键"), tr!("自增")] {
                                 header.col(|ui| {
-                                    let (_, _) = table_header_cell(ui, &palette, title, false, None, false);
+                                    let (_, _, _) = table_header_cell(ui, &palette, title, false, None, false, false);
                                 });
                             }
                         })
@@ -11426,11 +11428,11 @@ fn render_index_table(
                 .column(egui_extras::Column::initial(50.0).at_least(50.0))
                 .header(30.0, |mut header| {
                     header.col(|ui| {
-                        let (_, _) = table_header_cell(ui, palette, "#", false, None, false);
+                        let (_, _, _) = table_header_cell(ui, palette, "#", false, None, false, false);
                     });
                     for title in [tr!("索引名"), tr!("唯一性"), tr!("类型"), tr!("包含列"), tr!("来源"), tr!("删除")] {
                         header.col(|ui| {
-                            let (_, _) = table_header_cell(ui, palette, title, false, None, false);
+                            let (_, _, _) = table_header_cell(ui, palette, title, false, None, false, false);
                         });
                     }
                 })
@@ -11821,12 +11823,12 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                         .column(egui_extras::Column::initial(48.0).at_least(48.0))
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let (_, _) = table_header_cell(ui, &palette, "#", false, None, false);
+                                let (_, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false);
                             });
                             for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键"), tr!("自增"), tr!("删除")] {
                                 header.col(|ui| {
-                                    let (_, _) =
-                                        table_header_cell(ui, &palette, title, false, None, false);
+                                    let (_, _, _) =
+                                        table_header_cell(ui, &palette, title, false, None, false, false);
                                 });
                             }
                         })
@@ -11982,9 +11984,18 @@ fn table_header_cell(
     sortable: bool,
     sort_state: Option<bool>,
     selected: bool,
-) -> (Option<TableHeaderSortChoice>, bool) {
+    dragged: bool,
+) -> (Option<TableHeaderSortChoice>, bool, bool) {
     let mut sort_choice = None;
-    let header_bg = if selected {
+    let header_bg = if dragged {
+        // 被拖拽列：背景降低不透明度，营造"抬起"效果
+        let base = if selected {
+            blend_color(palette.table_header_bg, palette.selection_bg, 0.35)
+        } else {
+            palette.table_header_bg
+        };
+        blend_color(base, Color32::TRANSPARENT, 0.5)
+    } else if selected {
         blend_color(palette.table_header_bg, palette.selection_bg, 0.35)
     } else {
         palette.table_header_bg
@@ -12026,7 +12037,7 @@ fn table_header_cell(
     let cell_response = ui.interact(
         cell_rect,
         ui.next_auto_id(),
-        egui::Sense::click(),
+        egui::Sense::click_and_drag(),
     );
     if sortable && cell_response.clicked() {
         column_clicked = true;
@@ -12069,7 +12080,7 @@ fn table_header_cell(
         subtle_grid_color(palette.table_grid, 40),
         subtle_grid_color(palette.table_grid, 40),
     );
-    (sort_choice, column_clicked)
+    (sort_choice, column_clicked, cell_response.dragged())
 }
 
 fn table_body_cell(
