@@ -72,7 +72,8 @@ echo ""
 echo "=== Building ZIP portable package ==="
 
 ZIP_DIR="target/FreeDB-portable"
-ZIP_FILE="$(pwd)/target/FreeDB-0.1.0-x86_64-portable.zip"
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+ZIP_FILE="$(pwd)/target/FreeDB-${VERSION}-x86_64-portable.zip"
 
 rm -rf "$ZIP_DIR"
 mkdir -p "$ZIP_DIR"
