@@ -194,6 +194,7 @@ fn en(key: &'static str) -> &'static str {
         "耗时" => "Duration",
         "状态" => "Status",
         "操作" => "Actions",
+        "语句" => "Statement",
         "成功" => "Success",
         "失败" => "Failure",
         "字段" => "Columns",

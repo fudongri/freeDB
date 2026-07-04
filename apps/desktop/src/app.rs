@@ -830,7 +830,7 @@ impl DesktopApp {
         services.start_keepalive();
 
         let connections = services.list_connections().unwrap_or_default();
-        let selected_connection = services.load_ui_state("selected_connection").ok().flatten();
+        let selected_connection = None;
         let sidebar_width = services
             .load_ui_state("sidebar_width")
             .ok()
@@ -1007,9 +1007,6 @@ impl DesktopApp {
         if !self.active_connections.contains_key(&connection_id) {
             self.loading_connections.insert(connection_id.clone());
         }
-        let _ = self
-            .services
-            .save_ui_state("selected_connection", &connection_id);
         self.status_message = tr!("正在连接 {}...", self.connection_name(&connection_id));
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
@@ -5262,6 +5259,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .map(|item| item.name.clone())
             .unwrap_or_else(|| tr!("请选择连接").into());
         let tab_db_kind = tab.connection_id.as_deref()
+            .or(selected_connection.as_deref())
             .and_then(|cid| connections.iter().find(|c| c.id == cid).map(|c| c.kind));
         let has_result = (tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
             || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan))
@@ -5896,6 +5894,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     });
                                                 });
                                                 ui.add_space(4.0);
+                                                let conn_name = tab.connection_id.as_ref()
+                                                    .and_then(|cid| connections.iter().find(|c| &c.id == cid))
+                                                    .map(|c| c.name.clone())
+                                                    .unwrap_or_default();
+                                                let db_name = tab.database.clone().unwrap_or_default();
                                                 let available_width = ui.available_width();
                                                 let table = egui_extras::TableBuilder::new(ui)
                                                     .vscroll(false)
@@ -5904,13 +5907,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     .column(egui_extras::Column::exact(150.0))  // 时间
                                                     .column(egui_extras::Column::exact(60.0))   // 耗时
                                                     .column(egui_extras::Column::exact(50.0))   // 状态
-                                                    .column(egui_extras::Column::remainder())   // SQL
+                                                    .column(egui_extras::Column::exact(100.0))  // 连接
+                                                    .column(egui_extras::Column::exact(100.0))  // 数据库
+                                                    .column(egui_extras::Column::remainder())   // 语句
                                                     .column(egui_extras::Column::exact(60.0))   // 操作
                                                     .header(24.0, |mut header| {
                                                         header.col(|ui| { ui.label(RichText::new(tr!("执行时间")).size(11.0).color(chrome.weak_text)); });
                                                         header.col(|ui| { ui.label(RichText::new(tr!("耗时")).size(11.0).color(chrome.weak_text)); });
                                                         header.col(|ui| { ui.label(RichText::new(tr!("状态")).size(11.0).color(chrome.weak_text)); });
-                                                        header.col(|ui| { ui.label(RichText::new("SQL").size(11.0).color(chrome.weak_text)); });
+                                                        header.col(|ui| { ui.label(RichText::new(tr!("连接")).size(11.0).color(chrome.weak_text)); });
+                                                        header.col(|ui| { ui.label(RichText::new(tr!("数据库")).size(11.0).color(chrome.weak_text)); });
+                                                        header.col(|ui| { ui.label(RichText::new(tr!("语句")).size(11.0).color(chrome.weak_text)); });
                                                         header.col(|ui| { ui.label(RichText::new(tr!("操作")).size(11.0).color(chrome.weak_text)); });
                                                     })
                                                     .body(|mut body| {
@@ -5931,6 +5938,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     } else {
                                                                         ui.label(RichText::new(tr!("失败")).size(11.0).color(chrome.danger));
                                                                     }
+                                                                });
+                                                                row.col(|ui| {
+                                                                    ui.label(RichText::new(truncate_ui_label(&conn_name, 15)).size(11.0).color(chrome.weak_text));
+                                                                });
+                                                                row.col(|ui| {
+                                                                    ui.label(RichText::new(truncate_ui_label(&db_name, 15)).size(11.0).color(chrome.weak_text));
                                                                 });
                                                                 row.col(|ui| {
                                                                     ui.label(RichText::new(truncate_ui_label(&preview, 80)).size(11.0).color(chrome.text));
@@ -8895,6 +8908,9 @@ impl eframe::App for DesktopApp {
             }
         }
 
+        // 缩短悬停提示延迟
+        ctx.style_mut(|s| s.interaction.tooltip_delay = 0.1);
+
         // 延迟初始化原生菜单栏：winit 启动时会创建默认菜单，
         // 必须在第一帧 update() 时才挂载我们的菜单，否则会被覆盖。
         if !self.native_menu_initialized {
@@ -9575,10 +9591,6 @@ impl eframe::App for DesktopApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let _ = self.services.save_ui_state(
-            "selected_connection",
-            self.selected_connection.as_deref().unwrap_or(""),
-        );
         let _ = self
             .services
             .save_ui_state("sidebar_width", &format!("{:.1}", self.sidebar_width));

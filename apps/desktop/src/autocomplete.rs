@@ -536,72 +536,32 @@ fn detect_mongo_context(sql: &str, cursor: usize) -> MongoContext {
 
     let after_db = &prefix[3..]; // everything after "db."
 
-    // Check for collection + dot (with optional method): db.coll. or db.coll.word
-    if let Some(caps) = regex_captures(r"^([a-zA-Z0-9_]+)\.[a-zA-Z0-9_]*\.?$", after_db) {
+    // Check for collection + dot (with optional method): db.coll. or db.coll.method(
+    if let Some(caps) = regex_captures2(r"^([a-zA-Z0-9_]+)\.(.*)$", after_db) {
         let collection = caps.1.to_string();
+        let rest = caps.2;
 
-        // Check if inside method args: db.coll.method(
-        let method_pattern = format!("db.{}.", collection);
-        if let Some(after_method_prefix) = prefix.strip_prefix(&method_pattern) {
-            // Walk backwards to find the method name before the last '('
-            let chars: Vec<char> = after_method_prefix.chars().collect();
-            let mut depth = 0i32;
-            let mut in_sq = false;
-            let mut in_dq = false;
-            let mut found_paren = false;
-            for &c in chars.iter().rev() {
-                if in_dq { if c == '"' { in_dq = false; } continue; }
-                if in_sq { if c == '\'' { in_sq = false; } continue; }
-                match c {
-                    '"' => in_dq = true,
-                    '\'' => in_sq = true,
-                    ')' => depth += 1,
-                    '(' => {
-                        if depth > 0 { depth -= 1; }
-                        else { found_paren = true; break; }
-                    }
-                    _ => {}
+        if !rest.is_empty() {
+            // Extract the current method being typed/used
+            // For "find(" → method = "find", for "find().sort(" → method = "sort"
+            let method_part = if let Some(paren_pos) = rest.rfind('(') {
+                &rest[..paren_pos]
+            } else {
+                rest
+            };
+            let method = method_part.rsplit('.').next().unwrap_or("").trim();
+            if !method.is_empty() && method.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                // Has opening paren → inside method args
+                if rest.contains('(') {
+                    return MongoContext::AfterMethod { collection, method: method.to_string() };
                 }
-            }
-            if found_paren {
-                // Check if we're inside a method's args
-                // Find the method name by looking at what's before the (
-                let before_paren = {
-                    let mut d = 0i32;
-                    let mut sq = false;
-                    let mut dq = false;
-                    let mut pos = None;
-                    for (i, &c) in chars.iter().enumerate().rev() {
-                        if dq { if c == '"' { dq = false; } continue; }
-                        if sq { if c == '\'' { sq = false; } continue; }
-                        match c {
-                            '"' => dq = true,
-                            '\'' => sq = true,
-                            ')' => d += 1,
-                            '(' => {
-                                if d > 0 { d -= 1; }
-                                else { pos = Some(i); break; }
-                            }
-                            _ => {}
-                        }
-                    }
-                    pos.map(|p| &after_method_prefix[..p])
-                };
-                if let Some(before_p) = before_paren {
-                    let method = before_p.rsplit('.').next().unwrap_or("").trim();
-                    if !method.is_empty() {
-                        return MongoContext::AfterMethod { collection, method: method.to_string() };
-                    }
-                }
+                // No paren yet → still typing method name, show collection methods
+                return MongoContext::AfterCollection { collection };
             }
         }
 
-        // Has trailing dot: AfterCollection
-        if after_db.ends_with('.') {
-            return MongoContext::AfterCollection { collection };
-        }
-        // db.coll without trailing dot = still typing collection
-        return MongoContext::AfterDbDot;
+        // rest is empty or only dot → AfterCollection
+        return MongoContext::AfterCollection { collection };
     }
 
     // db. with nothing or partial identifier after
@@ -644,6 +604,25 @@ fn regex_captures<'a>(pattern: &str, text: &'a str) -> Option<(&'a str, &'a str)
         return None;
     }
     Some((text, first))
+}
+
+/// Extract captures: ^([a-zA-Z0-9_]+)\.(.*)$
+fn regex_captures2<'a>(pattern: &str, text: &'a str) -> Option<(&'a str, &'a str, &'a str)> {
+    if !pattern.contains("[a-zA-Z0-9_]+") || !pattern.contains("(.*)") {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    if i == 0 || i >= bytes.len() || bytes[i] != b'.' {
+        return None;
+    }
+    let first = &text[..i];
+    i += 1; // skip .
+    let second = &text[i..];
+    Some((text, first, second))
 }
 
 pub(crate) struct AutocompleteEngine;
