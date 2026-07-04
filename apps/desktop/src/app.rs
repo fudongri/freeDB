@@ -283,6 +283,7 @@ struct QueryTabState {
     explain_tree: Option<Vec<ExplainNode>>,
     is_explain: bool,
     explain_view_mode: ExplainViewMode,
+    query_explain_json: Option<String>,
     search: TableSearchState,
     find: EditorFindState,
     /// 可编辑查询上下文（简单单表 SELECT 时自动创建）
@@ -1337,14 +1338,27 @@ impl DesktopApp {
                                         // EXPLAIN 结果解析
                                         if message.is_explain {
                                             query_tab.explain_tree = Some(parse_explain_result(&result, db_kind));
+                                            // MongoDB: 从结果中提取 JSON 存入专用字段
+                                            if db_kind == DatabaseKind::MongoDb {
+                                                if let Some(first_row) = result.rows.first() {
+                                                    if let Some(QueryCellValue::Text(json)) = first_row.get("executionPlan") {
+                                                        query_tab.query_explain_json = Some(json.clone());
+                                                        query_tab.active_bottom_tab = QueryBottomTab::ExplainPlan;
+                                                    }
+                                                }
+                                            }
                                         }
-                                        query_tab.multi_results.push(result.clone());
-                                        query_tab.multi_statements.push(message.statement.clone());
-                                        if query_tab.multi_results.len() == 1 {
-                                            let mut display_result = result;
-                                            apply_saved_table_sort(&mut display_result, &mut query_tab.result_sort);
-                                            query_tab.result = Some(display_result);
-                                            query_tab.selected_result_index = 0;
+                                        // MongoDB EXPLAIN 结果只存入 JSON 视图，不加入结果表格
+                                        let is_mongo_explain = message.is_explain && db_kind == DatabaseKind::MongoDb;
+                                        if !is_mongo_explain {
+                                            query_tab.multi_results.push(result.clone());
+                                            query_tab.multi_statements.push(message.statement.clone());
+                                            if query_tab.multi_results.len() == 1 {
+                                                let mut display_result = result;
+                                                apply_saved_table_sort(&mut display_result, &mut query_tab.result_sort);
+                                                query_tab.result = Some(display_result);
+                                                query_tab.selected_result_index = 0;
+                                            }
                                         }
                                         query_tab.bottom_panel_collapsed = false;
                                     }
@@ -2291,6 +2305,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         query_tab.explain_tree = None;
         query_tab.is_explain = false;
         query_tab.explain_view_mode = ExplainViewMode::Tree;
+        query_tab.query_explain_json = None;
         query_tab.edit_context = None;
 
         // 检测是否为 EXPLAIN 查询
@@ -5249,10 +5264,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let tab_db_kind = tab.connection_id.as_deref()
             .and_then(|cid| connections.iter().find(|c| c.id == cid).map(|c| c.kind));
         let has_result = (tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
-            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages))
+            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan))
             && !tab.bottom_panel_collapsed;
         let has_result_data = tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
-            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages);
+            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan);
         // 首次打开编辑器高度取默认值
         let editor_height = tab.editor_height.unwrap_or(200.0);
         let mut query_batch_dialog_open = pending_query_batch_save;
@@ -5666,6 +5681,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         tab.active_bottom_tab = QueryBottomTab::Results;
                                     }
                                 }
+                                // 执行计划 tab（有 explain 数据时显示）
+                                if tab.query_explain_json.is_some() {
+                                    let label = QueryBottomTab::ExplainPlan.label();
+                                    if segment_button(ui, label, tab.active_bottom_tab == QueryBottomTab::ExplainPlan).clicked() {
+                                        tab.active_bottom_tab = QueryBottomTab::ExplainPlan;
+                                    }
+                                }
                                 for pane in [
                                     QueryBottomTab::Messages,
                                     QueryBottomTab::History,
@@ -5758,6 +5780,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             .unwrap_or_else(|| tr!("等待执行").into()),
                                         QueryBottomTab::Messages => tr!("{} 条消息", tab.messages.len() + usize::from(tab.error.is_some())),
                                         QueryBottomTab::History => tr!("{} 条历史", tab.history.len()),
+                                        QueryBottomTab::ExplainPlan => tr!("执行计划").into(),
                                     };
                                     ui.label(RichText::new(summary).size(11.5).color(chrome.weak_text));
                                 });
@@ -5923,6 +5946,24 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     });
                                             }
                                         });
+                                }
+                                QueryBottomTab::ExplainPlan => {
+                                    if let Some(ref json) = tab.query_explain_json {
+                                        egui::ScrollArea::both()
+                                            .id_salt(format!("query-explain-{}", tab.id))
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                let font = FontId::new(12.0, FontFamily::Monospace);
+                                                egui::Frame::new()
+                                                    .fill(chrome.search_bg)
+                                                    .stroke(Stroke::new(1.0, chrome.soft_border))
+                                                    .corner_radius(6.0)
+                                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                                    .show(ui, |ui| {
+                                                        ui.label(RichText::new(json.as_str()).font(font).color(chrome.text));
+                                                    });
+                                            });
+                                    }
                                 }
                             }
                         });
@@ -9596,6 +9637,7 @@ impl QueryTabState {
             explain_tree: None,
             is_explain: false,
             explain_view_mode: ExplainViewMode::Tree,
+            query_explain_json: None,
             search: TableSearchState::default(),
             find: EditorFindState::default(),
             edit_context: None,
@@ -9799,6 +9841,7 @@ enum QueryBottomTab {
     Results,
     Messages,
     History,
+    ExplainPlan,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -9892,6 +9935,7 @@ impl QueryBottomTab {
             Self::Results => tr!("结果"),
             Self::Messages => tr!("消息"),
             Self::History => tr!("历史"),
+            Self::ExplainPlan => tr!("执行计划"),
         }
     }
 }
@@ -9911,7 +9955,7 @@ impl TableViewMode {
 
 fn is_explain_query(sql: &str) -> bool {
     let trimmed = sql.trim().to_ascii_lowercase();
-    trimmed.starts_with("explain")
+    trimmed.starts_with("explain") || trimmed.contains(".explain()")
 }
 
 /// 检测 SQL 是否为简单单表 SELECT 查询（无 JOIN/子查询/聚合等）。
@@ -17721,6 +17765,8 @@ fn toolbar_button(
 ) -> egui::Response {
     toolbar_button_sized(ui, label, kind, None)
 }
+
+
 
 fn toolbar_button_sized(
     ui: &mut egui::Ui,

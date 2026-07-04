@@ -169,6 +169,7 @@ fn en(key: &'static str) -> &'static str {
         "格式化" => "Format",
         "解释" => "Explain",
         "EXPLAIN 执行计划" => "EXPLAIN execution plan",
+        "执行计划" => "Execution Plan",
         "连接" => "Connection",
         "数据库" => "Database",
         "请选择连接" => "Select a connection",
