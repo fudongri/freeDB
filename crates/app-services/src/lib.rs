@@ -364,7 +364,7 @@ impl AppServices {
         let title = title.trim();
         let sql_text = sql_text.trim();
         if sql_text.is_empty() {
-            return Err(anyhow!("{}", tr!("没有可保存的 SQL")));
+            return Err(anyhow!("{}", tr!("没有可保存的语句")));
         }
         let title = if title.is_empty() {
             build_saved_query_title(sql_text)
@@ -425,7 +425,7 @@ impl AppServices {
     pub fn update_saved_query(&self, id: &str, sql_text: &str, connection_id: &str, database: Option<&str>) -> Result<()> {
         let sql_text = sql_text.trim();
         if sql_text.is_empty() {
-            return Err(anyhow!("{}", tr!("SQL 内容不能为空")));
+            return Err(anyhow!("{}", tr!("语句内容不能为空")));
         }
         self.history_store.update_saved_query(id, sql_text, connection_id, database)
     }

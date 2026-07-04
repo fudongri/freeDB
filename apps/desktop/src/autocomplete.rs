@@ -1,4 +1,4 @@
-use core_domain::ColumnDefinition;
+use core_domain::{ColumnDefinition, DatabaseKind};
 use eframe::egui::{self, Align2, Area, Color32, FontFamily, FontId, Id, Order, RichText, ScrollArea, Sense, Stroke};
 use eframe::egui::text::{LayoutJob, TextFormat};
 use i18n::tr;
@@ -60,6 +60,7 @@ pub(crate) enum SuggestionKind {
     View,
     Column { parent_table: String },
     Keyword,
+    MongoKeyword,
 }
 
 /// Schema metadata cache for autocomplete.
@@ -479,6 +480,172 @@ pub(crate) const SQL_KEYWORDS: &[&str] = &[
     "CURRENT", "INTERVAL", "CAST", "COALESCE", "NULLIF",
 ];
 
+const MONGO_METHODS: &[&str] = &[
+    "find", "findOne", "aggregate", "insertOne", "insertMany",
+    "updateOne", "updateMany", "deleteOne", "deleteMany",
+    "countDocuments", "distinct", "createIndex", "dropIndex", "drop",
+    "bulkWrite", "replaceOne", "findOneAndUpdate", "findOneAndDelete",
+    "findOneAndReplace",
+];
+
+const MONGO_CURSOR_METHODS: &[&str] = &[
+    "sort", "limit", "skip", "project", "collation", "hint", "comment", "explain",
+    "allowDiskUse", "batchSize", "maxTimeMS",
+];
+
+const MONGO_OPERATORS: &[&str] = &[
+    "$match", "$group", "$sort", "$limit", "$skip", "$project",
+    "$unwind", "$lookup", "$addFields", "$count", "$out", "$merge",
+    "$set", "$unset", "$push", "$pull", "$addToSet", "$rename",
+    "$min", "$max", "$currentDate", "$mul", "$inc",
+    "$gt", "$gte", "$lt", "$lte", "$eq", "$ne", "$in", "$nin",
+    "$and", "$or", "$not", "$nor", "$exists", "$type", "$regex",
+    "$sum", "$avg", "$first", "$last", "$size", "$elemMatch", "$all", "$slice",
+    "$arrayFilters", "$position",
+];
+
+/// MongoDB 查询上下文
+enum MongoContext {
+    /// db. → 建议集合名
+    AfterDbDot,
+    /// db.coll. → 建议方法名
+    AfterCollection { collection: String },
+    /// db.coll.method( → 在方法参数内，建议操作符
+    AfterMethod { collection: String, method: String },
+    /// 非 MongoDB 查询
+    NotMongo,
+}
+
+fn detect_mongo_context(sql: &str, cursor: usize) -> MongoContext {
+    let before = &sql[..cursor];
+    if !before.starts_with("db.") && !before.contains("\ndb.") {
+        return MongoContext::NotMongo;
+    }
+
+    let prefix = if let Some(pos) = before.rfind("\ndb.") {
+        &before[pos + 1..]
+    } else if before.starts_with("db.") {
+        before
+    } else {
+        return MongoContext::NotMongo;
+    };
+
+    if !prefix.starts_with("db.") {
+        return MongoContext::NotMongo;
+    }
+
+    let after_db = &prefix[3..]; // everything after "db."
+
+    // Check for collection + dot (with optional method): db.coll. or db.coll.word
+    if let Some(caps) = regex_captures(r"^([a-zA-Z0-9_]+)\.[a-zA-Z0-9_]*\.?$", after_db) {
+        let collection = caps.1.to_string();
+
+        // Check if inside method args: db.coll.method(
+        let method_pattern = format!("db.{}.", collection);
+        if let Some(after_method_prefix) = prefix.strip_prefix(&method_pattern) {
+            // Walk backwards to find the method name before the last '('
+            let chars: Vec<char> = after_method_prefix.chars().collect();
+            let mut depth = 0i32;
+            let mut in_sq = false;
+            let mut in_dq = false;
+            let mut found_paren = false;
+            for &c in chars.iter().rev() {
+                if in_dq { if c == '"' { in_dq = false; } continue; }
+                if in_sq { if c == '\'' { in_sq = false; } continue; }
+                match c {
+                    '"' => in_dq = true,
+                    '\'' => in_sq = true,
+                    ')' => depth += 1,
+                    '(' => {
+                        if depth > 0 { depth -= 1; }
+                        else { found_paren = true; break; }
+                    }
+                    _ => {}
+                }
+            }
+            if found_paren {
+                // Check if we're inside a method's args
+                // Find the method name by looking at what's before the (
+                let before_paren = {
+                    let mut d = 0i32;
+                    let mut sq = false;
+                    let mut dq = false;
+                    let mut pos = None;
+                    for (i, &c) in chars.iter().enumerate().rev() {
+                        if dq { if c == '"' { dq = false; } continue; }
+                        if sq { if c == '\'' { sq = false; } continue; }
+                        match c {
+                            '"' => dq = true,
+                            '\'' => sq = true,
+                            ')' => d += 1,
+                            '(' => {
+                                if d > 0 { d -= 1; }
+                                else { pos = Some(i); break; }
+                            }
+                            _ => {}
+                        }
+                    }
+                    pos.map(|p| &after_method_prefix[..p])
+                };
+                if let Some(before_p) = before_paren {
+                    let method = before_p.rsplit('.').next().unwrap_or("").trim();
+                    if !method.is_empty() {
+                        return MongoContext::AfterMethod { collection, method: method.to_string() };
+                    }
+                }
+            }
+        }
+
+        // Has trailing dot: AfterCollection
+        if after_db.ends_with('.') {
+            return MongoContext::AfterCollection { collection };
+        }
+        // db.coll without trailing dot = still typing collection
+        return MongoContext::AfterDbDot;
+    }
+
+    // db. with nothing or partial identifier after
+    if after_db.is_empty()
+        || after_db.ends_with('.')
+        || after_db.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return MongoContext::AfterDbDot;
+    }
+
+    MongoContext::NotMongo
+}
+
+/// Extract captures from a regex-like pattern (simplified helper).
+fn regex_captures<'a>(pattern: &str, text: &'a str) -> Option<(&'a str, &'a str)> {
+    // Manually implement: ^([a-zA-Z0-9_]+)\.[a-zA-Z0-9_]*\.?$
+    if !pattern.contains("[a-zA-Z0-9_]+") {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    // Match ^[a-zA-Z0-9_]+\.
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    if i == 0 || i >= bytes.len() || bytes[i] != b'.' {
+        return None;
+    }
+    let first = &text[..i];
+    i += 1; // skip .
+    // Match [a-zA-Z0-9_]*\.?$
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    // Optional trailing dot
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+    }
+    if i != bytes.len() {
+        return None;
+    }
+    Some((text, first))
+}
+
 pub(crate) struct AutocompleteEngine;
 
 impl AutocompleteEngine {
@@ -488,7 +655,17 @@ impl AutocompleteEngine {
         cursor_char_index: usize,
         cache: &SchemaCache,
         connection_id: Option<&str>,
+        db_kind: Option<DatabaseKind>,
     ) -> Vec<AutocompleteSuggestion> {
+        // MongoDB 模式下优先检测 MongoDB 查询
+        if db_kind == Some(DatabaseKind::MongoDb) {
+            let mongo_ctx = detect_mongo_context(sql, cursor_char_index);
+            if !matches!(mongo_ctx, MongoContext::NotMongo) {
+                let prefix = SqlContextParser::current_token_prefix(sql, cursor_char_index);
+                return Self::suggest_mongo(mongo_ctx, &prefix, cache);
+            }
+        }
+
         let prefix = SqlContextParser::current_token_prefix(sql, cursor_char_index);
         let context = SqlContextParser::parse(sql, cursor_char_index);
 
@@ -685,6 +862,49 @@ impl AutocompleteEngine {
         Self::rank(filtered, &prefix)
     }
 
+    fn suggest_mongo(
+        ctx: MongoContext,
+        prefix: &str,
+        cache: &SchemaCache,
+    ) -> Vec<AutocompleteSuggestion> {
+        let mut suggestions = Vec::new();
+        match ctx {
+            MongoContext::AfterDbDot => {
+                for name in cache.table_names() {
+                    suggestions.push(AutocompleteSuggestion::new(
+                        name.to_string(),
+                        SuggestionKind::Table,
+                    ));
+                }
+            }
+            MongoContext::AfterCollection { .. } => {
+                for m in MONGO_METHODS {
+                    suggestions.push(AutocompleteSuggestion::new(
+                        m.to_string(),
+                        SuggestionKind::MongoKeyword,
+                    ));
+                }
+                for m in MONGO_CURSOR_METHODS {
+                    suggestions.push(AutocompleteSuggestion::new(
+                        m.to_string(),
+                        SuggestionKind::MongoKeyword,
+                    ));
+                }
+            }
+            MongoContext::AfterMethod { .. } => {
+                for op in MONGO_OPERATORS {
+                    suggestions.push(AutocompleteSuggestion::new(
+                        op.to_string(),
+                        SuggestionKind::MongoKeyword,
+                    ));
+                }
+            }
+            MongoContext::NotMongo => {}
+        }
+        let filtered = Self::filter_by_prefix(suggestions, prefix);
+        Self::rank(filtered, prefix)
+    }
+
     fn filter_by_prefix(
         suggestions: Vec<AutocompleteSuggestion>,
         prefix: &str,
@@ -736,6 +956,7 @@ impl AutocompleteEngine {
                 SuggestionKind::View => 3,
                 SuggestionKind::Column { .. } => 4,
                 SuggestionKind::Keyword => 5,
+                SuggestionKind::MongoKeyword => 5,
             };
             let a_kind = kind_order(&a.kind);
             let b_kind = kind_order(&b.kind);
@@ -793,6 +1014,7 @@ pub(crate) fn suggestion_kind_icon(kind: SuggestionKind) -> &'static str {
         SuggestionKind::View => "\u{1F441}",
         SuggestionKind::Column { .. } => "\u{1F4CB}",
         SuggestionKind::Keyword => "\u{1F511}",
+        SuggestionKind::MongoKeyword => "\u{26AB}",
     }
 }
 
@@ -805,6 +1027,7 @@ pub(crate) fn suggestion_kind_label(kind: SuggestionKind) -> String {
         SuggestionKind::View => tr!("视图").to_string(),
         SuggestionKind::Column { parent_table } => tr!("列 · {}", parent_table),
         SuggestionKind::Keyword => tr!("关键字").to_string(),
+        SuggestionKind::MongoKeyword => "Mongo".to_string(),
     }
 }
 

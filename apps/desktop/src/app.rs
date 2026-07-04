@@ -1347,7 +1347,7 @@ impl DesktopApp {
                                         query_tab.bottom_panel_collapsed = false;
                                     }
                                     if message.is_last {
-                                        self.status_message = tr!("SQL 执行完成").into();
+                                        self.status_message = tr!("执行完成").into();
                                         if !query_tab.multi_results.is_empty() {
                                             query_tab.active_bottom_tab = QueryBottomTab::Results;
                                         }
@@ -1381,7 +1381,7 @@ impl DesktopApp {
                                     query_tab.bottom_panel_collapsed = false;
                                     query_tab.abort_sender = None;
                                     keep_receiver = false;
-                                    self.status_message = tr!("SQL 执行失败").into();
+                                    self.status_message = tr!("执行失败").into();
                                     self.status_level = StatusLevel::Error;
                                     let (history, saved_queries, all_saved_queries) =
                                         load_query_library(&services, &message.connection_id);
@@ -2216,7 +2216,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn execute_current_query(&mut self, mode: ExecuteMode) {
         if self.pending_query_execution.is_some() {
-            self.status_message = tr!("当前已有 SQL 正在执行").into();
+            self.status_message = tr!("当前已有语句正在执行").into();
             return;
         }
 
@@ -2247,35 +2247,35 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             ExecuteMode::Selection(selected) => {
                 if let Some(sql) = selected {
                     if sql.trim().is_empty() {
-                        self.status_message = tr!("请先选中要执行的 SQL").into();
+                        self.status_message = tr!("请先选中要执行的语句").into();
                         query_tab
                             .messages
-                            .push(tr!("未执行：请先在编辑器中选中要执行的 SQL").into());
+                            .push(tr!("未执行：请先在编辑器中选中要执行的语句").into());
                         return;
                     }
                     sql
                 } else {
-                    self.status_message = tr!("请先选中要执行的 SQL").into();
+                    self.status_message = tr!("请先选中要执行的语句").into();
                     query_tab
                         .messages
-                        .push(tr!("未执行：请先在编辑器中选中要执行的 SQL").into());
+                        .push(tr!("未执行：请先在编辑器中选中要执行的语句").into());
                     return;
                 }
             }
         };
 
         if sql.trim().is_empty() {
-            self.status_message = tr!("没有可执行的 SQL").into();
+            self.status_message = tr!("没有可执行的语句").into();
             query_tab
                 .messages
-                .push(tr!("未执行：未检测到选中 SQL 或当前语句").into());
+                .push(tr!("未执行：未检测到选中语句").into());
             return;
         }
 
         // 按分号拆分为多条独立语句
         let statements = split_sql_statements(&sql);
         if statements.is_empty() {
-            self.status_message = tr!("没有可执行的 SQL").into();
+            self.status_message = tr!("没有可执行的语句").into();
             return;
         }
 
@@ -2323,7 +2323,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
         self.pending_query_execution = Some(receiver);
         query_tab.abort_sender = Some(std::sync::Arc::new(tokio::sync::Mutex::new(abort_tx)));
-        self.status_message = tr!("正在执行 SQL...").into();
+        self.status_message = tr!("正在执行...").into();
         let explain_flag = is_explain;
 
         handle.spawn(async move {
@@ -2379,12 +2379,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             ExecuteMode::Whole => query_tab.sql.trim().to_string(),
             ExecuteMode::Selection(Some(ref s)) if !s.trim().is_empty() => s.clone(),
             _ => {
-                self.status_message = tr!("请先选中要执行的 SQL").into();
+                self.status_message = tr!("请先选中要执行的语句").into();
                 return;
             }
         };
         if sql.is_empty() {
-            self.status_message = tr!("没有可执行的 SQL").into();
+            self.status_message = tr!("没有可执行的语句").into();
             return;
         }
 
@@ -3324,7 +3324,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             let dump_label = if kind == DatabaseKind::MongoDb {
                                 tr!("转储数据 ▸")
                             } else {
-                                tr!("转储 SQL ▸")
+                                tr!("转储 ▸")
                             };
                             ui.menu_button(dump_label, |ui| {
                                 if ui.button(tr!("仅结构")).clicked() {
@@ -3480,7 +3480,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let dump_label = if node_kind == DatabaseKind::MongoDb {
                             tr!("转储数据 ▸")
                         } else {
-                            tr!("转储 SQL ▸")
+                            tr!("转储 ▸")
                         };
                         // 转储子菜单
                         ui.menu_button(dump_label, |ui| {
@@ -4121,7 +4121,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             _ => return,
         };
         if sql.is_empty() {
-            self.status_message = tr!("没有可保存的 SQL").into();
+            self.status_message = tr!("没有可保存的语句").into();
             if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
                 tab.messages.push(tr!("保存失败：当前编辑器为空").into());
                 tab.active_bottom_tab = QueryBottomTab::Messages;
@@ -5202,6 +5202,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .and_then(|id| connections.iter().find(|item| &item.id == id))
             .map(|item| item.name.clone())
             .unwrap_or_else(|| tr!("请选择连接").into());
+        let tab_db_kind = tab.connection_id.as_deref()
+            .and_then(|cid| connections.iter().find(|c| c.id == cid).map(|c| c.kind));
         let has_result = (tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
             || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages))
             && !tab.bottom_panel_collapsed;
@@ -5253,8 +5255,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     toolbar_button(ui, tr!("执行全部"), exec_kind);
                                 }
                                 if exec_sel_enabled {
-                                    if toolbar_button(ui, tr!("执行选中SQL"), exec_kind)
-                                        .on_hover_text(tr!("执行选中SQL ({}+R)", MOD_KEY))
+                                    if toolbar_button(ui, tr!("执行选中语句"), exec_kind)
+                                        .on_hover_text(tr!("执行选中语句 ({}+R)", MOD_KEY))
                                         .clicked()
                                     {
                                         let selected = tab.cursor_range
@@ -5262,7 +5264,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         action = TabUiAction::ExecuteQuery(ExecuteMode::Selection(selected));
                                     }
                                 } else {
-                                    toolbar_button(ui, tr!("执行选中SQL"), exec_kind);
+                                    toolbar_button(ui, tr!("执行选中语句"), exec_kind);
                                 }
                                 // 停止按钮：执行中显示
                                 if is_executing {
@@ -5299,7 +5301,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }
                                 }
                                 if toolbar_button(ui, tr!("格式化"), ToolbarButtonKind::Subtle).clicked() {
-                                    tab.sql = simple_format_sql(&tab.sql);
+                                    let conn_id = tab.connection_id.as_deref().or(selected_connection.as_deref());
+                                    let db_kind = conn_id.and_then(|cid|
+                                        connections.iter().find(|c| c.id == cid).map(|c| c.kind)
+                                    );
+                                    tab.sql = if db_kind == Some(DatabaseKind::MongoDb) {
+                                        format_mongo_command(&tab.sql)
+                                    } else {
+                                        simple_format_sql(&tab.sql)
+                                    };
                                 }
                                 // EXPLAIN 按钮（放在格式化后面）
                                 if !is_executing {
@@ -5450,6 +5460,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         editor_inner_height,
                                                         &mut action,
                                                         schema_cache,
+                                                        tab_db_kind,
                                                     );
                                                 });
                                             });
@@ -5490,6 +5501,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         editor_inner_height,
                                                         &mut action,
                                                         schema_cache,
+                                                        tab_db_kind,
                                                     );
                                                 });
                                             });
@@ -5699,7 +5711,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     base
                                                 }
                                             })
-                                            .unwrap_or_else(|| tr!("等待执行 SQL").into()),
+                                            .unwrap_or_else(|| tr!("等待执行").into()),
                                         QueryBottomTab::Messages => tr!("{} 条消息", tab.messages.len() + usize::from(tab.error.is_some())),
                                         QueryBottomTab::History => tr!("{} 条历史", tab.history.len()),
                                     };
@@ -5790,7 +5802,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 render_query_empty_state(
                                                     ui,
                                                     tr!("暂无执行历史"),
-                                                    tr!("执行过的 SQL 会显示在这里，方便再次使用"),
+                                                    tr!("执行过的语句会显示在这里，方便再次使用"),
                                                 );
                                             } else {
                                                 ui.horizontal(|ui| {
@@ -5891,7 +5903,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             // 索引
             if segment_button_color(ui, tr!("索引"), seg_idxs, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Indexes; }
             // SQL预览 / 脚本预览
-            let sql_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("脚本预览") } else { tr!("SQL预览") };
+            let sql_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("语句预览") } else { tr!("语句预览") };
             if segment_button_color(ui, sql_label, seg_sql, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Sql; }
             ui.add_space(12.0);
             let name_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("集合名:") } else { tr!("表名:") };
@@ -5976,7 +5988,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(tr!("SQL 预览")).strong().color(palette.weak_text));
+                            ui.label(RichText::new(tr!("语句预览")).strong().color(palette.weak_text));
                         });
                         ui.add_space(4.0);
                         ui.add(
@@ -6870,7 +6882,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 ui.add_sized(
                                                                     [360.0, 22.0],
                                                                     TextEdit::singleline(&mut clause.value)
-                                                                        .hint_text(tr!("输入原始 SQL 条件")),
+                                                                        .hint_text(tr!("输入原始条件")),
                                                                 );
                                                             } else if clause.operator.uses_secondary_value() {
                                                                 ui.add_sized(
@@ -6957,7 +6969,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     ui.add_space(8.0);
                                                     ui.horizontal(|ui| {
                                                         ui.small(
-                                                            RichText::new(tr!("预览 SQL"))
+                                                            RichText::new(tr!("预览语句"))
                                                                 .strong()
                                                                 .color(palette.weak_text),
                                                         );
@@ -6990,7 +7002,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             text: live_preview_sql
                                                                                 .clone(),
                                                                             status_message:
-                                                                                tr!("已复制预览 SQL")
+                                                                                tr!("已复制预览语句")
                                                                                     .into(),
                                                                         };
                                                                 }
@@ -9146,13 +9158,18 @@ impl eframe::App for DesktopApp {
                 }
             });
             if arrow_up || arrow_down {
+                let tab_conn_id = match self.tabs.get(self.active_tab) {
+                    Some(WorkspaceTab::Query(t)) => t.connection_id.clone(),
+                    _ => None,
+                };
+                let db_kind = tab_conn_id.as_deref().map(|cid| self.database_kind_for_connection(cid));
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-                    let conn_id = tab.connection_id.as_deref();
                     let suggestion_count = AutocompleteEngine::suggest(
                         &tab.sql,
                         tab.cursor_range.map(|r| r.primary.index).unwrap_or(tab.sql.len()),
                         &self.schema_cache,
-                        conn_id,
+                        tab_conn_id.as_deref(),
+                        db_kind,
                     )
                     .len();
                     if arrow_up {
@@ -9187,14 +9204,19 @@ impl eframe::App for DesktopApp {
                 }
             });
             if enter_tab_pressed {
+                let tab_conn_id = match self.tabs.get(self.active_tab) {
+                    Some(WorkspaceTab::Query(t)) => t.connection_id.clone(),
+                    _ => None,
+                };
+                let db_kind = tab_conn_id.as_deref().map(|cid| self.database_kind_for_connection(cid));
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
                     let cursor = tab.cursor_range.map(|r| r.primary.index).unwrap_or(tab.sql.len());
-                    let conn_id = tab.connection_id.as_deref();
                     let suggestions = AutocompleteEngine::suggest(
                         &tab.sql,
                         cursor,
                         &self.schema_cache,
-                        conn_id,
+                        tab_conn_id.as_deref(),
+                        db_kind,
                     );
                     if let Some(s) = suggestions.get(tab.autocomplete.selected_index) {
                         let prefix_start = tab.autocomplete.prefix_start_index;
@@ -9462,7 +9484,7 @@ impl QueryTabState {
     fn new(connection_id: Option<String>) -> Self {
         Self {
             id: format!("query-{}", uuid::Uuid::new_v4()),
-            title: tr!("SQL 查询").into(),
+            title: tr!("查询").into(),
             connection_id,
             database: None,
             sql: String::new(),
@@ -12720,9 +12742,9 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.small(RichText::new("DDL").strong().color(palette.selection_text));
+                        ui.label(RichText::new("DDL").strong().size(13.0).color(palette.selection_text));
                         ui.separator();
-                        ui.small(RichText::new(title).color(palette.weak_text));
+                        ui.label(RichText::new(title).size(13.0).color(palette.weak_text));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if mini_button(ui, tr!("📋 复制"), MiniButtonKind::Accent).clicked() {
                                 ui.ctx().copy_text(formatted_sql.clone());
@@ -12793,6 +12815,16 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
 }
 
 fn format_definition_sql(sql: &str) -> String {
+    let trimmed = sql.trim();
+    // MongoDB shell 语法：db.xxx.createCollection / db.xxx.createIndex
+    if trimmed.starts_with("db.") {
+        let formatted: Vec<String> = trimmed
+            .split(";\n")
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| format_mongo_command(s.trim()))
+            .collect();
+        return formatted.join(";\n");
+    }
     ensure_sql_statement_semicolon(
         &format_create_table_ddl(sql).unwrap_or_else(|| simple_format_sql(sql)),
     )
@@ -13623,7 +13655,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
         // 保存按钮 — 有变更时始终可见
         if has_changes {
             // SQL 预览切换按钮（保存按钮左侧）
-            if toolbar_button(ui, tr!("◉ SQL 预览"), ToolbarButtonKind::AccentMuted).clicked() {
+            if toolbar_button(ui, tr!("◉ 语句预览"), ToolbarButtonKind::AccentMuted).clicked() {
                 tab.show_structure_sql_preview = !tab.show_structure_sql_preview;
             }
 
@@ -13687,7 +13719,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new(tr!("SQL 预览"))
+                        RichText::new(tr!("语句预览"))
                             .size(11.0)
                             .strong()
                             .color(palette.weak_text),
@@ -14332,7 +14364,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
         let has_changes = !tab.deleted_indexes.is_empty() || !tab.pending_indexes.is_empty();
         if has_changes {
             // SQL 预览切换按钮（保存按钮左侧）
-            if toolbar_button(ui, tr!("◉ SQL 预览"), ToolbarButtonKind::AccentMuted).clicked() {
+            if toolbar_button(ui, tr!("◉ 语句预览"), ToolbarButtonKind::AccentMuted).clicked() {
                 tab.show_index_sql_preview = !tab.show_index_sql_preview;
             }
 
@@ -14392,7 +14424,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.label(
-                    RichText::new(tr!("SQL 预览"))
+                    RichText::new(tr!("语句预览"))
                         .size(11.0)
                         .strong()
                         .color(palette.weak_text),
@@ -15493,7 +15525,7 @@ impl TableFilterOperator {
             Self::EndsWith | Self::NotEndsWith => tr!("输入后缀"),
             Self::Between | Self::NotBetween => tr!("输入起始值"),
             Self::InList | Self::NotInList => tr!("逗号分隔多个值"),
-            Self::Custom => tr!("输入原始 SQL 条件"),
+            Self::Custom => tr!("输入原始条件"),
             _ => tr!("输入值"),
         }
     }
@@ -17356,6 +17388,243 @@ fn simple_format_sql(sql: &str) -> String {
     result.join("\n")
 }
 
+fn format_mongo_command(cmd: &str) -> String {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    fn format_mongo_impl(cmd: &str) -> String {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+
+        // Find the first '(' to split prefix and chain
+        let first_paren = match trimmed.find('(') {
+            Some(p) => p,
+            None => return trimmed.to_string(),
+        };
+
+        let prefix = trimmed[..first_paren].trim();
+        let chain = &trimmed[first_paren..];
+
+        // Parse method chain: vec of (name, args_with_parens)
+        fn parse_chain_methods(s: &str) -> Vec<(String, &str)> {
+            let bytes = s.as_bytes();
+            let mut methods = Vec::new();
+            let mut i = 0usize;
+            let mut depth = 0i32;
+            let mut in_sq = false;
+            let mut in_dq = false;
+            let mut method_start = 0usize;
+
+            while i < bytes.len() {
+                let b = bytes[i];
+                if in_sq {
+                    if b == b'\'' && (i == 0 || bytes[i - 1] != b'\\') { in_sq = false; }
+                    i += 1; continue;
+                }
+                if in_dq {
+                    if b == b'"' && (i == 0 || bytes[i - 1] != b'\\') { in_dq = false; }
+                    i += 1; continue;
+                }
+                match b {
+                    b'\'' => { in_sq = true; i += 1; }
+                    b'"' => { in_dq = true; i += 1; }
+                    b'(' if depth == 0 => {
+                        depth = 1;
+                        method_start = i;
+                        i += 1;
+                    }
+                    b'(' => { depth += 1; i += 1; }
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let args = &s[method_start..=i];
+                            // Extract method name from before method_start
+                            let before = &s[..method_start];
+                            let name = before.rsplit('.').next().unwrap_or("").trim();
+                            methods.push((name.to_string(), args));
+                            i += 1;
+                            // Skip optional . before next method
+                            if i < bytes.len() && bytes[i] == b'.' { i += 1; }
+                            // Remove consumed prefix
+                            // (we use indices, so just continue)
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+            methods
+        }
+
+        let methods = parse_chain_methods(chain);
+
+        if methods.is_empty() {
+            return trimmed.to_string();
+        }
+
+        // Format each method
+        let mut formatted_methods: Vec<String> = Vec::new();
+        for (name, args_with_parens) in &methods {
+            let inner = &args_with_parens[1..args_with_parens.len() - 1]; // strip ( )
+            let trimmed_inner = inner.trim();
+
+            if trimmed_inner.is_empty() {
+                formatted_methods.push(format!("{}()", name));
+            } else {
+                let json = normalize_mongo_to_json(trimmed_inner);
+                match serde_json::from_str::<serde_json::Value>(&json) {
+                    Ok(val) => {
+                        let pretty = serde_json::to_string_pretty(&val).unwrap_or(json.clone());
+                        if pretty.len() > 60 || pretty.contains('\n') {
+                            let indented = pretty.lines().enumerate().map(|(i, line)| {
+                                if i == 0 { line.to_string() } else { format!("  {}", line) }
+                            }).collect::<Vec<_>>().join("\n");
+                            formatted_methods.push(format!("{}({})", name, indented));
+                        } else {
+                            formatted_methods.push(format!("{}({})", name, pretty));
+                        }
+                    }
+                    Err(_) => {
+                        formatted_methods.push(format!("{}({})", name, trimmed_inner));
+                    }
+                }
+            }
+        }
+
+        if formatted_methods.len() == 1 {
+            return format!("{}{}", prefix, formatted_methods[0]);
+        }
+
+        // Chain: first method inline, rest indented
+        let first = &formatted_methods[0];
+        let has_newline = first.contains('\n');
+        let mut result = format!("{}{}", prefix, first);
+
+        for m in formatted_methods.iter().skip(1) {
+            let m_has_nl = m.contains('\n');
+            if has_newline || m_has_nl {
+                result.push_str(&format!("\n  .{}", m));
+            } else {
+                result.push_str(&format!(".{}", m));
+            }
+        }
+
+        result
+    }
+
+    fn normalize_mongo_to_json(s: &str) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len();
+        let mut out = String::with_capacity(len + 32);
+        let mut i = 0;
+        let mut in_sq = false;
+        let mut in_dq = false;
+
+        while i < len {
+            let c = chars[i];
+            if in_sq {
+                if c == '\\' && i + 1 < len {
+                    out.push('\\');
+                    out.push(chars[i + 1]);
+                    i += 2;
+                } else if c == '\'' {
+                    out.push('"');
+                    in_sq = false;
+                    i += 1;
+                } else {
+                    if c == '"' { out.push('\\'); }
+                    out.push(c);
+                    i += 1;
+                }
+                continue;
+            }
+            if in_dq {
+                out.push(c);
+                if c == '\\' && i + 1 < len { out.push(chars[i + 1]); i += 2; }
+                else if c == '"' { in_dq = false; i += 1; }
+                else { i += 1; }
+                continue;
+            }
+
+            let rest: String = chars[i..].iter().collect();
+
+            if c == '\'' { out.push('"'); in_sq = true; i += 1; continue; }
+            if c == '"' { out.push('"'); in_dq = true; i += 1; continue; }
+
+            let special = ["ObjectId(", "ISODate(", "NumberLong(", "NumberInt(", "Timestamp("];
+            let mut replaced = false;
+            for st in &special {
+                if rest.starts_with(st) {
+                    let after = &rest[st.len()..];
+                    if let Some(end) = find_matching_paren_char(after) {
+                        let inner = &after[..end];
+                        let content = inner.trim();
+                        match *st {
+                            "ObjectId(" => { out.push_str(&format!("\"{}\"", content.trim_matches('"'))); }
+                            "ISODate(" => { out.push_str(&format!("\"{}\"", content.trim_matches('"'))); }
+                            _ => { out.push_str(content.trim_matches('"')); }
+                        }
+                        i += st.len() + end + 1;
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+            if replaced { continue; }
+
+            if c == '$' || c.is_ascii_alphabetic() || c == '_' {
+                let mut word = String::new();
+                let mut j = i;
+                while j < len && (chars[j].is_ascii_alphanumeric() || chars[j] == '_' || chars[j] == '$') {
+                    word.push(chars[j]);
+                    j += 1;
+                }
+                if word == "true" || word == "false" || word == "null" || word == "undefined" {
+                    if word == "undefined" { out.push_str("null"); } else { out.push_str(&word); }
+                    i = j;
+                } else if i > 0 && matches!(chars[i - 1], '{' | ',') {
+                    out.push_str(&format!("\"{}\"", word));
+                    i = j;
+                } else {
+                    out.push_str(&word);
+                    i = j;
+                }
+                continue;
+            }
+
+            out.push(c);
+            i += 1;
+        }
+
+        out
+    }
+
+    fn find_matching_paren_char(s: &str) -> Option<usize> {
+        let mut depth = 0i32;
+        let mut in_sq = false;
+        let mut in_dq = false;
+        for (i, c) in s.chars().enumerate() {
+            if in_sq { if c == '\'' { in_sq = false; } continue; }
+            if in_dq { if c == '"' { in_dq = false; } continue; }
+            match c {
+                '\'' => in_sq = true,
+                '"' => in_dq = true,
+                '(' => depth += 1,
+                ')' => { if depth == 0 { return Some(i); } depth -= 1; }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    format_mongo_impl(cmd)
+}
+
 fn definition_editor_palette(visuals: &egui::Visuals) -> EditorPalette {
     editor_palette(visuals)
 }
@@ -18850,6 +19119,7 @@ fn render_query_editor(
     editor_inner_height: f32,
     action: &mut TabUiAction,
     schema_cache: &SchemaCache,
+    db_kind: Option<DatabaseKind>,
 ) {
     let font_id = FontId::new(15.0, FontFamily::Monospace);
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
@@ -19135,7 +19405,7 @@ fn render_query_editor(
                                     let weak = chrome.weak_text;
                                     let font_id = FontId::new(13.0, FontFamily::Proportional);
                                     let mut job = egui::text::LayoutJob::default();
-                                    job.append(tr!("▶ 执行选中SQL"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
+                                    job.append(tr!("▶ 执行选中语句"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
                                     job.append(&format!("    {}+R", MOD_KEY), 0.0, TextFormat { font_id: font_id.clone(), color: weak, ..Default::default() });
                                     if ui.add_enabled(can_execute, egui::Button::new(job)).clicked() {
                                         let selected = tab.cursor_range
@@ -19338,6 +19608,7 @@ fn render_query_editor(
                                 .unwrap_or(0),
                             schema_cache,
                             conn_id,
+                            db_kind,
                         );
 
                         if suggestions.is_empty() {
