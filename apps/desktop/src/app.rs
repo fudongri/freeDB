@@ -10836,7 +10836,57 @@ fn render_editable_result_table(
                                 }
                             });
                         });
-                    // 列拖拽逻辑（简化版）
+                    // 拖拽中更新 target_index + 边缘自动滚动
+                    if let Some(drag) = column_drag.as_mut() {
+                        if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
+                            let mut new_target = drag.source_index;
+                            for (i, rect) in header_cell_rects.iter().enumerate() {
+                                if pointer.x < rect.left() && i == 0 {
+                                    new_target = 0;
+                                    break;
+                                }
+                                let mid_x = rect.center().x;
+                                if pointer.x >= rect.left() && pointer.x < mid_x {
+                                    new_target = i;
+                                    break;
+                                }
+                                if pointer.x >= mid_x && pointer.x <= rect.right() {
+                                    new_target = (i + 1).min(header_cell_rects.len());
+                                    break;
+                                }
+                                if i == header_cell_rects.len() - 1 && pointer.x > rect.right() {
+                                    new_target = header_cell_rects.len();
+                                }
+                            }
+                            drag.target_index = new_target;
+                            drag.line_x_target = if new_target < header_cell_rects.len() {
+                                header_cell_rects[new_target].left()
+                            } else {
+                                header_cell_rects.last().map(|r| r.right()).unwrap_or(0.0)
+                            };
+                            if drag.source_index < header_cell_rects.len() {
+                                let src_center = header_cell_rects[drag.source_index].center().x;
+                                drag.ghost_x_target = pointer.x - src_center;
+                            }
+                            let edge_width = 80.0;
+                            let speed_max = 1600.0;
+                            let left_edge = scroll_clip_rect.left() + edge_width;
+                            let right_edge = (scroll_clip_rect.right() - edge_width).max(left_edge);
+                            if pointer.x < left_edge {
+                                let t = ((left_edge - pointer.x) / edge_width).clamp(0.0, 1.0);
+                                drag.scroll_speed_x = -t * speed_max;
+                            } else if pointer.x > right_edge {
+                                let t = ((pointer.x - right_edge) / edge_width).clamp(0.0, 1.0);
+                                drag.scroll_speed_x = t * speed_max;
+                            } else {
+                                drag.scroll_speed_x = 0.0;
+                            }
+                            ctx.request_repaint();
+                        } else {
+                            drag.scroll_speed_x = 0.0;
+                        }
+                    }
+                    // 列拖拽释放、ESC 取消、绘制插入线
                     let esc_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
                     if esc_pressed {
                         *column_drag = None;
@@ -10860,6 +10910,76 @@ fn render_editable_result_table(
                                     .into_iter()
                                     .filter(|c| result.columns.contains(c))
                                     .collect();
+                            }
+                        }
+                    }
+                    // 绘制拖拽插入线 + 幽灵列 + 原位置挖空（带动效）
+                    if let Some(drag) = column_drag.as_mut() {
+                        let lerp: f32 = 0.45;
+                        if drag.just_started {
+                            drag.line_x = drag.line_x_target;
+                            drag.ghost_x = drag.ghost_x_target;
+                            drag.just_started = false;
+                        } else {
+                            drag.line_x += (drag.line_x_target - drag.line_x) * lerp;
+                            drag.ghost_x += (drag.ghost_x_target - drag.ghost_x) * lerp;
+                            ctx.request_repaint();
+                        }
+
+                        let hb = header_cell_rects.first().map(|r| r.bottom()).unwrap_or(0.0);
+                        let ht = header_cell_rects.first().map(|r| r.top()).unwrap_or(0.0);
+
+                        // 插入线
+                        ui.painter().line_segment(
+                            [egui::pos2(drag.line_x, ht), egui::pos2(drag.line_x, hb)],
+                            egui::Stroke::new(2.0, palette.selection_bg),
+                        );
+
+                        if drag.source_index < header_cell_rects.len() {
+                            let sr = header_cell_rects[drag.source_index];
+                            let left = sr.left() + drag.ghost_x;
+                            let w = sr.width();
+                            let row_h = 28.0;
+                            let bb = hb + row_h * (result.rows.len() as f32).max(1.0);
+
+                            // 原位置挖空（表头+数据区）
+                            let orig_b = egui::Rect::from_min_max(egui::pos2(sr.left(), hb), egui::pos2(sr.right(), bb));
+                            let orig_h = egui::Rect::from_min_max(egui::pos2(sr.left(), ht), egui::pos2(sr.right(), hb));
+                            ui.painter().rect_filled(orig_b, 0.0, palette.card_bg.gamma_multiply(0.85));
+                            ui.painter().rect_filled(orig_h, 0.0, palette.card_bg.gamma_multiply(0.85));
+                            let ss = egui::Stroke::new(1.0, palette.weak_text.gamma_multiply(0.5));
+                            for r in &[orig_b, orig_h] {
+                                let d = egui::vec2(10.0, 0.0);
+                                ui.painter().line_segment([r.left_top(), r.left_top() + d], ss);
+                                ui.painter().line_segment([r.right_top() - d, r.right_top()], ss);
+                                ui.painter().line_segment([r.left_bottom(), r.left_bottom() + d], ss);
+                                ui.painter().line_segment([r.right_bottom() - d, r.right_bottom()], ss);
+                            }
+
+                            // 幽灵列（表头+数据区）+ 数据文本（带裁剪）
+                            let clip = egui::Rect::from_min_max(
+                                egui::pos2(left, ht),
+                                egui::pos2(left + w, ui.clip_rect().bottom()),
+                            );
+                            ui.painter().rect_filled(clip, 0.0, palette.selection_bg.gamma_multiply(0.12));
+                            let header_text_color = palette.selection_text;
+                            ui.painter().text(
+                                egui::pos2(left + 8.0, ht + 8.0),
+                                egui::Align2::LEFT_TOP,
+                                &display_columns[drag.source_index],
+                                egui::FontId::proportional(12.5),
+                                header_text_color,
+                            );
+                            let fid = egui::FontId::monospace(12.0);
+                            let tc = palette.text;
+                            let cn = &display_columns[drag.source_index];
+                            for (i, row) in result.rows.iter().enumerate() {
+                                let y = hb + row_h * (i as f32) + 8.0;
+                                if y > bb { break; }
+                                if let Some(cell) = row.get(cn) {
+                                    ui.painter().text(egui::pos2(left + 4.0, y), egui::Align2::LEFT_TOP,
+                                        query_cell_display_text(cell, false).text, fid.clone(), tc);
+                                }
                             }
                         }
                     }
