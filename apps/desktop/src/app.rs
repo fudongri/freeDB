@@ -454,6 +454,8 @@ struct EditorFindState {
     error_message: String,
     request_focus: bool,
     last_sql: String,                 // 用于检测 SQL 变化，避免匹配偏移过期
+    regex_pending: bool,
+    regex_debounce_frame: u32,
 }
 
 impl EditorFindState {
@@ -475,9 +477,7 @@ impl EditorFindState {
                         self.matches.push((m.start(), m.end()));
                     }
                 }
-                Err(e) => {
-                    self.error_message = e.to_string();
-                }
+                Err(_) => {}
             }
         } else {
             let haystack = if self.case_sensitive {
@@ -15376,10 +15376,19 @@ fn render_editor_find_bar(
                         tab.find.request_focus = false;
                     }
                     if find_response.changed() {
-                        tab.find.recompute(&tab.sql);
+                        if tab.find.use_regex {
+                            tab.find.regex_pending = true;
+                            tab.find.regex_debounce_frame = 0;
+                        } else {
+                            tab.find.recompute(&tab.sql);
+                        }
                     }
                     // Enter/Shift+Enter 导航（输入框内）
                     if find_response.lost_focus() && !tab.find.find_text.is_empty() {
+                        if tab.find.use_regex && tab.find.regex_pending {
+                            tab.find.recompute(&tab.sql);
+                            tab.find.regex_pending = false;
+                        }
                         let shift = ui.input(|i| i.modifiers.shift);
                         if shift {
                             tab.find.prev();
@@ -19408,9 +19417,15 @@ fn render_query_editor(
 
     let remaining_editor_height = (editor_inner_height - find_bar_height).max(40.0);
 
-    // If find is open, recompute matches when sql or find_text changes
+    // If find is open, recompute matches when sql changes (skip live regex recompute)
     if tab.find.open && !tab.find.find_text.is_empty() {
-        if tab.find.matches.is_empty() || tab.find.last_sql != tab.sql {
+        if tab.find.use_regex && tab.find.regex_pending {
+            tab.find.regex_debounce_frame += 1;
+            if tab.find.regex_debounce_frame >= 15 {
+                tab.find.recompute(&tab.sql);
+                tab.find.regex_pending = false;
+            }
+        } else if (tab.find.matches.is_empty() || tab.find.last_sql != tab.sql) && !tab.find.use_regex {
             tab.find.recompute(&tab.sql);
         }
     }
@@ -19550,46 +19565,53 @@ fn render_query_editor(
                         tab.cursor_range = output.cursor_range;
 
                         // SQL 变化后重新计算查找匹配（修复编辑 SQL 后高亮偏移过期的问题）
-                        if tab.find.open && !tab.find.find_text.is_empty() && tab.find.last_sql != tab.sql {
+                        if tab.find.open && !tab.find.find_text.is_empty() && tab.find.last_sql != tab.sql && !tab.find.use_regex {
                             tab.find.recompute(&tab.sql);
                         }
 
-                        // 通过 painter 绘制查找匹配高亮
-                        // 注意：由于在 TextEdit 之后绘制，使用半透明色避免遮挡文字
+                        // 通过 painter 绘制查找匹配高亮（单次遍历 glyphs，O(glyphs) 复杂度）
                         let mut current_match_rect: Option<egui::Rect> = None;
                         if tab.find.open && !tab.find.find_text.is_empty() && !tab.find.matches.is_empty() {
                             let galley = &output.galley;
                             let gp = output.galley_pos;
                             let find_painter = ui.painter().with_clip_rect(output.text_clip_rect);
-                            for (idx, &(m_start, m_end)) in tab.find.matches.iter().enumerate() {
-                                let bg = if idx == tab.find.current_index { current_match_bg } else { match_bg };
-                                let is_current = idx == tab.find.current_index;
-                                let mut byte_offset = 0usize;
-                                for placed_row in &galley.rows {
-                                    let row_byte_start = byte_offset;
-                                    let row_pos = placed_row.pos;
-                                    for glyph in &placed_row.glyphs {
-                                        let char_start = byte_offset;
-                                        let char_end = char_start + glyph.chr.len_utf8();
-                                        byte_offset = char_end;
-                                        if char_start >= m_end { break; }
-                                        if char_end <= m_start { continue; }
-                                        let lr = glyph.logical_rect();
-                                        let highlight_rect = egui::Rect::from_min_max(
-                                            egui::pos2(gp.x + row_pos.x + lr.min.x, gp.y + row_pos.y + lr.min.y),
-                                            egui::pos2(gp.x + row_pos.x + lr.max.x, gp.y + row_pos.y + lr.max.y),
-                                        );
-                                        find_painter.rect_filled(highlight_rect, 0.0, bg);
-                                        if is_current {
-                                            current_match_rect = Some(
-                                                current_match_rect.map_or(highlight_rect, |r| r.union(highlight_rect)),
+                            let matches = &tab.find.matches;
+                            let current_idx = tab.find.current_index;
+                            let mut match_idx = 0usize;
+                            let mut byte_offset = 0usize;
+                            for placed_row in &galley.rows {
+                                let row_pos = placed_row.pos;
+                                for glyph in &placed_row.glyphs {
+                                    let char_start = byte_offset;
+                                    let char_end = char_start + glyph.chr.len_utf8();
+                                    byte_offset = char_end;
+                                    // 跳过已过期的匹配
+                                    while match_idx < matches.len() && matches[match_idx].1 <= char_start {
+                                        match_idx += 1;
+                                    }
+                                    // 检查当前 glyph 是否与某个匹配重叠
+                                    let mut check_idx = match_idx;
+                                    while check_idx < matches.len() && matches[check_idx].0 < char_end {
+                                        let (m_start, m_end) = matches[check_idx];
+                                        if char_start < m_end && char_end > m_start {
+                                            let bg = if check_idx == current_idx { current_match_bg } else { match_bg };
+                                            let lr = glyph.logical_rect();
+                                            let highlight_rect = egui::Rect::from_min_max(
+                                                egui::pos2(gp.x + row_pos.x + lr.min.x, gp.y + row_pos.y + lr.min.y),
+                                                egui::pos2(gp.x + row_pos.x + lr.max.x, gp.y + row_pos.y + lr.max.y),
                                             );
+                                            find_painter.rect_filled(highlight_rect, 0.0, bg);
+                                            if check_idx == current_idx {
+                                                current_match_rect = Some(
+                                                    current_match_rect.map_or(highlight_rect, |r| r.union(highlight_rect)),
+                                                );
+                                            }
                                         }
+                                        check_idx += 1;
                                     }
-                                    // 行尾隐含的 \n 不在 glyphs 中，手动推进一字节
-                                    if placed_row.ends_with_newline {
-                                        byte_offset += 1;
-                                    }
+                                }
+                                if placed_row.ends_with_newline {
+                                    byte_offset += 1;
                                 }
                             }
                         }
