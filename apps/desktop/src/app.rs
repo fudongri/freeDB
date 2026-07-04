@@ -4546,6 +4546,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::CreateTableExecute => {
                 self.execute_create_table();
             }
+            TabUiAction::GenerateData => {
+                // Task 6: 区分 running 状态，调用 start/stop
+                // 暂时留空，由 Task 6 实现
+            }
         }
     }
 
@@ -6953,6 +6957,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             live_preview_cursor,
                                         );
                                         let mut column_btn_rect: Option<egui::Rect> = None;
+                                        let mut gen_data_btn_rect: Option<egui::Rect> = None;
                                         ui.horizontal(|ui| {
                                             if mini_button(ui, tr!("刷新"), MiniButtonKind::Subtle)
                                                 .on_hover_text(tr!("刷新 ({}+R)", MOD_KEY))
@@ -7057,6 +7062,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 }
                                             }
                                             column_btn_rect = Some(column_btn_response.rect);
+                                            // 生成数据按钮
+                                            let gen_data_btn_response = mini_button(ui, tr!("生成数据"), MiniButtonKind::Subtle);
+                                            gen_data_btn_rect = Some(gen_data_btn_response.rect);
+                                            if gen_data_btn_response.clicked() {
+                                                tab.show_generate_data_popup = !tab.show_generate_data_popup;
+                                            }
                                             let current_edit_changed = tab.editing_cell.as_ref().map_or(false, |edit| {
                                                 matches!(edit.target, TableEditTarget::ExistingRow(_))
                                                 && (edit.value != edit.original_value || edit.is_null != edit.original_is_null)
@@ -7237,6 +7248,110 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 if close_popup {
                                                     tab.show_column_filter = false;
                                                     tab.preview_column_widths.clear();
+                                                }
+                                            }
+                                        }
+                                        // 生成数据弹出面板
+                                        if tab.show_generate_data_popup {
+                                            if let Some(btn_rect) = gen_data_btn_rect {
+                                                let area_id = egui::Id::new("generate_data_popup");
+                                                let mut close_gen_popup = false;
+                                                egui::Area::new(area_id)
+                                                    .order(egui::Order::Foreground)
+                                                    .fixed_pos(egui::pos2(
+                                                        btn_rect.left(),
+                                                        btn_rect.bottom() + 4.0,
+                                                    ))
+                                                    .show(ui.ctx(), |ui| {
+                                                        egui::Frame::new()
+                                                            .fill(palette.card_bg)
+                                                            .stroke(Stroke::new(1.0, palette.border))
+                                                            .corner_radius(6.0)
+                                                            .inner_margin(egui::Margin::same(8))
+                                                            .show(ui, |ui| {
+                                                                ui.set_min_width(220.0);
+                                                                if tab.generate_data_running {
+                                                                    // 进度状态
+                                                                    ui.label(RichText::new(tr!("正在生成测试数据...")).strong());
+                                                                    ui.add_space(8.0);
+                                                                    if let Some(ref progress) = tab.generate_data_progress {
+                                                                        let fraction = if progress.total > 0 {
+                                                                            progress.completed as f32 / progress.total as f32
+                                                                        } else {
+                                                                            0.0
+                                                                        };
+                                                                        ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                                                                        ui.label(format!("{}/{}", progress.completed, progress.total));
+                                                                    }
+                                                                    ui.add_space(8.0);
+                                                                    if ui.button(tr!("停止")).clicked() {
+                                                                        action = TabUiAction::GenerateData;
+                                                                    }
+                                                                } else if let Some(ref progress) = tab.generate_data_progress {
+                                                                    // 完成状态
+                                                                    ui.label(RichText::new(
+                                                                        tr!("已生成 {} 条测试数据", progress.completed)
+                                                                    ).strong());
+                                                                    ui.add_space(4.0);
+                                                                    ui.label(RichText::new(tr!("数据为随机测试数据")).small().color(palette.weak_text));
+                                                                    // 点击外部关闭
+                                                                    let pointer = ui.ctx().input(|i| i.pointer.any_pressed());
+                                                                    if pointer {
+                                                                        let panel_rect = ui.min_rect();
+                                                                        let hover = ui.ctx().input(|i| i.pointer.hover_pos());
+                                                                        if let Some(pos) = hover {
+                                                                            if !panel_rect.contains(pos) && !btn_rect.contains(pos) {
+                                                                                close_gen_popup = true;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    // 配置状态
+                                                                    ui.label(RichText::new(tr!("生成测试数据")).strong());
+                                                                    ui.add_space(8.0);
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label(tr!("生成数量"));
+                                                                        ui.add(
+                                                                            egui::TextEdit::singleline(&mut tab.generate_data_count)
+                                                                                .desired_width(80.0),
+                                                                        );
+                                                                        ui.label(tr!("行"));
+                                                                    });
+                                                                    // 显示跳过的列
+                                                                    if let Some(ref def) = tab.definition {
+                                                                        let skipped: Vec<&str> = def.columns.iter()
+                                                                            .filter(|c| c.auto_increment)
+                                                                            .map(|c| c.name.as_str())
+                                                                            .collect();
+                                                                        if !skipped.is_empty() {
+                                                                            ui.add_space(4.0);
+                                                                            ui.label(
+                                                                                RichText::new(tr!("跳过: {} (自增)", skipped.join(", ")))
+                                                                                    .small()
+                                                                                    .color(palette.weak_text),
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                    ui.add_space(8.0);
+                                                                    if ui.button(tr!("开始生成")).clicked() {
+                                                                        action = TabUiAction::GenerateData;
+                                                                    }
+                                                                    // 点击外部关闭
+                                                                    let pointer = ui.ctx().input(|i| i.pointer.any_pressed());
+                                                                    if pointer {
+                                                                        let panel_rect = ui.min_rect();
+                                                                        let hover = ui.ctx().input(|i| i.pointer.hover_pos());
+                                                                        if let Some(pos) = hover {
+                                                                            if !panel_rect.contains(pos) && !btn_rect.contains(pos) {
+                                                                                close_gen_popup = true;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            });
+                                                    });
+                                                if close_gen_popup {
+                                                    tab.show_generate_data_popup = false;
                                                 }
                                             }
                                         }
@@ -10792,6 +10907,7 @@ enum TabUiAction {
     ExecuteStructureSql(String),
     LoadSavedQuery(String),
     CreateTableExecute,
+    GenerateData,
 }
 
 #[derive(Clone)]

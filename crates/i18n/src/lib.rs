@@ -649,6 +649,17 @@ fn en(key: &'static str) -> &'static str {
         "表" => "Table",
         "视图" => "View",
 
+        // ── 生成数据 ──
+        "生成数据" => "Generate Data",
+        "正在生成测试数据..." => "Generating test data...",
+        "已生成 {} 条测试数据" => "Generated {} rows of test data",
+        "数据为随机测试数据" => "Data is random test data",
+        "生成测试数据" => "Generate Test Data",
+        "生成数量" => "Count",
+        "开始生成" => "Start",
+        "行" => "rows",
+        "跳过: {} (自增)" => "Skipped: {} (auto-increment)",
+
         _ => key,
     }
 }
