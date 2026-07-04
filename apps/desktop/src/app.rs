@@ -4547,8 +4547,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.execute_create_table();
             }
             TabUiAction::GenerateData => {
-                // Task 6: 区分 running 状态，调用 start/stop
-                // 暂时留空，由 Task 6 实现
+                let is_running = self.tabs.get(self.active_tab).map_or(false, |t| {
+                    matches!(t, WorkspaceTab::Table(t) if t.generate_data_running)
+                });
+                if is_running {
+                    self.stop_generate_data();
+                } else {
+                    self.start_generate_data();
+                }
             }
         }
     }
