@@ -2286,6 +2286,111 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
+    /// 从 MongoDB 集合中采样现有文档，推断字段类型
+    async fn sample_mongo_fields(
+        services: &AppServices,
+        table: &TableRef,
+    ) -> Vec<(String, String)> {
+        let cmd = format!("db.{}.find().limit(5)", table.table);
+        let execution = QueryExecution {
+            connection_id: table.connection_id.clone(),
+            database: table.database.clone(),
+            sql: cmd,
+        };
+        match services.execute_sql(execution).await {
+            Ok(result) => {
+                let mut field_types: Vec<(String, String)> = Vec::new();
+                let has_data = !result.rows.is_empty();
+                for col_name in &result.columns {
+                    // 优先从 mongo_types 读取特殊 BSON 类型（按首行索引）
+                    let special = if has_data {
+                        result.mongo_types.get(&(0, col_name.clone()))
+                    } else {
+                        None
+                    };
+                    let type_str = if let Some(mv) = special {
+                        match mv {
+                            MongoValue::ObjectId => "objectid",
+                            MongoValue::DateTime => "datetime",
+                            MongoValue::Timestamp => "timestamp",
+                            MongoValue::Binary => "binary",
+                            MongoValue::Decimal128 => "number",
+                            MongoValue::RegularExpression => "string",
+                        }
+                    } else if has_data {
+                        // 常见 BSON 类型（Int32/Int64/Double/String/Boolean/Array/Document）不记入 mongo_types，
+                        // 需要从首行文本值推断
+                        match result.rows[0].get(col_name.as_str()) {
+                            Some(QueryCellValue::Text(v)) if v == "true" || v == "false" => "boolean",
+                            Some(QueryCellValue::Text(v))
+                                if v.starts_with('[') && v.ends_with(']') =>
+                            {
+                                "array"
+                            }
+                            Some(QueryCellValue::Text(v)) => {
+                                if v.parse::<f64>().is_ok() {
+                                    "number"
+                                } else {
+                                    "string"
+                                }
+                            }
+                            _ => "string",
+                        }
+                    } else {
+                        "string"
+                    };
+                    field_types.push((col_name.clone(), type_str.to_string()));
+                }
+                if field_types.is_empty() {
+                    field_types.push(("_id".to_string(), "objectid".to_string()));
+                }
+                field_types
+            }
+            Err(_) => vec![("_id".to_string(), "objectid".to_string())],
+        }
+    }
+
+    /// 构建 MongoDB insertMany 命令字符串
+    fn build_mongo_insert_command(
+        table: &TableRef,
+        fields: &[(String, String)],
+        start_index: usize,
+        count: usize,
+    ) -> String {
+        let mut docs = Vec::new();
+        for i in 0..count {
+            let mut doc_fields = Vec::new();
+            for (field_name, field_type) in fields {
+                if field_name == "_id" {
+                    continue;
+                }
+                let value = Self::generate_mongo_value(field_type, start_index + i, field_name);
+                doc_fields.push(format!("\"{}\": {}", field_name, value));
+            }
+            docs.push(format!("{{{}}}", doc_fields.join(", ")));
+        }
+        format!("db.{}.insertMany([{}])", table.table, docs.join(", "))
+    }
+
+    fn generate_mongo_value(field_type: &str, row_index: usize, field_name: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        row_index.hash(&mut hasher);
+        field_name.hash(&mut hasher);
+        let seed = hasher.finish();
+
+        match field_type {
+            "number" => (seed % 100_000).to_string(),
+            "boolean" => if seed % 2 == 0 { "true".to_string() } else { "false".to_string() },
+            "objectid" => format!("ObjectId(\"{:024x}\")", seed),
+            "array" => "[\"test_item\"]".to_string(),
+            "object" => "{\"test\": true}".to_string(),
+            _ => format!("\"test_{}_{}\"", field_name, seed % 100_000),
+        }
+    }
+
     fn refresh_active_table_preview(&mut self, reload_definition: bool) {
         let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) else {
             return;
