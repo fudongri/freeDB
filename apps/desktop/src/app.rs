@@ -2138,6 +2138,148 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
     }
 
+    /// 根据列类型生成单行测试数据值
+    /// 返回 (参与插入的列名列表, 对应的值列表)
+    fn generate_test_row(
+        columns: &[ColumnDefinition],
+        database_kind: DatabaseKind,
+        row_index: usize,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut col_names = Vec::new();
+        let mut values = Vec::new();
+
+        for col in columns {
+            // 跳过自增列
+            if col.auto_increment {
+                continue;
+            }
+            // 有默认值的列，30% 概率跳过
+            if col.default_value.is_some() && (row_index * 37 + col.name.len() * 13) % 100 < 30 {
+                continue;
+            }
+            // nullable 列，10% 概率设为 NULL
+            if col.nullable && (row_index * 41 + col.name.len() * 7) % 100 < 10 {
+                col_names.push(col.name.clone());
+                values.push("NULL".to_string());
+                continue;
+            }
+
+            col_names.push(col.name.clone());
+            let dt = col.data_type.to_lowercase();
+            let value = Self::generate_value_by_type(&dt, row_index, &col.name, database_kind);
+            values.push(value);
+        }
+
+        (col_names, values)
+    }
+
+    fn generate_value_by_type(data_type: &str, row_index: usize, col_name: &str, _db_kind: DatabaseKind) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        row_index.hash(&mut hasher);
+        col_name.hash(&mut hasher);
+        let seed = hasher.finish();
+
+        // 整数类型
+        if data_type.contains("int") || data_type.contains("serial") {
+            let val = (seed % 100_000) as i64;
+            return val.to_string();
+        }
+        // 浮点类型
+        if data_type.contains("float") || data_type.contains("double")
+            || data_type.contains("decimal") || data_type.contains("numeric")
+            || data_type.contains("real") {
+            let val = (seed % 100_000) as f64 / 100.0;
+            return format!("{:.2}", val);
+        }
+        // 日期类型
+        if data_type == "date" {
+            let days = (seed % 365) as u32;
+            return format!("'2025-{:02}-{:02}'", (days % 12) + 1, (days % 28) + 1);
+        }
+        // 日期时间类型
+        if data_type.contains("datetime") || data_type.contains("timestamp") {
+            let days = (seed % 365) as u32;
+            let secs = (seed % 86400) as u32;
+            return format!("'2025-{:02}-{:02} {:02}:{:02}:{:02}'",
+                (days % 12) + 1, (days % 28) + 1,
+                secs / 3600, (secs % 3600) / 60, secs % 60);
+        }
+        // 布尔类型
+        if data_type.contains("bool") || data_type == "bit" {
+            return if seed % 2 == 0 { "TRUE".to_string() } else { "FALSE".to_string() };
+        }
+        // JSON 类型
+        if data_type.contains("json") {
+            return "'{\"test\": true}'".to_string();
+        }
+        // UUID 类型
+        if data_type.contains("uuid") {
+            return format!("'test-{:08x}-{:04x}-{:04x}-{:04x}-{:012x}'",
+                (seed >> 32) as u32, (seed >> 16) as u16, seed as u16,
+                ((seed * 7) >> 16) as u16, seed.wrapping_mul(13));
+        }
+        // MongoDB ObjectId
+        if data_type.contains("objectid") {
+            return format!("{:024x}", seed);
+        }
+        // 默认：字符串，带 test_ 前缀
+        format!("'test_{}_{}'", col_name, seed % 100000)
+    }
+
+    /// 构建多行 INSERT 语句（MySQL/PostgreSQL）
+    fn build_batch_insert_sql(
+        table: &TableRef,
+        columns: &[ColumnDefinition],
+        database_kind: DatabaseKind,
+        start_index: usize,
+        count: usize,
+    ) -> String {
+        let mut all_rows = Vec::new();
+        let mut common_cols: Option<Vec<String>> = None;
+
+        for i in 0..count {
+            let (col_names, values) = Self::generate_test_row(columns, database_kind, start_index + i);
+            if common_cols.is_none() {
+                common_cols = Some(col_names.clone());
+            }
+            all_rows.push(values);
+        }
+
+        let cols = common_cols.unwrap_or_default();
+        let col_list = cols.join(", ");
+        let table_name = Self::format_table_name(table, database_kind);
+
+        let values_str: Vec<String> = all_rows
+            .iter()
+            .map(|row| format!("({})", row.join(", ")))
+            .collect();
+
+        format!("INSERT INTO {} ({}) VALUES {}", table_name, col_list, values_str.join(", "))
+    }
+
+    fn format_table_name(table: &TableRef, db_kind: DatabaseKind) -> String {
+        match db_kind {
+            DatabaseKind::MySql => {
+                if let Some(ref db) = table.database {
+                    format!("`{}`.`{}`", db, table.table)
+                } else {
+                    format!("`{}`", table.table)
+                }
+            }
+            DatabaseKind::Postgres => {
+                if let Some(ref schema) = table.schema {
+                    format!("\"{}\".\"{}\"", schema, table.table)
+                } else {
+                    format!("\"{}\"", table.table)
+                }
+            }
+            DatabaseKind::MongoDb => table.table.clone(),
+        }
+    }
+
     fn refresh_active_table_preview(&mut self, reload_definition: bool) {
         let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) else {
             return;
