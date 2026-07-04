@@ -83,6 +83,7 @@ pub struct DesktopApp {
     ddl_input_dialog: Option<DdlInputDialog>,
     ddl_pending_delete: Option<DdlPendingDelete>,
     ddl_pending_action: Option<(String, DdlAction, Receiver<Result<(), String>>)>,
+    pending_delete_connection: Option<(String, bool)>,
     tree_rename: Option<TreeRenameState>,
     pending_create_table: Option<Receiver<Result<(), String>>>,
     pending_sql_dump: Option<Receiver<SqlDumpLoadResult>>,
@@ -692,6 +693,7 @@ enum DdlAction {
     DropTable { connection_id: String, database: String, schema: Option<String>, name: String, is_view: bool, kind: DatabaseKind },
     TruncateTable { connection_id: String, database: String, schema: Option<String>, name: String, kind: DatabaseKind },
     RenameTable { connection_id: String, database: String, schema: Option<String>, old_name: String, is_view: bool, kind: DatabaseKind },
+    CopyTable { connection_id: String, database: String, schema: Option<String>, name: String, new_name: String, include_data: bool, is_view: bool, kind: DatabaseKind },
 }
 
 #[derive(Clone)]
@@ -920,6 +922,7 @@ impl DesktopApp {
             ddl_input_dialog: None,
             ddl_pending_delete: None,
             ddl_pending_action: None,
+            pending_delete_connection: None,
             tree_rename: None,
             pending_create_table: None,
             pending_sql_dump: None,
@@ -2927,6 +2930,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ));
                                     ui.close();
                                 }
+                                ui.separator();
+                                let del_btn = egui::Button::new(
+                                    RichText::new(tr!("删除连接")).color(Color32::from_rgb(220, 53, 69))
+                                );
+                                if ui.add(del_btn).clicked() {
+                                    self.pending_delete_connection = Some((connection.id.clone(), false));
+                                    ui.close();
+                                }
                             });
                             if response.clicked() {
                                 self.sidebar_has_focus = true;
@@ -3564,6 +3575,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     kind,
                                     true,
                                 );
+                                ui.close_menu();
+                            }
+                        });
+                        let copy_label = if kind == DatabaseKind::MongoDb {
+                            tr!("复制集合 ▸")
+                        } else if is_view {
+                            tr!("复制视图 ▸")
+                        } else {
+                            tr!("复制表 ▸")
+                        };
+                        ui.menu_button(copy_label, |ui| {
+                            if ui.button(tr!("仅结构")).clicked() {
+                                self.execute_copy_table(node, false);
+                                ui.close_menu();
+                            }
+                            if ui.button(tr!("结构和数据")).clicked() {
+                                self.execute_copy_table(node, true);
                                 ui.close_menu();
                             }
                         });
@@ -8625,6 +8653,130 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
+    fn render_delete_connection_dialog(&mut self, ctx: &egui::Context) {
+        let Some((ref conn_id, confirm_on_enter)) = self.pending_delete_connection else { return };
+        let conn_name = self.connection_name(conn_id);
+        let conn_id = conn_id.clone();
+        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let is_dark = ctx.style().visuals.dark_mode;
+        let mut should_close = false;
+        let mut should_confirm = false;
+
+        ctx.input_mut(|input| {
+            if input.key_pressed(egui::Key::Escape) { should_close = true; }
+        });
+        if confirm_on_enter {
+            ctx.input_mut(|input| {
+                if input.key_pressed(egui::Key::Enter) { should_confirm = true; should_close = true; }
+            });
+        }
+
+        let screen = ctx.screen_rect();
+        let backdrop_color = if is_dark { Color32::from_rgba_premultiplied(0, 0, 0, 120) } else { Color32::from_rgba_premultiplied(0, 0, 0, 60) };
+        let mut backdrop_clicked = false;
+        let overlay = egui::Area::new("delete-conn-backdrop".into())
+            .order(egui::Order::Background)
+            .fixed_pos(screen.left_top())
+            .show(ctx, |ui| {
+                ui.allocate_response(screen.size(), egui::Sense::click());
+                ui.painter().rect_filled(screen, 0.0, backdrop_color);
+            });
+        if overlay.response.clicked() { backdrop_clicked = true; }
+
+        egui::Area::new("delete-conn-dialog".into())
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .interactable(true)
+            .show(ctx, |ui| {
+                apply_mac_dialog_style(ui, palette);
+                let card_w = 300.0;
+                let card_h = 164.0;
+                let card_rect = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(card_w, card_h));
+                ui.allocate_ui_at_rect(card_rect, |ui| {
+                    let r = 12.0;
+                    let bg = if is_dark { Color32::from_rgb(44, 47, 54) } else { Color32::from_rgb(252, 252, 252) };
+                    let shadow_rect = ui.max_rect().translate(egui::vec2(0.0, 4.0));
+                    ui.painter().rect_filled(shadow_rect, r, Color32::from_rgba_premultiplied(0, 0, 0, 30));
+                    ui.painter().rect_filled(ui.max_rect(), r, bg);
+                    ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
+                    let inner = ui.max_rect().shrink(20.0);
+                    ui.allocate_ui_at_rect(inner, |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 14.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                            ui.label(RichText::new("⚠").size(18.0).color(Color32::from_rgb(255, 149, 0)));
+                            ui.label(RichText::new(tr!("删除连接")).size(15.0).color(palette.title).strong());
+                        });
+                        ui.label(RichText::new(tr!("确认要删除「{}」吗？此操作不可撤销。", conn_name)).size(13.0).color(palette.text));
+                        ui.horizontal(|ui| {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
+                                let delete_btn = egui::Button::new(RichText::new(tr!("删除")).size(13.0).color(Color32::WHITE))
+                                    .fill(Color32::from_rgb(220, 53, 69)).corner_radius(6.0);
+                                if ui.add(delete_btn).clicked() { should_confirm = true; should_close = true; }
+                                let cancel_btn = egui::Button::new(RichText::new(tr!("取消")).size(13.0).color(palette.title))
+                                    .fill(palette.input_bg).stroke(Stroke::new(1.0, palette.border)).corner_radius(6.0);
+                                if ui.add(cancel_btn).clicked() { should_close = true; }
+                            });
+                        });
+                    });
+                });
+            });
+
+        if backdrop_clicked { should_close = true; }
+        if let Some(ref mut p) = self.pending_delete_connection { p.1 = true; }
+
+        if should_confirm {
+            self.pending_delete_connection = None;
+            self.disconnect_connection(&conn_id);
+            if let Err(e) = self.services.delete_connection(&conn_id) {
+                self.status_message = tr!("删除连接失败: {}", e);
+                self.status_level = StatusLevel::Error;
+            } else {
+                self.refresh_connections();
+                self.status_message = tr!("连接已删除").into();
+            }
+        } else if should_close {
+            self.pending_delete_connection = None;
+        }
+    }
+
+    fn compute_copy_table_name(&self, node: &ExplorerNode) -> String {
+        let existing: Vec<String> = self
+            .children_by_node
+            .get(&node.parent_id.clone().unwrap_or_default())
+            .map(|children| children.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        let base = &node.name;
+        let candidate = format!("{base}_copy");
+        if !existing.iter().any(|n| *n == candidate) {
+            return candidate;
+        }
+        for i in 2.. {
+            let candidate = format!("{base}_copy_{i}");
+            if !existing.iter().any(|n| *n == candidate) {
+                return candidate;
+            }
+        }
+        unreachable!()
+    }
+
+    fn execute_copy_table(&mut self, node: &ExplorerNode, include_data: bool) {
+        let new_name = self.compute_copy_table_name(node);
+        let action = DdlAction::CopyTable {
+            connection_id: node.connection_id.clone(),
+            database: node.database.clone().unwrap_or_default(),
+            schema: node.schema.clone(),
+            name: node.name.clone(),
+            new_name: new_name.clone(),
+            include_data,
+            is_view: matches!(node.node_type, ExplorerNodeType::View),
+            kind: self.database_kind_for_connection(&node.connection_id),
+        };
+        self.spawn_ddl_action(action, String::new(), String::new(), String::new());
+    }
+
     fn spawn_ddl_action(&mut self, action: DdlAction, name: String, charset: String, collation: String) {
         let conn_id = match &action {
             DdlAction::CreateDatabase { connection_id }
@@ -8635,7 +8787,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             | DdlAction::DropSchema { connection_id, .. }
             | DdlAction::DropTable { connection_id, .. }
             | DdlAction::TruncateTable { connection_id, .. }
-            | DdlAction::RenameTable { connection_id, .. } => connection_id.clone(),
+            | DdlAction::RenameTable { connection_id, .. }
+            | DdlAction::CopyTable { connection_id, .. } => connection_id.clone(),
         };
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
@@ -8695,6 +8848,50 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }).await.map(|_| ())
                 }
                 DdlAction::RenameTable { .. } => unreachable!("RenameTable is handled by commit_tree_rename"),
+                DdlAction::CopyTable { connection_id, database, schema, name, new_name, include_data, is_view, kind } => {
+                    let mut statements = Vec::new();
+                    match kind {
+                        core_domain::DatabaseKind::Postgres => {
+                            let qualified_old = match &schema {
+                                Some(s) => format!("\"{}\".\"{}\"", s.replace('"', "\"\""), name.replace('"', "\"\"")),
+                                None => format!("\"{}\"", name.replace('"', "\"\"")),
+                            };
+                            let qualified_new = match &schema {
+                                Some(s) => format!("\"{}\".\"{}\"", s.replace('"', "\"\""), new_name.replace('"', "\"\"")),
+                                None => format!("\"{}\"", new_name.replace('"', "\"\"")),
+                            };
+                            if is_view {
+                                statements.push(format!("CREATE VIEW {qualified_new} AS SELECT * FROM {qualified_old}"));
+                            } else {
+                                statements.push(format!("CREATE TABLE {qualified_new} (LIKE {qualified_old} INCLUDING ALL)"));
+                                if include_data {
+                                    statements.push(format!("INSERT INTO {qualified_new} SELECT * FROM {qualified_old}"));
+                                }
+                            }
+                        }
+                        core_domain::DatabaseKind::MongoDb => {
+                            statements.push(format!("db.createCollection(\"{}\")", new_name));
+                            if include_data {
+                                statements.push(format!("db.{}.find({{}}).forEach(function(d){{ db.{}.insert(d) }})", name, new_name));
+                            }
+                        }
+                        _ => {
+                            let old_escaped = name.replace('`', "``");
+                            let new_escaped = new_name.replace('`', "``");
+                            if is_view {
+                                statements.push(format!("CREATE VIEW `{new_escaped}` AS SELECT * FROM `{old_escaped}`"));
+                            } else {
+                                statements.push(format!("CREATE TABLE `{new_escaped}` LIKE `{old_escaped}`"));
+                                if include_data {
+                                    statements.push(format!("INSERT INTO `{new_escaped}` SELECT * FROM `{old_escaped}`"));
+                                }
+                            }
+                        }
+                    }
+                    let db = Some(database);
+                    let results = services.execute_sql_batch(&connection_id, db.as_deref(), statements).await;
+                    results.into_iter().collect::<std::result::Result<Vec<_>, _>>().map(|_| ())
+                }
             };
             let _ = sender.send(result.map_err(|e| e.to_string()));
         });
@@ -8742,7 +8939,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.children_by_node.retain(|k, _| !k.starts_with(&prefix));
             }
             DdlAction::DropTable { connection_id, database, schema, kind, .. }
-            | DdlAction::RenameTable { connection_id, database, schema, kind, .. } => {
+            | DdlAction::RenameTable { connection_id, database, schema, kind, .. }
+            | DdlAction::CopyTable { connection_id, database, schema, kind, .. } => {
                 // 清除父节点的 children 缓存，并触发重新加载
                 let parent_id = match kind {
                     core_domain::DatabaseKind::Postgres => {
@@ -9528,6 +9726,7 @@ impl eframe::App for DesktopApp {
         self.render_saved_query_dialog(ctx);
         self.render_ddl_input_dialog(ctx);
         self.render_ddl_delete_dialog(ctx);
+        self.render_delete_connection_dialog(ctx);
         self.render_batch_save_confirm_dialog(ctx);
         self.render_query_batch_save_confirm_dialog(ctx);
         self.render_shortcuts_dialog(ctx);
