@@ -9453,6 +9453,139 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
     }
 
+    fn start_generate_data(&mut self) {
+        let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        let total: usize = match tab.generate_data_count.parse() {
+            Ok(n) if n > 0 => n,
+            _ => return,
+        };
+
+        let table = tab.table.clone();
+        let database_kind = tab.database_kind;
+        let definition = tab.definition.clone();
+        let services = self.services.clone();
+        let handle = self.runtime.handle().clone();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+
+        tab.generate_data_running = true;
+        tab.generate_data_progress = Some(GenerateDataProgress { completed: 0, total });
+        self.generate_data_receiver = Some(receiver);
+        self.generate_data_cancel = Some(cancel.clone());
+
+        handle.spawn(async move {
+            let batch_size = 100usize;
+
+            if database_kind == DatabaseKind::MongoDb {
+                let fields = DesktopApp::sample_mongo_fields(&services, &table).await;
+                let mut completed = 0usize;
+                while completed < total {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = sender.send(GenerateDataEvent::Done(Ok(completed)));
+                        return;
+                    }
+                    let count = batch_size.min(total - completed);
+                    let cmd = DesktopApp::build_mongo_insert_command(&table, &fields, completed, count);
+                    let execution = QueryExecution {
+                        connection_id: table.connection_id.clone(),
+                        database: table.database.clone(),
+                        sql: cmd,
+                    };
+                    match services.execute_sql(execution).await {
+                        Ok(_) => {
+                            completed += count;
+                            let _ = sender.send(GenerateDataEvent::Progress { completed, total });
+                        }
+                        Err(e) => {
+                            let _ = sender.send(GenerateDataEvent::Done(Err(e.to_string())));
+                            return;
+                        }
+                    }
+                }
+                let _ = sender.send(GenerateDataEvent::Done(Ok(completed)));
+            } else {
+                let Some(def) = definition else {
+                    let _ = sender.send(GenerateDataEvent::Done(Err(tr!("表定义未加载").to_string())));
+                    return;
+                };
+                let mut completed = 0usize;
+                while completed < total {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = sender.send(GenerateDataEvent::Done(Ok(completed)));
+                        return;
+                    }
+                    let count = batch_size.min(total - completed);
+                    let sql = DesktopApp::build_batch_insert_sql(&table, &def.columns, database_kind, completed, count);
+                    let execution = QueryExecution {
+                        connection_id: table.connection_id.clone(),
+                        database: table.database.clone(),
+                        sql,
+                    };
+                    match services.execute_sql(execution).await {
+                        Ok(_) => {
+                            completed += count;
+                            let _ = sender.send(GenerateDataEvent::Progress { completed, total });
+                        }
+                        Err(e) => {
+                            let _ = sender.send(GenerateDataEvent::Done(Err(e.to_string())));
+                            return;
+                        }
+                    }
+                }
+                let _ = sender.send(GenerateDataEvent::Done(Ok(completed)));
+            }
+        });
+    }
+
+    fn poll_generate_data(&mut self) {
+        let Some(receiver) = self.generate_data_receiver.take() else {
+            return;
+        };
+        let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) else {
+            self.generate_data_receiver = Some(receiver);
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(GenerateDataEvent::Progress { completed, total }) => {
+                tab.generate_data_progress = Some(GenerateDataProgress { completed, total });
+                self.generate_data_receiver = Some(receiver);
+            }
+            Ok(GenerateDataEvent::Done(result)) => {
+                tab.generate_data_running = false;
+                self.generate_data_cancel = None;
+                match result {
+                    Ok(count) => {
+                        tab.generate_data_progress = Some(GenerateDataProgress {
+                            completed: count,
+                            total: count,
+                        });
+                        self.pending_refresh_active_table = Some(false);
+                    }
+                    Err(e) => {
+                        tab.error = Some(e);
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.generate_data_receiver = Some(receiver);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                tab.generate_data_running = false;
+                self.generate_data_cancel = None;
+            }
+        }
+    }
+
+    fn stop_generate_data(&mut self) {
+        if let Some(ref cancel) = self.generate_data_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn poll_ddl_pending_action(&mut self) {
         let Some(ref rx) = self.ddl_pending_action else { return };
         match rx.2.try_recv() {
@@ -9765,6 +9898,7 @@ impl eframe::App for DesktopApp {
         self.poll_ddl_pending_action();
         self.poll_tree_rename();
         self.poll_create_table();
+        self.poll_generate_data();
 
         // Two-phase refresh: first frame shows "正在刷新", next frame does the work
         if let Some(reload_definition) = self.pending_refresh_active_table.take() {
@@ -9777,6 +9911,7 @@ impl eframe::App for DesktopApp {
             || self.pending_database_list.is_some()
             || self.ddl_pending_action.is_some()
             || self.pending_update_check.is_some()
+            || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Table(t) if t.generate_data_running))
         {
             // 后台任务进行中时主动请求后续帧，避免必须等鼠标再次移动才显示结果。
             ctx.request_repaint_after(Duration::from_millis(16));
