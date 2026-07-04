@@ -356,6 +356,7 @@ struct TableTabState {
     preview_sort: TableSortState,
     preview_filter: TableFilterState,
     show_preview_filter: bool,
+    show_preview_sort: bool,
     preview_limit_enabled: bool,
     preview_page_size: u32,
     current_page: usize,
@@ -392,10 +393,32 @@ struct TableTabState {
     mongo_page_cursors: Vec<String>,
 }
 
-#[derive(Clone, Default)]
-struct TableSortState {
+impl Default for TableSortState {
+    fn default() -> Self {
+        Self {
+            clauses: vec![TableSortClause::default()],
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TableSortClause {
     column: Option<String>,
     descending: bool,
+}
+
+impl Default for TableSortClause {
+    fn default() -> Self {
+        Self {
+            column: None,
+            descending: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TableSortState {
+    clauses: Vec<TableSortClause>,
 }
 
 /// 表头列拖拽排序状态
@@ -2009,6 +2032,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             preview_sort: TableSortState::default(),
             preview_filter: TableFilterState::default(),
             show_preview_filter: false,
+            show_preview_sort: false,
             preview_limit_enabled: true,
             preview_page_size: 1000,
             current_page: 0,
@@ -2115,9 +2139,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.pending_table_preview = Some(receiver);
 
         // MongoDB 游标分页：无排序或按 _id 排序时使用 _id 游标，避免 skip() 性能问题
+        let sort_active_clauses: Vec<_> = tab.preview_sort.clauses.iter().filter(|c| c.column.is_some()).collect();
         let use_cursor_pagination = database_kind == DatabaseKind::MongoDb
-            && (tab.preview_sort.column.is_none()
-                || tab.preview_sort.column.as_deref() == Some("_id"));
+            && (sort_active_clauses.is_empty()
+                || (sort_active_clauses.len() == 1
+                    && sort_active_clauses[0].column.as_deref() == Some("_id")));
         let cursor_id = if use_cursor_pagination && tab.current_page > 0 {
             tab.mongo_page_cursors.get(tab.current_page.saturating_sub(1)).cloned()
         } else {
@@ -6622,8 +6648,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 TableViewMode::Data => {
                                     if tab.preview.is_some() || tab.error.is_some() {
                                         let live_preview_cursor = if tab.database_kind == DatabaseKind::MongoDb
-                                            && (tab.preview_sort.column.is_none()
-                                                || tab.preview_sort.column.as_deref() == Some("_id"))
+                                            && {
+                                                let active: Vec<_> = tab.preview_sort.clauses.iter().filter(|c| c.column.is_some()).collect();
+                                                active.is_empty()
+                                                    || (active.len() == 1 && active[0].column.as_deref() == Some("_id"))
+                                            }
                                             && tab.current_page > 0
                                         {
                                             tab.mongo_page_cursors.get(tab.current_page.saturating_sub(1)).map(|s| s.as_str())
@@ -6686,6 +6715,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             };
                                             if mini_button(ui, tr!("筛选"), filter_kind).clicked() {
                                                 tab.show_preview_filter = !tab.show_preview_filter;
+                                                if tab.show_preview_filter {
+                                                    tab.show_preview_sort = false;
+                                                }
+                                            }
+                                            let sort_active = tab.show_preview_sort
+                                                || table_sort_summary(&tab.preview_sort)
+                                                    .is_some();
+                                            let sort_kind = if sort_active {
+                                                MiniButtonKind::Accent
+                                            } else {
+                                                MiniButtonKind::Subtle
+                                            };
+                                            if mini_button(ui, tr!("排序"), sort_kind).clicked() {
+                                                tab.show_preview_sort = !tab.show_preview_sort;
+                                                if tab.show_preview_sort {
+                                                    tab.show_preview_filter = false;
+                                                }
                                             }
                                             let export_popup_id = egui::Id::new(("export-popup", &tab.id));
                                             let export_btn = mini_button(ui, tr!("导出 ▾"), MiniButtonKind::Subtle);
@@ -6921,6 +6967,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             &mut tab.preview_filter,
                                             &available_columns,
                                         );
+                                        ensure_table_sort_column(
+                                            &mut tab.preview_sort,
+                                            &available_columns,
+                                        );
                                         if tab.show_preview_filter
                                         {
                                             ui.add_space(6.0);
@@ -6950,7 +7000,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                let btn_width = 50.0;
+                                                                let btn_width = 60.0;
+                                                                if ui.add(
+                                                                    egui::Button::new(RichText::new(tr!("隐藏面板")).size(11.5).color(palette.hide_button_text))
+                                                                        .fill(palette.hide_button_bg)
+                                                                        .stroke(Stroke::new(1.0, palette.hide_button_stroke))
+                                                                        .corner_radius(4.0)
+                                                                        .min_size(Vec2::new(btn_width, 22.0)),
+                                                                ).clicked()
+                                                                {
+                                                                    tab.show_preview_filter = false;
+                                                                }
                                                                 if ui.add(
                                                                     egui::Button::new(RichText::new(tr!("清空")).size(11.5).color(palette.danger_button_text))
                                                                         .fill(palette.danger_button_bg)
@@ -7107,7 +7167,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             if clause_count > 1
                                                                 && mini_button(
                                                                     ui,
-                                                                    tr!("删除"),
+                                                                    "−",
                                                                     MiniButtonKind::Subtle,
                                                                 )
                                                                 .clicked()
@@ -7211,7 +7271,225 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 )
                                                                 .desired_width(f32::INFINITY)
                                                                 .desired_rows(2)
-                                                                .interactive(false)
+                                                                .frame(false),
+                                                            );
+                                                        });
+                                                });
+                                        }
+                                        if tab.show_preview_sort {
+                                            ui.add_space(6.0);
+                                            egui::Frame::new()
+                                                .fill(palette.search_bg)
+                                                .stroke(Stroke::new(1.0, palette.soft_border))
+                                                .corner_radius(6.0)
+                                                .inner_margin(egui::Margin::symmetric(8, 8))
+                                                .show(ui, |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.small(
+                                                            RichText::new(tr!("排序条件（最多8个）"))
+                                                                .strong()
+                                                                .color(palette.text),
+                                                        );
+                                                        if let Some(summary) =
+                                                            table_sort_summary(&tab.preview_sort)
+                                                        {
+                                                            ui.add_space(6.0);
+                                                            ui.small(
+                                                                RichText::new(summary)
+                                                                    .color(palette.selection_text),
+                                                            );
+                                                        }
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
+                                                            |ui| {
+                                                                let btn_width = 60.0;
+                                                                if ui.add(
+                                                                    egui::Button::new(RichText::new(tr!("隐藏面板")).size(11.5).color(palette.hide_button_text))
+                                                                        .fill(palette.hide_button_bg)
+                                                                        .stroke(Stroke::new(1.0, palette.hide_button_stroke))
+                                                                        .corner_radius(4.0)
+                                                                        .min_size(Vec2::new(btn_width, 22.0)),
+                                                                ).clicked()
+                                                                {
+                                                                    tab.show_preview_sort = false;
+                                                                }
+                                                                if ui.add(
+                                                                    egui::Button::new(RichText::new(tr!("清空")).size(11.5).color(palette.danger_button_text))
+                                                                        .fill(palette.danger_button_bg)
+                                                                        .stroke(Stroke::new(1.0, palette.danger_button_stroke))
+                                                                        .corner_radius(4.0)
+                                                                        .min_size(Vec2::new(btn_width, 22.0)),
+                                                                ).clicked()
+                                                                {
+                                                                    clear_table_sort_state(&mut tab.preview_sort);
+                                                                    tab.current_page = 0;
+                                                                    tab.mongo_page_cursors.clear();
+                                                                    action =
+                                                                        TabUiAction::RefreshActiveTable {
+                                                                            reload_definition: false,
+                                                                        };
+                                                                }
+                                                                if ui.add(
+                                                                    egui::Button::new(RichText::new(tr!("应用")).size(11.5).color(palette.accent_button_text))
+                                                                        .fill(palette.accent_button_bg)
+                                                                        .stroke(Stroke::new(1.0, palette.accent_button_stroke))
+                                                                        .corner_radius(4.0)
+                                                                        .min_size(Vec2::new(btn_width, 22.0)),
+                                                                ).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
+                                                                .clicked()
+                                                                {
+                                                                    tab.current_page = 0;
+                                                                    tab.mongo_page_cursors.clear();
+                                                                    action =
+                                                                        TabUiAction::RefreshActiveTable {
+                                                                            reload_definition: false,
+                                                                        };
+                                                                }
+                                                            },
+                                                        );
+                                                    });
+                                                    ui.add_space(8.0);
+                                                    let mut pending_remove = None;
+                                                    let mut add_clause = false;
+                                                    let clause_count = tab.preview_sort.clauses.len();
+                                                    if clause_count == 0 {
+                                                        if mini_button(ui, tr!("添加排序字段"), MiniButtonKind::Subtle).clicked() {
+                                                            add_clause = true;
+                                                        }
+                                                    }
+                                                    for (index, clause) in
+                                                        tab.preview_sort.clauses.iter_mut().enumerate()
+                                                    {
+                                                        if index > 0 {
+                                                            ui.add_space(6.0);
+                                                        }
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            let seq_label = format!("{}. ", index + 1);
+                                                            ui.small(
+                                                                RichText::new(seq_label)
+                                                                    .color(palette.weak_text),
+                                                            );
+                                                            let column_label = clause.column.clone().unwrap_or_else(|| tr!("选择列").into());
+                                                            let column_items: Vec<(String, bool)> = available_columns
+                                                                .iter()
+                                                                .map(|c| (c.clone(), clause.column.as_ref() == Some(c)))
+                                                                .collect();
+                                                            let column_items_ref: Vec<(&str, bool)> = column_items.iter().map(|(s, b)| (s.as_str(), *b)).collect();
+                                                            if let Some(sel) = toolbar_dropdown(
+                                                                ui,
+                                                                egui::Id::new(format!("table-sort-column-{}-{}", tab.title, index)),
+                                                                &column_label,
+                                                                140.0,
+                                                                &column_items_ref,
+                                                            ) {
+                                                                clause.column = Some(available_columns[sel].clone());
+                                                            }
+                                                            let dir_label = if clause.descending { tr!("降序") } else { tr!("升序") };
+                                                            let dir_items: Vec<(&str, bool)> = vec![
+                                                                (tr!("升序"), !clause.descending),
+                                                                (tr!("降序"), clause.descending),
+                                                            ];
+                                                            if let Some(sel) = toolbar_dropdown(
+                                                                ui,
+                                                                egui::Id::new(format!("table-sort-dir-{}-{}", tab.title, index)),
+                                                                dir_label,
+                                                                72.0,
+                                                                &dir_items,
+                                                            ) {
+                                                                clause.descending = sel == 1;
+                                                            }
+                                                            let add_enabled = clause_count < 8;
+                                                            let add_btn = ui.add_enabled_ui(add_enabled, |ui| {
+                                                                mini_button(ui, "+", MiniButtonKind::Subtle)
+                                                            }).inner;
+                                                            if add_enabled && add_btn.clicked() {
+                                                                add_clause = true;
+                                                            }
+                                                            if clause_count > 1 {
+                                                                let del_btn = mini_button(ui, "−", MiniButtonKind::Subtle);
+                                                                if del_btn.clicked() {
+                                                                    pending_remove = Some(index);
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                    if let Some(idx) = pending_remove {
+                                                        tab.preview_sort.clauses.remove(idx);
+                                                        tab.current_page = 0;
+                                                        tab.mongo_page_cursors.clear();
+                                                        action =
+                                                            TabUiAction::RefreshActiveTable {
+                                                                reload_definition: false,
+                                                            };
+                                                    }
+                                                    if add_clause && tab.preview_sort.clauses.len() < 8 {
+                                                        tab.preview_sort.clauses.push(TableSortClause::default());
+                                                    }
+                                                    ui.add_space(8.0);
+                                                    ui.horizontal(|ui| {
+                                                        ui.small(
+                                                            RichText::new(tr!("预览语句"))
+                                                                .strong()
+                                                                .color(palette.weak_text),
+                                                        );
+                                                        if tab
+                                                            .last_preview_sql
+                                                            .as_ref()
+                                                            .is_some_and(|sql| sql != &live_preview_sql)
+                                                        {
+                                                            ui.small(
+                                                                RichText::new(tr!("未应用"))
+                                                                    .color(palette.selection_text),
+                                                            );
+                                                        }
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
+                                                            |ui| {
+                                                                let btn_width = 50.0;
+                                                                if ui.add(
+                                                                    egui::Button::new(RichText::new(tr!("复制")).size(11.5).color(Color32::WHITE))
+                                                                        .fill(Color32::from_rgb(56, 108, 176))
+                                                                        .stroke(Stroke::new(1.0, Color32::from_rgb(76, 128, 196)))
+                                                                        .corner_radius(4.0)
+                                                                        .min_size(Vec2::new(btn_width, 22.0)),
+                                                                ).clicked()
+                                                                {
+                                                                    action =
+                                                                        TabUiAction::CopyTextToClipboard {
+                                                                            text: live_preview_sql
+                                                                                .clone(),
+                                                                            status_message:
+                                                                                tr!("已复制预览语句")
+                                                                                    .into(),
+                                                                        };
+                                                                }
+                                                            },
+                                                        );
+                                                    });
+                                                    ui.add_space(4.0);
+                                                    egui::Frame::new()
+                                                        .fill(palette.card_bg)
+                                                        .stroke(Stroke::new(
+                                                            1.0,
+                                                            palette.soft_border,
+                                                        ))
+                                                        .corner_radius(5.0)
+                                                        .inner_margin(egui::Margin::same(6))
+                                                        .show(ui, |ui| {
+                                                            let mut sql_text = live_preview_sql.clone();
+                                                            ui.add(
+                                                                TextEdit::multiline(
+                                                                    &mut sql_text,
+                                                                )
+                                                                .font(
+                                                                    egui::TextStyle::Monospace,
+                                                                )
+                                                                .desired_width(f32::INFINITY)
+                                                                .desired_rows(2)
                                                                 .frame(false),
                                                             );
                                                         });
@@ -10199,6 +10477,9 @@ struct MacUiPalette {
     danger_button_bg: Color32,
     danger_button_stroke: Color32,
     danger_button_text: Color32,
+    hide_button_bg: Color32,
+    hide_button_stroke: Color32,
+    hide_button_text: Color32,
     index_badge: Color32,
     new_row_bg: Color32,
 }
@@ -15894,20 +16175,58 @@ fn paint_table_grid_lines(
 }
 
 fn sort_indicator(sort_state: &TableSortState, column: &str) -> Option<bool> {
-    match sort_state.column.as_deref() {
-        Some(active) if active == column => Some(sort_state.descending),
-        _ => None,
+    for clause in &sort_state.clauses {
+        if clause.column.as_deref() == Some(column) {
+            return Some(clause.descending);
+        }
     }
+    None
 }
 
 fn set_table_sort_state(sort_state: &mut TableSortState, column: &str, descending: bool) {
-    sort_state.column = Some(column.to_string());
-    sort_state.descending = descending;
+    sort_state.clauses.clear();
+    sort_state.clauses.push(TableSortClause {
+        column: Some(column.to_string()),
+        descending,
+    });
 }
 
 fn clear_table_sort_state(sort_state: &mut TableSortState) {
-    sort_state.column = None;
-    sort_state.descending = false;
+    sort_state.clauses.clear();
+}
+
+fn table_sort_summary(sort_state: &TableSortState) -> Option<String> {
+    let parts: Vec<String> = sort_state
+        .clauses
+        .iter()
+        .filter_map(|c| {
+            c.column.as_ref().map(|col| {
+                format!(
+                    "{} {}",
+                    col,
+                    if c.descending { "DESC" } else { "ASC" }
+                )
+            })
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+fn ensure_table_sort_column(sort_state: &mut TableSortState, columns: &[String]) {
+    sort_state.clauses.retain(|c| {
+        c.column.is_none() || c.column.as_ref().is_some_and(|col| columns.contains(col))
+    });
+}
+
+fn has_active_sort(sort_state: &TableSortState) -> bool {
+    sort_state
+        .clauses
+        .iter()
+        .any(|c| c.column.is_some())
 }
 
 fn apply_table_sort_choice(
@@ -15917,19 +16236,12 @@ fn apply_table_sort_choice(
     descending: bool,
 ) {
     set_table_sort_state(sort_state, column, descending);
-    sort_query_result_rows(result, column, descending);
+    sort_query_result_rows(result, sort_state);
 }
 
 fn apply_saved_table_sort(result: &mut QueryResult, sort_state: &mut TableSortState) {
-    let Some(column) = sort_state.column.clone() else {
-        return;
-    };
-    if !result.columns.iter().any(|item| item == &column) {
-        sort_state.column = None;
-        sort_state.descending = false;
-        return;
-    }
-    sort_query_result_rows(result, &column, sort_state.descending);
+    ensure_table_sort_column(sort_state, &result.columns);
+    sort_query_result_rows(result, sort_state);
 }
 
 impl TableFilterOperator {
@@ -16115,12 +16427,18 @@ fn build_mongo_preview_cmd(
         None => filter_doc,
     };
     let mut cmd = format!("db.{collection}.find({effective_filter})");
-    if let Some(col) = sort.column.as_deref() {
-        let col = col.trim();
-        if !col.is_empty() {
-            let dir = if sort.descending { -1 } else { 1 };
-            cmd.push_str(&format!(".sort({{\"{col}\": {dir}}})"));
-        }
+    let sort_parts: Vec<String> = sort
+        .clauses
+        .iter()
+        .filter_map(|c| {
+            c.column.as_ref().filter(|col| !col.trim().is_empty()).map(|col| {
+                let dir = if c.descending { -1 } else { 1 };
+                format!("\"{}\": {}", col.trim(), dir)
+            })
+        })
+        .collect();
+    if !sort_parts.is_empty() {
+        cmd.push_str(&format!(".sort({{{}}})", sort_parts.join(", ")));
     }
     if let Some(limit) = limit {
         cmd.push_str(&format!(".limit({limit})"));
@@ -16324,11 +16642,22 @@ fn build_table_preview_sql(
         sql.push_str(&filter_clause);
     }
 
-    if let Some(column) = sort.column.as_deref() {
+    let order_parts: Vec<String> = sort
+        .clauses
+        .iter()
+        .filter_map(|c| {
+            c.column.as_ref().map(|col| {
+                format!(
+                    "{} {}",
+                    quote_identifier(database_kind, col),
+                    if c.descending { "DESC" } else { "ASC" }
+                )
+            })
+        })
+        .collect();
+    if !order_parts.is_empty() {
         sql.push_str("\nORDER BY ");
-        sql.push_str(&quote_identifier(database_kind, column));
-        sql.push(' ');
-        sql.push_str(if sort.descending { "DESC" } else { "ASC" });
+        sql.push_str(&order_parts.join(", "));
     }
 
     if let Some(limit) = limit {
@@ -16362,12 +16691,21 @@ fn build_table_preview_display_sql(
         parts.push(format!("WHERE {filter_clause}"));
     }
 
-    if let Some(column) = sort.column.as_deref() {
-        parts.push(format!(
-            "ORDER BY {} {}",
-            column,
-            if sort.descending { "DESC" } else { "ASC" }
-        ));
+    let order_parts: Vec<String> = sort
+        .clauses
+        .iter()
+        .filter_map(|c| {
+            c.column.as_ref().map(|col| {
+                format!(
+                    "{} {}",
+                    col,
+                    if c.descending { "DESC" } else { "ASC" }
+                )
+            })
+        })
+        .collect();
+    if !order_parts.is_empty() {
+        parts.push(format!("ORDER BY {}", order_parts.join(", ")));
     }
 
     if let Some(limit) = limit {
@@ -17041,14 +17379,29 @@ fn escape_like_pattern(value: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn sort_query_result_rows(result: &mut QueryResult, column: &str, descending: bool) {
+fn sort_query_result_rows(result: &mut QueryResult, sort_state: &TableSortState) {
+    let active: Vec<_> = sort_state
+        .clauses
+        .iter()
+        .filter(|c| c.column.is_some())
+        .collect();
+    if active.is_empty() {
+        return;
+    }
     result.rows.sort_by(|left, right| {
-        let ordering = compare_table_cell_value(left.get(column), right.get(column));
-        if descending {
-            ordering.reverse()
-        } else {
-            ordering
+        for clause in &active {
+            let col = clause.column.as_deref().unwrap();
+            let ordering = compare_table_cell_value(left.get(col), right.get(col));
+            let ordering = if clause.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
         }
+        Ordering::Equal
     });
 }
 
@@ -19270,6 +19623,9 @@ fn mac_ui_palette(visuals: &egui::Visuals) -> MacUiPalette {
             danger_button_bg: Color32::from_rgb(92, 58, 58),
             danger_button_stroke: Color32::from_rgb(126, 74, 74),
             danger_button_text: Color32::from_rgb(255, 229, 229),
+            hide_button_bg: Color32::from_rgb(45, 95, 95),
+            hide_button_stroke: Color32::from_rgb(70, 130, 130),
+            hide_button_text: Color32::from_rgb(210, 245, 245),
             index_badge: Color32::from_rgb(70, 191, 128),
             new_row_bg: Color32::from_rgba_premultiplied(40, 80, 40, 60),
         }
@@ -19314,6 +19670,9 @@ fn mac_ui_palette(visuals: &egui::Visuals) -> MacUiPalette {
             danger_button_bg: Color32::from_rgb(255, 225, 225),
             danger_button_stroke: Color32::from_rgb(240, 186, 186),
             danger_button_text: Color32::from_rgb(180, 44, 44),
+            hide_button_bg: Color32::from_rgb(210, 240, 235),
+            hide_button_stroke: Color32::from_rgb(165, 210, 200),
+            hide_button_text: Color32::from_rgb(30, 100, 90),
             index_badge: Color32::from_rgb(48, 167, 104),
             new_row_bg: Color32::from_rgba_premultiplied(40, 80, 40, 45),
         }
