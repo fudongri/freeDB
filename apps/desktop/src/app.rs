@@ -99,6 +99,7 @@ pub struct DesktopApp {
     native_menu_initialized: bool,
     // 菜单项引用，用于切换语言后动态更新标签
     menu_view: Option<muda::Submenu>,
+    menu_settings: Option<muda::Submenu>,
     menu_shortcuts: Option<muda::MenuItem>,
     menu_log: Option<muda::MenuItem>,
     menu_lang: Option<muda::MenuItem>,
@@ -802,6 +803,7 @@ impl DesktopApp {
         menu_event_rx: Option<Receiver<muda::MenuEvent>>,
         native_menu: Option<muda::Menu>,
         menu_view: Option<muda::Submenu>,
+        menu_settings: Option<muda::Submenu>,
         menu_shortcuts: Option<muda::MenuItem>,
         menu_log: Option<muda::MenuItem>,
         menu_lang: Option<muda::MenuItem>,
@@ -841,12 +843,13 @@ impl DesktopApp {
             .and_then(|value| value.parse::<f32>().ok())
             .unwrap_or(1.0)
             .clamp(0.5, 3.0);
+        let default_scroll_speed = if cfg!(target_os = "macos") { 5.0 } else { 7.0 };
         let scroll_speed = services
             .load_ui_state("scroll_speed")
             .ok()
             .flatten()
             .and_then(|value| value.parse::<f32>().ok())
-            .unwrap_or(5.0)
+            .unwrap_or(default_scroll_speed)
             .clamp(0.1, 100.0);
         let mut app = Self {
             runtime,
@@ -918,6 +921,7 @@ impl DesktopApp {
             native_menu,
             native_menu_initialized: false,
             menu_view,
+            menu_settings,
             menu_shortcuts,
             menu_log,
             menu_lang,
@@ -1126,6 +1130,7 @@ impl DesktopApp {
                 let _ = self.services.save_ui_state("locale", new_locale.to_code());
                 // 更新原生菜单标签
                 if let Some(m) = &self.menu_view { m.set_text(tr!("查看")); }
+                if let Some(m) = &self.menu_settings { m.set_text(tr!("设置")); }
                 if let Some(m) = &self.menu_shortcuts { m.set_text(tr!("快捷键速查表")); }
                 if let Some(m) = &self.menu_log { m.set_text(tr!("运行日志")); }
                 if let Some(m) = &self.menu_lang {
@@ -3705,17 +3710,42 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, 0.0, bg);
 
+        let shortcuts = [
+            (format!("{}+D", MOD_KEY), tr!("新建查询")),
+            (format!("{}+R", MOD_KEY), tr!("执行查询")),
+            (format!("{}+S", MOD_KEY), tr!("保存查询")),
+            (format!("{}+W", MOD_KEY), tr!("关闭标签页")),
+            (format!("{}+/", MOD_KEY), tr!("切换注释")),
+            (format!("{}+,", MOD_KEY), tr!("自动补全")),
+        ];
+
         let title_height = 48.0;
         let sub_height = 20.0;
         let gap = 12.0;
-        let total_height = title_height + gap + sub_height;
-        let top_margin = (available_size.y - total_height).max(0.0) / 2.0;
+        let shortcuts_height = shortcuts.len() as f32 * 22.0 + 30.0;
+        let total_height = title_height + gap + sub_height + gap + shortcuts_height;
+        let top_margin = ((available_size.y - total_height) / 2.0).max(0.0);
 
         ui.add_space(top_margin);
         ui.vertical_centered(|ui| {
             ui.label(title);
             ui.add_space(gap);
             ui.label(subtitle);
+            ui.add_space(gap * 2.0);
+
+            for (key, desc) in &shortcuts {
+                ui.horizontal(|ui| {
+                    ui.add_space(ui.available_width() / 2.0 - 80.0);
+                    ui.label(
+                        RichText::new(key.clone())
+                            .family(FontFamily::Monospace)
+                            .size(12.0)
+                            .color(text_color),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(desc.clone()).size(12.0).color(sub_color));
+                });
+            }
         });
     }
 
@@ -8376,7 +8406,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             (format!("{}+=", MOD_KEY), tr!("放大")),
                             (format!("{}+-", MOD_KEY), tr!("缩小")),
                             (format!("{}+0", MOD_KEY), tr!("重置缩放")),
-                            ("Ctrl+Space".into(), tr!("触发自动补全")),
+                            (format!("{}+,", MOD_KEY).into(), tr!("触发自动补全")),
                             ("Escape".into(), tr!("关闭搜索/取消选择")),
                         ];
                         for (key, desc) in &shortcuts {
@@ -8480,7 +8510,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             ui.label(RichText::new(format!("{:.1}x", self.scroll_speed)).size(11.0));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.small_button(tr!("默认")).clicked() {
-                                    self.scroll_speed = 5.0;
+                                    self.scroll_speed = if cfg!(target_os = "macos") { 5.0 } else { 7.0 };
                                 }
                             });
                         });
@@ -18011,14 +18041,14 @@ fn check_autocomplete_triggers(
 
     let ctx = ui.ctx();
 
-    // Ctrl+Space shortcut
-    let ctrl_space = ctx.input_mut(|input| {
+    // Cmd+, shortcut
+    let cmd_comma = ctx.input_mut(|input| {
         input.consume_shortcut(&egui::KeyboardShortcut::new(
-            egui::Modifiers::CTRL,
-            egui::Key::Space,
-        )) || (input.modifiers.ctrl && input.key_pressed(egui::Key::Space))
+            egui::Modifiers::COMMAND,
+            egui::Key::Comma,
+        )) || (input.modifiers.command && input.key_pressed(egui::Key::Comma))
     });
-    if ctrl_space {
+    if cmd_comma {
         tab.autocomplete.trigger_requested = true;
     }
 
