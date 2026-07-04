@@ -2,7 +2,7 @@ use app_services::AppServices;
 use i18n::{self, tr, Locale, get_locale, set_locale};
 use core_domain::{
     ColumnDefinition, ConnectionProfile, ConnectionProfileInput, DatabaseKind, ExplorerNode,
-    ExplorerNodeType, QueryCellValue, QueryExecution, QueryResult, SavedQueryEntry, SslMode,
+    ExplorerNodeType, MongoValue, QueryCellValue, QueryExecution, QueryResult, SavedQueryEntry, SslMode,
     TableDefinition, TableRef,
 };
 use regex::Regex;
@@ -386,6 +386,8 @@ struct TableTabState {
     column_drag: Option<TableColumnDragState>,
     show_column_filter: bool,
     search: TableSearchState,
+    // MongoDB 游标分页：每页最后一条的 _id
+    mongo_page_cursors: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1498,6 +1500,18 @@ impl DesktopApp {
                                 );
                                 tab.preview_column_widths =
                                     estimate_result_column_widths(&preview);
+                                // 提取最后一条的 _id 用于 MongoDB 游标分页
+                                if tab.database_kind == DatabaseKind::MongoDb {
+                                    if let Some(last_row) = preview.rows.last() {
+                                        if let Some(QueryCellValue::Text(oid)) = last_row.get("_id") {
+                                            if tab.current_page >= tab.mongo_page_cursors.len() {
+                                                tab.mongo_page_cursors.push(oid.clone());
+                                            } else {
+                                                tab.mongo_page_cursors[tab.current_page] = oid.clone();
+                                            }
+                                        }
+                                    }
+                                }
                                 tab.preview = Some(preview);
                                 tab.selected_preview_rows
                                     .retain(|index| *index < row_count);
@@ -1990,6 +2004,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             column_drag: None,
             show_column_filter: false,
             search: TableSearchState::default(),
+            mongo_page_cursors: Vec::new(),
         };
         self.tabs.push(WorkspaceTab::Table(table_tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
@@ -2007,6 +2022,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             Some(1000),
             Some(0),
             None,
+            None,
         );
         let preview_sql = build_table_preview_sql(
             database_kind,
@@ -2016,26 +2032,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             Some(1000),
             Some(0),
             None,
+            None,
         );
         handle.spawn(async move {
-            let definition = services
-                .load_table_definition(&table)
-                .await
-                .map_err(|error| error.to_string());
             let execution = QueryExecution {
                 connection_id: table.connection_id.clone(),
                 database: table.database.clone(),
                 sql: preview_sql,
             };
-            let preview = services
-                .execute_sql(execution)
-                .await
-                .map_err(|error| error.to_string());
+            let (definition, preview) = tokio::join!(
+                services.load_table_definition(&table),
+                services.execute_sql(execution),
+            );
             let _ = sender.send(TablePreviewLoadResult {
                 tab_id,
                 table_name: table.table.clone(),
-                definition: Some(definition),
-                preview,
+                definition: Some(definition.map_err(|error| error.to_string())),
+                preview: preview.map_err(|error| error.to_string()),
                 reloaded_definition: true,
             });
         });
@@ -2065,14 +2078,33 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let handle = self.runtime.handle().clone();
         let (sender, receiver) = mpsc::channel();
         self.pending_table_preview = Some(receiver);
+
+        // MongoDB 游标分页：无排序或按 _id 排序时使用 _id 游标，避免 skip() 性能问题
+        let use_cursor_pagination = database_kind == DatabaseKind::MongoDb
+            && (tab.preview_sort.column.is_none()
+                || tab.preview_sort.column.as_deref() == Some("_id"));
+        let cursor_id = if use_cursor_pagination && tab.current_page > 0 {
+            tab.mongo_page_cursors.get(tab.current_page.saturating_sub(1)).cloned()
+        } else {
+            None
+        };
+
+        let offset = if cursor_id.is_some() {
+            None
+        } else {
+            Some(tab.current_page * tab.preview_page_size.max(1) as usize)
+        };
+        let cursor_ref = cursor_id.as_deref();
+
         let display_sql = build_table_preview_display_sql(
             database_kind,
             &table,
             &tab.preview_filter,
             &tab.preview_sort,
             Some(tab.preview_page_size.max(1)),
-            Some(tab.current_page * tab.preview_page_size.max(1) as usize),
+            offset,
             definition_for_filter.as_ref(),
+            cursor_ref,
         );
         let preview_sql = build_table_preview_sql(
             database_kind,
@@ -2080,29 +2112,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             &tab.preview_filter,
             &tab.preview_sort,
             Some(tab.preview_page_size.max(1)),
-            Some(tab.current_page * tab.preview_page_size.max(1) as usize),
+            offset,
             definition_for_filter.as_ref(),
+            cursor_ref,
         );
         handle.spawn(async move {
-            let definition = if reload_definition {
-                Some(
-                    services
-                        .load_table_definition(&table)
-                        .await
-                        .map_err(|error| error.to_string()),
-                )
-            } else {
-                None
-            };
             let execution = QueryExecution {
                 connection_id: table.connection_id.clone(),
                 database: table.database.clone(),
                 sql: preview_sql,
             };
-            let preview = services
-                .execute_sql(execution)
-                .await
-                .map_err(|error| error.to_string());
+            let (definition, preview) = if reload_definition {
+                let (def, prev) = tokio::join!(
+                    services.load_table_definition(&table),
+                    services.execute_sql(execution),
+                );
+                (Some(def.map_err(|error| error.to_string())), prev.map_err(|error| error.to_string()))
+            } else {
+                (None, services.execute_sql(execution).await.map_err(|error| error.to_string()))
+            };
             let _ = sender.send(TablePreviewLoadResult {
                 tab_id,
                 table_name: table.table.clone(),
@@ -2372,9 +2400,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn export_active_result(&mut self, format: ExportFormat) {
+        let db_kind = match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Table(tab)) => Some(tab.database_kind),
+            Some(WorkspaceTab::Query(tab)) => tab.connection_id.as_deref()
+                .map(|cid| self.database_kind_for_connection(cid)),
+            _ => None,
+        };
+        let is_mongo = db_kind == Some(DatabaseKind::MongoDb);
         let (filter_name, extensions): (&str, &[&str]) = match format {
             ExportFormat::Csv => ("CSV", &["csv"]),
             ExportFormat::Xlsx => ("Excel", &["xlsx"]),
+            ExportFormat::Sql if is_mongo => ("MongoDB Shell", &["js"]),
             ExportFormat::Sql => ("SQL", &["sql"]),
         };
         let Some(path) = FileDialog::new().add_filter(filter_name, extensions).save_file() else {
@@ -2398,7 +2434,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     Some(WorkspaceTab::Table(tab)) => tab.table.table.clone(),
                     _ => "query_result".to_string(),
                 };
-                self.services.export_query_result_sql(&result, &table_name, &path)
+                if is_mongo {
+                    self.services.export_query_result_mongo(&result, &table_name, &path)
+                } else {
+                    self.services.export_query_result_sql(&result, &table_name, &path)
+                }
             }
         };
         match res {
@@ -2419,11 +2459,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     ) {
         let suffix = if include_data { "structure_data" } else { "structure" };
         let default_name = table.as_deref().unwrap_or("database_dump");
-        let Some(path) = FileDialog::new()
-            .add_filter("SQL", &["sql"])
-            .set_file_name(format!("{default_name}_{suffix}.sql"))
-            .save_file()
-        else {
+        let dialog = if db_kind == DatabaseKind::MongoDb {
+            FileDialog::new()
+                .add_filter("MongoDB Shell", &["js"])
+                .set_file_name(format!("{default_name}_{suffix}.js"))
+        } else {
+            FileDialog::new()
+                .add_filter("SQL", &["sql"])
+                .set_file_name(format!("{default_name}_{suffix}.sql"))
+        };
+        let Some(path) = dialog.save_file() else {
             return;
         };
 
@@ -2456,7 +2501,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
 
         self.pending_sql_dump = Some(receiver);
-        self.status_message = tr!("正在生成 SQL 转储…").into();
+        self.status_message = tr!("正在生成转储…").into();
     }
 
     fn poll_sql_dump(&mut self) {
@@ -2468,7 +2513,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     Ok(sql) => {
                         match std::fs::write(&result.path, &sql) {
                             Ok(_) => {
-                                self.status_message = tr!("SQL 转储已保存到 {}", result.path.display());
+                                self.status_message = tr!("转储已保存到 {}", result.path.display());
                                 self.status_level = StatusLevel::Success;
                             }
                             Err(e) => {
@@ -2478,7 +2523,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                     }
                     Err(e) => {
-                        self.status_message = tr!("SQL 转储失败: {}", e);
+                        self.status_message = tr!("转储失败: {}", e);
                         self.status_level = StatusLevel::Error;
                     }
                 }
@@ -2486,7 +2531,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.pending_sql_dump = None;
-                self.status_message = tr!("SQL 转储任务异常终止").into();
+                self.status_message = tr!("转储任务异常终止").into();
                 self.status_level = StatusLevel::Error;
             }
         }
@@ -3225,8 +3270,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let kind = self.database_kind_for_connection(&node.connection_id);
                         // Database node: DDL actions
                         if matches!(node.node_type, ExplorerNodeType::Database) {
-                            // 新建表
-                            if ui.button(tr!("新建表")).clicked() {
+                            // 新建表 / 新建集合
+                            let create_label = if kind == DatabaseKind::MongoDb {
+                                tr!("新建集合")
+                            } else {
+                                tr!("新建表")
+                            };
+                            if ui.button(create_label).clicked() {
                                 actions.push(SidebarAction::CreateTable {
                                     connection_id: node.connection_id.clone(),
                                     database: node.name.clone(),
@@ -3270,8 +3320,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.close();
                                 }
                             }
-                            // 转储 SQL 子菜单
-                            ui.menu_button(tr!("转储 SQL ▸"), |ui| {
+                            // 转储子菜单
+                            let dump_label = if kind == DatabaseKind::MongoDb {
+                                tr!("转储数据 ▸")
+                            } else {
+                                tr!("转储 SQL ▸")
+                            };
+                            ui.menu_button(dump_label, |ui| {
                                 if ui.button(tr!("仅结构")).clicked() {
                                     let conn_id = node.connection_id.clone();
                                     let k = self.database_kind_for_connection(&conn_id);
@@ -3380,12 +3435,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                     }
                     ExplorerNodeType::Table | ExplorerNodeType::View => {
+                        let kind = self.database_kind_for_connection(&node.connection_id);
                         let (label, shortcut) = match node.node_type {
                             ExplorerNodeType::View => (tr!("在视图上新建查询"), format!("{}+D", MOD_KEY)),
+                            _ if kind == DatabaseKind::MongoDb => (tr!("在集合上新建查询"), format!("{}+D", MOD_KEY)),
                             _ => (tr!("在表上新建查询"), format!("{}+D", MOD_KEY)),
                         };
                         if menu_button_with_shortcut(ui, label, &shortcut) {
-                            let kind = self.database_kind_for_connection(&node.connection_id);
                             let db = node.database.clone();
                             let sql = if kind == DatabaseKind::MongoDb {
                                 format!("db.{}.find({{}}).limit(100);\n", node.name)
@@ -3409,13 +3465,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             ui.close();
                         }
                         let is_view = matches!(node.node_type, ExplorerNodeType::View);
-                        let rename_label = if is_view { tr!("重命名视图") } else { tr!("重命名表") };
+                        let rename_label = if is_view {
+                            tr!("重命名视图")
+                        } else if kind == DatabaseKind::MongoDb {
+                            tr!("重命名集合")
+                        } else {
+                            tr!("重命名表")
+                        };
                         if ui.button(rename_label).clicked() {
                             actions.push(SidebarAction::StartTreeRename(node.clone()));
                             ui.close();
                         }
-                        // 转储 SQL 子菜单
-                        ui.menu_button(tr!("转储 SQL ▸"), |ui| {
+                        let node_kind = self.database_kind_for_connection(&node.connection_id);
+                        let dump_label = if node_kind == DatabaseKind::MongoDb {
+                            tr!("转储数据 ▸")
+                        } else {
+                            tr!("转储 SQL ▸")
+                        };
+                        // 转储子菜单
+                        ui.menu_button(dump_label, |ui| {
                             if ui.button(tr!("仅结构")).clicked() {
                                 let conn_id = node.connection_id.clone();
                                 let kind = self.database_kind_for_connection(&conn_id);
@@ -3446,7 +3514,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             }
                         });
                         let is_view = matches!(node.node_type, ExplorerNodeType::View);
-                        let del_label = if is_view { tr!("删除视图") } else { tr!("删除表") };
+                        let del_label = if is_view {
+                            tr!("删除视图")
+                        } else if kind == DatabaseKind::MongoDb {
+                            tr!("删除集合")
+                        } else {
+                            tr!("删除表")
+                        };
                         let delete_btn = egui::Button::new(
                             RichText::new(del_label).color(Color32::from_rgb(220, 53, 69))
                         );
@@ -3563,7 +3637,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 let (title, icon) = match tab {
                                     WorkspaceTab::Query(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
                                     WorkspaceTab::Table(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
-                                    WorkspaceTab::CreateTable(_) => (tr!("新建表"), "△"),
+                                    WorkspaceTab::CreateTable(state) => {
+                                        let title = if state.database_kind == DatabaseKind::MongoDb {
+                                            tr!("新建集合")
+                                        } else {
+                                            tr!("新建表")
+                                        };
+                                        (title, "△")
+                                    },
                                     WorkspaceTab::Dashboard => ("Dashboard", "◉"),
                                 };
                                 let interaction = tab_button(
@@ -4366,6 +4447,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 None => format!("pg-db:{}:{}", conn_id, database),
                             }
                         }
+                        core_domain::DatabaseKind::MongoDb => {
+                            format!("mongo-db:{}:{}", conn_id, database)
+                        }
                         _ => format!("mysql-db:{}:{}", conn_id, database),
                     };
                     self.reload_node_children(&conn_id, &parent_id);
@@ -4919,23 +5003,44 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             self.status_message = tr!("视图暂不支持删除记录").into();
             return;
         }
-        let where_clauses = rows
-            .iter()
-            .map(|row| build_table_row_match_clause(database_kind, definition.as_ref(), row, &table))
-            .collect::<Option<Vec<_>>>();
-        let Some(where_clauses) = where_clauses else {
-            self.status_message = tr!("无法定位当前记录，不能直接删除").into();
-            return;
-        };
-        let sql = format!(
-            "DELETE FROM {}\nWHERE {}",
-            qualified_table_name(database_kind, &table),
-            where_clauses
+        let sql = if database_kind == DatabaseKind::MongoDb {
+            let match_docs: Option<Vec<String>> = rows
                 .iter()
-                .map(|clause| format!("({clause})"))
-                .collect::<Vec<_>>()
-                .join("\n   OR ")
-        );
+                .map(|row| build_mongo_row_match_doc(definition.as_ref(), row))
+                .collect();
+            let Some(docs) = match_docs else {
+                self.status_message = tr!("无法定位当前记录，不能直接删除").into();
+                return;
+            };
+            if docs.len() == 1 {
+                format!("db.{}.deleteOne({{ {} }})", table.table, docs[0])
+            } else {
+                let or_list = docs
+                    .iter()
+                    .map(|d| format!("{{ {d} }}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("db.{}.deleteMany({{ $or: [{or_list}] }})", table.table)
+            }
+        } else {
+            let where_clauses = rows
+                .iter()
+                .map(|row| build_table_row_match_clause(database_kind, definition.as_ref(), row, &table))
+                .collect::<Option<Vec<_>>>();
+            let Some(where_clauses) = where_clauses else {
+                self.status_message = tr!("无法定位当前记录，不能直接删除").into();
+                return;
+            };
+            format!(
+                "DELETE FROM {}\nWHERE {}",
+                qualified_table_name(database_kind, &table),
+                where_clauses
+                    .iter()
+                    .map(|clause| format!("({clause})"))
+                    .collect::<Vec<_>>()
+                    .join("\n   OR ")
+            )
+        };
         let success_message = if row_indices.len() > 1 {
             tr!("删除 {} 条记录成功", row_indices.len())
         } else {
@@ -4996,9 +5101,24 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .map(|item| item.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>())
             .filter(|columns| !columns.is_empty())
             .unwrap_or_else(|| rows.first().map(|row| row.keys().cloned().collect()).unwrap_or_default());
-        let sql = build_insert_sql_for_existing_rows(database_kind, &table, &columns, &rows);
-        ctx.copy_text(sql);
-        self.status_message = if row_indices.len() > 1 {
+        let text = if database_kind == DatabaseKind::MongoDb {
+            let mongo_types = self.tabs.get(self.active_tab)
+                .and_then(|tab| match tab {
+                    WorkspaceTab::Table(t) => Some(&t.preview.as_ref()?.mongo_types),
+                    _ => None,
+                });
+            build_mongo_insert_commands(&table, &columns, &rows, row_indices, mongo_types)
+        } else {
+            build_insert_sql_for_existing_rows(database_kind, &table, &columns, &rows)
+        };
+        ctx.copy_text(text);
+        self.status_message = if database_kind == DatabaseKind::MongoDb {
+            if row_indices.len() > 1 {
+                tr!("已复制 {} 条记录的 insertMany 命令", row_indices.len())
+            } else {
+                tr!("已复制为 insertOne 命令").into()
+            }
+        } else if row_indices.len() > 1 {
             tr!("已复制 {} 条记录的 INSERT 语句", row_indices.len())
         } else {
             tr!("已复制为 INSERT 语句").into()
@@ -5770,10 +5890,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if segment_button_color(ui, tr!("字段"), seg_cols, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Columns; }
             // 索引
             if segment_button_color(ui, tr!("索引"), seg_idxs, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Indexes; }
-            // SQL预览
-            if segment_button_color(ui, tr!("SQL预览"), seg_sql, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Sql; }
+            // SQL预览 / 脚本预览
+            let sql_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("脚本预览") } else { tr!("SQL预览") };
+            if segment_button_color(ui, sql_label, seg_sql, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Sql; }
             ui.add_space(12.0);
-            ui.label(RichText::new(tr!("表名:")).color(palette.weak_text));
+            let name_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("集合名:") } else { tr!("表名:") };
+            ui.label(RichText::new(name_label).color(palette.weak_text));
             let visuals = ui.visuals_mut();
             if !visuals.dark_mode {
                 visuals.widgets.inactive.bg_fill = Color32::WHITE;
@@ -6305,14 +6427,29 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             match tab.active_view {
                                 TableViewMode::Data => {
                                     if tab.preview.is_some() || tab.error.is_some() {
+                                        let live_preview_cursor = if tab.database_kind == DatabaseKind::MongoDb
+                                            && (tab.preview_sort.column.is_none()
+                                                || tab.preview_sort.column.as_deref() == Some("_id"))
+                                            && tab.current_page > 0
+                                        {
+                                            tab.mongo_page_cursors.get(tab.current_page.saturating_sub(1)).map(|s| s.as_str())
+                                        } else {
+                                            None
+                                        };
+                                        let live_preview_offset = if live_preview_cursor.is_some() {
+                                            None
+                                        } else {
+                                            Some(tab.current_page * tab.preview_page_size.max(1) as usize)
+                                        };
                                         let live_preview_sql = build_table_preview_display_sql(
                                             tab.database_kind,
                                             &tab.table,
                                             &tab.preview_filter,
                                             &tab.preview_sort,
                                             Some(tab.preview_page_size.max(1)),
-                                            Some(tab.current_page * tab.preview_page_size.max(1) as usize),
+                                            live_preview_offset,
                                             tab.definition.as_ref(),
+                                            live_preview_cursor,
                                         );
                                         let mut column_btn_rect: Option<egui::Rect> = None;
                                         ui.horizontal(|ui| {
@@ -6321,6 +6458,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 .clicked()
                                             {
                                                 tab.current_page = 0;
+                                                tab.mongo_page_cursors.clear();
                                                 action =
                                                     TabUiAction::RefreshActiveTable { reload_definition: true };
                                             }
@@ -6380,7 +6518,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         action = TabUiAction::ExportActiveResult(ExportFormat::Xlsx);
                                                         ui.close();
                                                     }
-                                                    if ui.button("SQL").clicked() {
+                                                    let sql_label = if tab.database_kind == DatabaseKind::MongoDb { "脚本" } else { "SQL" };
+                                                    if ui.button(sql_label).clicked() {
                                                         action = TabUiAction::ExportActiveResult(ExportFormat::Sql);
                                                         ui.close();
                                                     }
@@ -6633,6 +6772,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                         &available_columns,
                                                                     );
                                                                     tab.current_page = 0;
+                                                                    tab.mongo_page_cursors.clear();
                                                                     action =
                                                                         TabUiAction::RefreshActiveTable {
                                                                             reload_definition: false,
@@ -6648,6 +6788,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 .clicked()
                                                                 {
                                                                     tab.current_page = 0;
+                                                                    tab.mongo_page_cursors.clear();
                                                                     action =
                                                                         TabUiAction::RefreshActiveTable {
                                                                             reload_definition: false,
@@ -6983,6 +7124,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let first_hover = first_btn.response.clone();
                         if first_btn.inner.clicked() {
                             tab.current_page = 0;
+                            tab.mongo_page_cursors.clear();
                             footer_refresh_requested = true;
                         }
                         first_hover.on_hover_ui(|ui| {
@@ -8345,6 +8487,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 None => format!("DROP {} \"{}\"", if is_view { "VIEW" } else { "TABLE" }, name.replace('"', "\"\"")),
                             }
                         }
+                        core_domain::DatabaseKind::MongoDb => {
+                            format!("db.{}.drop()", name)
+                        }
                         _ => format!("DROP {} `{}`", if is_view { "VIEW" } else { "TABLE" }, name.replace('`', "``")),
                     };
                     let db = Some(database);
@@ -8401,13 +8546,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let prefix = format!("{}:{}", conn_id, database);
                 self.children_by_node.retain(|k, _| !k.starts_with(&prefix));
             }
-            DdlAction::DropTable { connection_id, database, schema, .. }
-            | DdlAction::RenameTable { connection_id, database, schema, .. } => {
+            DdlAction::DropTable { connection_id, database, schema, kind, .. }
+            | DdlAction::RenameTable { connection_id, database, schema, kind, .. } => {
                 // 清除父节点的 children 缓存，并触发重新加载
-                let parent_id = if let Some(s) = schema {
-                    format!("pg-schema:{}:{}:{}", connection_id, database, s)
-                } else {
-                    format!("mysql-db:{}:{}", connection_id, database)
+                let parent_id = match kind {
+                    core_domain::DatabaseKind::Postgres => {
+                        if let Some(s) = schema {
+                            format!("pg-schema:{}:{}:{}", connection_id, database, s)
+                        } else {
+                            format!("pg-db:{}:{}", connection_id, database)
+                        }
+                    }
+                    core_domain::DatabaseKind::MongoDb => {
+                        format!("mongo-db:{}:{}", connection_id, database)
+                    }
+                    _ => format!("mysql-db:{}:{}", connection_id, database),
                 };
                 self.children_by_node.remove(&parent_id);
                 self.children_by_node.remove(&format!("pg-db:{}:{}", connection_id, database));
@@ -11630,7 +11783,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     );
                                                 ui.close();
                                             }
-                                            let copy_label = if selected_count > 1 {
+                                            let copy_label = if tab.database_kind == DatabaseKind::MongoDb {
+                                                if selected_count > 1 {
+                                                    tr!("复制选中 {} 条为 insertMany", selected_count)
+                                                } else {
+                                                    tr!("复制为 insertOne 命令").into()
+                                                }
+                                            } else if selected_count > 1 {
                                                 tr!("复制选中 {} 条为 INSERT", selected_count)
                                             } else {
                                                 tr!("复制为 INSERT 语句").into()
@@ -11854,7 +12013,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         );
                                                     ui.close();
                                                 }
-                                                let copy_label = if selected_count > 1 {
+                                                let copy_label = if tab.database_kind == DatabaseKind::MongoDb {
+                                                    if selected_count > 1 {
+                                                        tr!("复制选中 {} 条为 insertMany", selected_count)
+                                                    } else {
+                                                        tr!("复制为 insertOne 命令").into()
+                                                    }
+                                                } else if selected_count > 1 {
                                                     tr!("复制选中 {} 条为 INSERT", selected_count)
                                                 } else {
                                                     tr!("复制为 INSERT 语句").into()
@@ -12180,6 +12345,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
             }
         }
         tab.current_page = 0;
+        tab.mongo_page_cursors.clear();
         return TabUiAction::RefreshActiveTable {
             reload_definition: false,
         };
@@ -13268,6 +13434,12 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
     let name = state.table_name.trim();
     if name.is_empty() { return String::new(); }
     let db_kind = state.database_kind;
+
+    // MongoDB: 生成 createCollection 命令
+    if db_kind == DatabaseKind::MongoDb {
+        return format!("db.createCollection(\"{}\")", name.replace('"', "\\\""));
+    }
+
     let q = |id: &str| quote_identifier(db_kind, id);
     let active: Vec<&EditableColumn> = state.columns.iter().filter(|c| !c.is_dropped && !c.name.trim().is_empty()).collect();
     if active.is_empty() { return String::new(); }
@@ -15426,9 +15598,15 @@ fn build_mongo_preview_cmd(
     limit: Option<u32>,
     offset: Option<usize>,
     definition: Option<&TableDefinition>,
+    cursor_id: Option<&str>,
 ) -> String {
     let filter_doc = build_mongo_filter_doc(filter, definition);
-    let mut cmd = format!("db.{collection}.find({filter_doc})");
+    let effective_filter = match cursor_id {
+        Some(oid) if filter_doc == "{}" => format!("{{_id: ObjectId(\"{}\")}}", oid),
+        Some(oid) => format!("{{$and: [{}, {{_id: ObjectId(\"{}\")}}]}}", filter_doc, oid),
+        None => filter_doc,
+    };
+    let mut cmd = format!("db.{collection}.find({effective_filter})");
     if let Some(col) = sort.column.as_deref() {
         let col = col.trim();
         if !col.is_empty() {
@@ -15439,8 +15617,11 @@ fn build_mongo_preview_cmd(
     if let Some(limit) = limit {
         cmd.push_str(&format!(".limit({limit})"));
     }
-    if let Some(offset) = offset {
-        cmd.push_str(&format!(".skip({offset})"));
+    // 游标分页模式下不使用 skip
+    if cursor_id.is_none() {
+        if let Some(offset) = offset {
+            cmd.push_str(&format!(".skip({offset})"));
+        }
     }
     cmd
 }
@@ -15623,9 +15804,10 @@ fn build_table_preview_sql(
     limit: Option<u32>,
     offset: Option<usize>,
     definition: Option<&TableDefinition>,
+    cursor_id: Option<&str>,
 ) -> String {
     if database_kind == DatabaseKind::MongoDb {
-        return build_mongo_preview_cmd(&table.table, filter, sort, limit, offset, definition);
+        return build_mongo_preview_cmd(&table.table, filter, sort, limit, offset, definition, cursor_id);
     }
     let mut sql = format!("SELECT *\nFROM {}", qualified_table_name(database_kind, table));
 
@@ -15658,9 +15840,10 @@ fn build_table_preview_display_sql(
     limit: Option<u32>,
     offset: Option<usize>,
     definition: Option<&TableDefinition>,
+    cursor_id: Option<&str>,
 ) -> String {
     if database_kind == DatabaseKind::MongoDb {
-        return build_mongo_preview_cmd(&table.table, filter, sort, limit, offset, definition);
+        return build_mongo_preview_cmd(&table.table, filter, sort, limit, offset, definition, cursor_id);
     }
     let mut parts = vec![format!(
         "SELECT * FROM {}",
@@ -16032,6 +16215,49 @@ fn sql_editor_value_literal(value: &str, is_null: bool) -> String {
     }
 }
 
+fn build_mongo_insert_commands(
+    table: &TableRef,
+    columns: &[String],
+    rows: &[BTreeMap<String, QueryCellValue>],
+    row_indices: &[usize],
+    mongo_types: Option<&HashMap<(usize, String), MongoValue>>,
+) -> String {
+    let coll = &table.table;
+    let cell_type = |row_idx: usize, col: &str| -> Option<MongoValue> {
+        mongo_types.and_then(|mt| mt.get(&(row_idx, col.to_string())).copied())
+    };
+    if rows.len() == 1 {
+        let orig_idx = row_indices.first().copied().unwrap_or(0);
+        let fields = columns
+            .iter()
+            .filter_map(|col| {
+                let value = rows[0].get(col)?;
+                Some(format!("  {}: {}", col, mongo_cell_literal(value, cell_type(orig_idx, col))))
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        return format!("db.{coll}.insertOne({{\n{fields}\n}})");
+    }
+    let docs = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let orig_idx = row_indices.get(i).copied().unwrap_or(0);
+            let fields = columns
+                .iter()
+                .filter_map(|col| {
+                    let value = row.get(col)?;
+                    Some(format!("    {}: {}", col, mongo_cell_literal(value, cell_type(orig_idx, col))))
+                })
+                .collect::<Vec<_>>()
+                .join(",\n");
+            format!("  {{\n{fields}\n  }}")
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("db.{coll}.insertMany([\n{docs}\n])")
+}
+
 fn build_insert_sql_for_existing_row(
     database_kind: DatabaseKind,
     table: &TableRef,
@@ -16115,6 +16341,15 @@ fn build_insert_sql_for_pending_row(
     if included.is_empty() {
         return None;
     }
+    if database_kind == DatabaseKind::MongoDb {
+        let fields = included
+            .iter()
+            .map(|(col, val)| format!("  {}: {}", col, mongo_cell_literal(val, None)))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let coll = &table.table;
+        return Some(format!("db.{coll}.insertOne({{\n{fields}\n}});"));
+    }
     let quoted_columns = included
         .iter()
         .map(|(column, _)| quote_identifier(database_kind, column))
@@ -16129,6 +16364,55 @@ fn build_insert_sql_for_pending_row(
         quoted_columns.join(", "),
         sql_values.join(", ")
     ))
+}
+
+fn build_mongo_row_match_doc(
+    definition: Option<&TableDefinition>,
+    row: &BTreeMap<String, QueryCellValue>,
+) -> Option<String> {
+    let mut key_columns = definition
+        .map(|d| {
+            d.columns
+                .iter()
+                .filter(|c| c.primary_key)
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    key_columns.retain(|c| row.contains_key(c));
+    if key_columns.is_empty() {
+        // MongoDB 通常以 _id 为主键
+        if row.contains_key("_id") {
+            key_columns.push("_id".to_string());
+        } else {
+            key_columns = row.keys().cloned().collect();
+        }
+    }
+    if key_columns.is_empty() {
+        return None;
+    }
+    let parts: Option<Vec<String>> = key_columns
+        .iter()
+        .map(|col| {
+            let value = row.get(col)?;
+            let literal = match value {
+                QueryCellValue::Null => "null".to_string(),
+                QueryCellValue::Text(text) => {
+                    if col == "_id" && is_mongo_object_id(text) {
+                        format!("ObjectId(\"{}\")", text.replace('"', "\\\""))
+                    } else {
+                        mongo_cell_literal(value, None)
+                    }
+                }
+            };
+            Some(format!("{col}: {literal}"))
+        })
+        .collect();
+    parts.map(|p| p.join(", "))
+}
+
+fn is_mongo_object_id(s: &str) -> bool {
+    s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn build_table_row_match_clause(
@@ -16192,6 +16476,39 @@ fn query_cell_sql_literal(value: &QueryCellValue) -> String {
     match value {
         QueryCellValue::Null => "NULL".into(),
         QueryCellValue::Text(text) => sql_string_literal(text),
+    }
+}
+
+fn mongo_cell_literal(value: &QueryCellValue, mongo_type: Option<MongoValue>) -> String {
+    match value {
+        QueryCellValue::Null => "null".into(),
+        QueryCellValue::Text(text) => {
+            if text.is_empty() {
+                "\"\"".into()
+            } else {
+                // 根据真实 BSON 类型格式化
+                match mongo_type {
+                    Some(MongoValue::ObjectId) => format!("ObjectId(\"{}\")", text),
+                    Some(MongoValue::DateTime) => format!("ISODate(\"{}\")", text),
+                    Some(MongoValue::Timestamp) => text.clone(), // 已经是 "Timestamp(x, y)" 格式
+                    Some(MongoValue::Decimal128) => format!("NumberDecimal(\"{}\")", text),
+                    Some(MongoValue::Binary) => format!("HexData(\"{}\")", text),
+                    Some(MongoValue::RegularExpression) => text.clone(), // 已经是 "/pattern/flags" 格式
+                    None => {
+                        // 无类型信息时回退到启发式猜测
+                        if let Ok(n) = text.parse::<i64>() {
+                            n.to_string()
+                        } else if let Ok(f) = text.parse::<f64>() {
+                            f.to_string()
+                        } else if text == "true" || text == "false" {
+                            text.to_string()
+                        } else {
+                            format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use core_domain::{
 };
 use driver_api::{ConnectionHandle, ConnectionProvider, DatabaseDriver};
 use i18n::tr;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
@@ -478,6 +478,7 @@ async fn simple_query(client: &Client, sql: &str) -> AppResult<QueryResult> {
         affected_rows,
         elapsed_ms: start.elapsed().as_millis(),
         message,
+        mongo_types: HashMap::new(),
     })
 }
 

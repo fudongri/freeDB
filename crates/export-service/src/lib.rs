@@ -1,5 +1,5 @@
 use anyhow::Result;
-use core_domain::QueryResult;
+use core_domain::{MongoValue, QueryCellValue, QueryResult};
 use csv::QuoteStyle;
 use rust_xlsxwriter::Workbook;
 use std::path::Path;
@@ -87,5 +87,58 @@ impl ExportService {
             writeln!(file, "INSERT INTO `{table_name}` ({col_list}) VALUES ({values});")?;
         }
         Ok(())
+    }
+
+    pub fn export_query_result_mongo(&self, result: &QueryResult, collection: &str, path: impl AsRef<Path>) -> Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path)?;
+        writeln!(file, "// Collection: {collection}")?;
+        writeln!(file, "// Rows: {}", result.rows.len())?;
+        writeln!(file)?;
+        writeln!(file, "db.{collection}.insertMany([")?;
+        let mongo_types = &result.mongo_types;
+        for (i, row) in result.rows.iter().enumerate() {
+            writeln!(file, "  {{")?;
+            for (j, col) in result.columns.iter().enumerate() {
+                let mt = mongo_types.get(&(i, col.clone())).copied();
+                let value = match row.get(col) {
+                    Some(val) if !val.is_null() => mongo_export_literal(val, mt),
+                    _ => "null".to_string(),
+                };
+                let comma = if j < result.columns.len() - 1 { "," } else { "" };
+                writeln!(file, "    \"{}\": {}{}", col, value, comma)?;
+            }
+            let comma = if i < result.rows.len() - 1 { "," } else { "" };
+            writeln!(file, "  }}{}", comma)?;
+        }
+        writeln!(file, "])")?;
+        Ok(())
+    }
+}
+
+fn mongo_export_literal(value: &QueryCellValue, mongo_type: Option<MongoValue>) -> String {
+    match value {
+        QueryCellValue::Null => "null".into(),
+        QueryCellValue::Text(text) => {
+            if text.is_empty() {
+                "\"\"".into()
+            } else {
+                match mongo_type {
+                    Some(MongoValue::ObjectId) => format!("ObjectId(\"{}\")", text),
+                    Some(MongoValue::DateTime) => format!("ISODate(\"{}\")", text),
+                    Some(MongoValue::Timestamp) => text.clone(),
+                    Some(MongoValue::Decimal128) => format!("NumberDecimal(\"{}\")", text),
+                    Some(MongoValue::Binary) => format!("HexData(\"{}\")", text),
+                    Some(MongoValue::RegularExpression) => text.clone(),
+                    None => {
+                        if text.parse::<f64>().is_ok() || text == "true" || text == "false" {
+                            text.to_string()
+                        } else {
+                            format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+                        }
+                    }
+                }
+            }
+        }
     }
 }

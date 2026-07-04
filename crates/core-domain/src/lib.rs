@@ -303,6 +303,17 @@ impl From<&str> for QueryCellValue {
     }
 }
 
+/// MongoDB BSON 类型，用于在导出/复制时保留值的真实类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MongoValue {
+    ObjectId,
+    DateTime,
+    Timestamp,
+    Decimal128,
+    Binary,
+    RegularExpression,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,
@@ -310,6 +321,9 @@ pub struct QueryResult {
     pub affected_rows: Option<u64>,
     pub elapsed_ms: u128,
     pub message: Option<String>,
+    /// MongoDB 单元格的真实 BSON 类型，按 (行号, 列名) 索引。
+    #[serde(default)]
+    pub mongo_types: std::collections::HashMap<(usize, String), MongoValue>,
 }
 
 impl QueryResult {
@@ -320,6 +334,7 @@ impl QueryResult {
             affected_rows: None,
             elapsed_ms: 0,
             message: Some(message.into()),
+            mongo_types: std::collections::HashMap::new(),
         }
     }
 }

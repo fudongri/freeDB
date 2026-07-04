@@ -459,6 +459,15 @@ impl AppServices {
         self.export_service.export_query_result_sql(result, table_name, path)
     }
 
+    pub fn export_query_result_mongo(
+        &self,
+        result: &QueryResult,
+        collection: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
+        self.export_service.export_query_result_mongo(result, collection, path)
+    }
+
     /// Dump a single table's structure (and optionally data) as SQL.
     pub async fn dump_table_sql(
         &self,

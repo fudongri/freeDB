@@ -1,4 +1,5 @@
-use core_domain::{DatabaseKind, QueryCellValue, QueryResult, TableDefinition};
+use core_domain::{DatabaseKind, MongoValue, QueryCellValue, QueryResult, TableDefinition};
+use std::collections::HashMap;
 
 /// Format a single table's SQL dump.
 ///
@@ -15,7 +16,19 @@ pub fn dump_table_sql(
     let mut out = String::new();
 
     // ── header ──
-    out.push_str(&format!("-- Table: {table_name}\n"));
+    out.push_str(&format!("-- Collection: {table_name}\n"));
+
+    if db_kind == DatabaseKind::MongoDb {
+        // MongoDB: 注释 + insertMany 数据
+        if include_data {
+            if let Some(result) = data {
+                out.push_str(&format_mongo_inserts(table_name, result));
+            }
+        }
+        out.push('\n');
+        return out;
+    }
+
     out.push_str("DROP TABLE IF EXISTS ");
     out.push_str(&quote_ident(table_name, db_kind));
     out.push_str(";\n");
@@ -58,6 +71,19 @@ pub fn dump_database_sql(
     include_data: bool,
 ) -> String {
     let mut out = String::new();
+
+    if db_kind == DatabaseKind::MongoDb {
+        out.push_str("// =============================================\n");
+        out.push_str("// FreeDB MongoDB Dump\n");
+        out.push_str(&format!("// Collections: {}\n", tables.len()));
+        out.push_str("// =============================================\n\n");
+        for (name, def, data) in &tables {
+            out.push_str(&dump_table_sql(name, def, data.as_ref(), db_kind, include_data));
+            out.push('\n');
+        }
+        return out;
+    }
+
     out.push_str("-- =============================================\n");
     out.push_str("-- FreeDB SQL Dump\n");
     out.push_str(&format!("-- Tables: {}\n", tables.len()));
@@ -300,5 +326,65 @@ fn format_inserts(table_name: &str, result: &QueryResult, db_kind: DatabaseKind)
     }
 
     out.push_str(&format!("-- Rows inserted: {row_count}\n"));
+    out
+}
+
+fn format_mongo_cell(value: &QueryCellValue, mongo_type: Option<MongoValue>) -> String {
+    match value {
+        QueryCellValue::Null => "null".to_string(),
+        QueryCellValue::Text(text) => {
+            if text.is_empty() {
+                "\"\"".to_string()
+            } else {
+                match mongo_type {
+                    Some(MongoValue::ObjectId) => format!("ObjectId(\"{}\")", text),
+                    Some(MongoValue::DateTime) => format!("ISODate(\"{}\")", text),
+                    Some(MongoValue::Timestamp) => text.clone(),
+                    Some(MongoValue::Decimal128) => format!("NumberDecimal(\"{}\")", text),
+                    Some(MongoValue::Binary) => format!("HexData(\"{}\")", text),
+                    Some(MongoValue::RegularExpression) => text.clone(),
+                    None => {
+                        if looks_like_number(text) || text == "true" || text == "false" {
+                            text.clone()
+                        } else {
+                            format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn format_mongo_inserts(table_name: &str, result: &QueryResult) -> String {
+    if result.rows.is_empty() {
+        return String::new();
+    }
+
+    let columns = &result.columns;
+    let mongo_types = &result.mongo_types;
+    let mut out = String::new();
+
+    out.push_str(&format!("db.{}.insertMany([\n", table_name));
+    for (i, row) in result.rows.iter().enumerate() {
+        out.push_str("  {\n");
+        for (j, col) in columns.iter().enumerate() {
+            let value = row.get(col).unwrap_or(&QueryCellValue::Null);
+            let mt = mongo_types.get(&(i, col.clone())).copied();
+            out.push_str(&format!("    \"{}\": {}", col, format_mongo_cell(value, mt)));
+            if j < columns.len() - 1 {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  }");
+        if i < result.rows.len() - 1 {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("])\n\n");
+
+    out.push_str(&format!("// Rows inserted: {}\n", result.rows.len()));
     out
 }

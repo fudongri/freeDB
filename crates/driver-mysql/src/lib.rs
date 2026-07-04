@@ -7,7 +7,7 @@ use core_domain::{
 use driver_api::{ConnectionHandle, ConnectionProvider, DatabaseDriver};
 use i18n::tr;
 use mysql_async::{prelude::Queryable, Conn, OptsBuilder, Row, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 #[derive(Clone, Default)]
@@ -411,6 +411,7 @@ async fn exec_on_conn(conn: &mut Conn, execution: QueryExecution) -> AppResult<Q
             affected_rows: Some(conn.affected_rows()),
             elapsed_ms: start.elapsed().as_millis(),
             message: Some(tr!("语句执行成功").to_string()),
+            mongo_types: HashMap::new(),
         })
     }
 }
@@ -443,6 +444,7 @@ async fn query_rows(conn: &mut Conn, sql: &str) -> AppResult<QueryResult> {
         affected_rows: None,
         elapsed_ms: start.elapsed().as_millis(),
         message: None,
+        mongo_types: HashMap::new(),
     })
 }
 
