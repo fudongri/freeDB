@@ -14498,7 +14498,13 @@ fn format_create_table_ddl(sql: &str) -> Option<String> {
     lines.push(format!("{header} ("));
     lines.extend(format_ddl_items(&items));
     if !suffix.is_empty() {
-        lines.push(format!(") {}", format_suffix_clause(suffix)));
+        let formatted_suffix = format_suffix_clause(suffix);
+        if formatted_suffix.contains('\n') {
+            lines.push(")".to_string());
+            lines.push(formatted_suffix);
+        } else {
+            lines.push(format!(") {formatted_suffix}"));
+        }
     } else {
         lines.push(")".to_string());
     }
@@ -14641,7 +14647,15 @@ fn normalize_ddl_item(item: &str) -> String {
 }
 
 fn format_suffix_clause(suffix: &str) -> String {
-    suffix.split_whitespace().collect::<Vec<_>>().join(" ")
+    let statements: Vec<String> = suffix
+        .split(';')
+        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if statements.len() <= 1 {
+        return statements.into_iter().next().unwrap_or_default();
+    }
+    statements.join(";\n")
 }
 
 fn format_ddl_items(items: &[String]) -> Vec<String> {
@@ -15500,6 +15514,12 @@ fn parse_indexes_from_create_sql(create_sql: &str) -> Vec<ExistingIndex> {
             continue;
         }
 
+        // PostgreSQL: CREATE [UNIQUE] INDEX name ON schema.table [USING method] (cols)
+        if let Some(idx) = parse_pg_create_index(trimmed) {
+            indexes.push(idx);
+            continue;
+        }
+
         let upper = trimmed.to_ascii_uppercase();
 
         // 跳过 PRIMARY KEY
@@ -15620,6 +15640,51 @@ fn parse_mongo_create_index(line: &str) -> Option<ExistingIndex> {
         columns,
         unique,
         index_type: "BTREE".to_string(),
+    })
+}
+
+/// 解析 PostgreSQL CREATE [UNIQUE] INDEX 语句
+fn parse_pg_create_index(line: &str) -> Option<ExistingIndex> {
+    let upper = line.to_ascii_uppercase();
+    let (unique, rest) = if upper.starts_with("CREATE UNIQUE INDEX ") {
+        (true, &line["CREATE UNIQUE INDEX ".len()..])
+    } else if upper.starts_with("CREATE INDEX ") {
+        (false, &line["CREATE INDEX ".len()..])
+    } else {
+        return None;
+    };
+    // rest: "idx_name ON schema.table [USING method] (col1, col2)"
+    let on_pos = rest.to_ascii_uppercase().find(" ON ")?;
+    let name = rest[..on_pos].trim();
+    let after_on = &rest[on_pos + 4..].trim();
+    // 跳过 schema.table 部分，找到 ( 或 USING
+    let cols_start = after_on.find('(')?;
+    let cols_part = &after_on[cols_start..];
+    let cols_inner = cols_part.strip_prefix('(')?.strip_suffix(')')?;
+    let columns: Vec<String> = cols_inner
+        .split(',')
+        .map(|c| c.trim().trim_matches('"').to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    let before_cols = &after_on[..cols_start];
+    let index_type = if let Some(pos) = before_cols.to_ascii_uppercase().find("USING ") {
+        before_cols[pos + 6..]
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("BTREE")
+            .to_ascii_uppercase()
+    } else {
+        "BTREE".to_string()
+    };
+    if name.is_empty() || columns.is_empty() {
+        return None;
+    }
+    Some(ExistingIndex {
+        name: name.to_string(),
+        columns,
+        unique,
+        index_type,
     })
 }
 

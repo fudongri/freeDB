@@ -216,7 +216,7 @@ impl DatabaseDriver for PostgresDriver {
                     comment: row.try_get::<_, String>(5).ok().filter(|v| !v.is_empty()),
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
         let create_sql = if table.is_view {
             client
                 .query_one(
@@ -227,7 +227,57 @@ impl DatabaseDriver for PostgresDriver {
                 .ok()
                 .map(|row| row.get::<_, String>(0))
         } else {
-            None
+            let table_name = &table.table;
+            let cols = columns.clone();
+            let mut lines = Vec::new();
+            let mut pk_cols = Vec::new();
+            for col in &cols {
+                let mut parts = vec![format!("    {} {}", quote_pg(&col.name), col.data_type)];
+                if !col.nullable {
+                    parts.push("NOT NULL".into());
+                }
+                if let Some(ref def) = col.default_value {
+                    parts.push(format!("DEFAULT {}", def));
+                }
+                lines.push(parts.join(" "));
+                if col.primary_key {
+                    pk_cols.push(quote_pg(&col.name));
+                }
+            }
+            if !pk_cols.is_empty() {
+                lines.push(format!("    PRIMARY KEY ({})", pk_cols.join(", ")));
+            }
+            let mut ddl = format!(
+                "CREATE TABLE {}.{} (\n{}\n);",
+                quote_pg(&schema),
+                quote_pg(table_name),
+                lines.join(",\n")
+            );
+            for col in &cols {
+                if let Some(ref comment) = col.comment {
+                    ddl.push_str(&format!(
+                        "\nCOMMENT ON COLUMN {}.{}.{} IS '{}';",
+                        quote_pg(&schema),
+                        quote_pg(table_name),
+                        quote_pg(&col.name),
+                        comment.replace('\'', "''")
+                    ));
+                }
+            }
+            // 查询索引（排除 PRIMARY KEY，已在 CREATE TABLE 中体现）
+            if let Ok(idx_rows) = client
+                .query(
+                    "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 AND indexname NOT LIKE '%_pkey'",
+                    &[&schema, &table.table],
+                )
+                .await
+            {
+                for row in &idx_rows {
+                    let indexdef: String = row.get(1);
+                    ddl.push_str(&format!("\n{};", indexdef));
+                }
+            }
+            Some(ddl)
         };
         Ok(TableDefinition { columns, create_sql })
     }
