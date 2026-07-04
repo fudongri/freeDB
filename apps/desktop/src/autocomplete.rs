@@ -44,11 +44,16 @@ pub(crate) struct AutocompleteSuggestion {
     /// Character indices in `label` that matched the prefix (for highlighting).
     #[doc(hidden)]
     pub matched_indices: Vec<usize>,
+    /// Optional insertion text with parameter template (e.g. "find({})").
+    /// When set, this is inserted instead of `label`.
+    pub insertion_text: Option<String>,
+    /// Cursor position (char offset from start of insertion_text) after inserting.
+    pub cursor_offset: Option<usize>,
 }
 
 impl AutocompleteSuggestion {
     pub fn new(label: String, kind: SuggestionKind) -> Self {
-        Self { label, kind, matched_indices: Vec::new() }
+        Self { label, kind, matched_indices: Vec::new(), insertion_text: None, cursor_offset: None }
     }
 }
 
@@ -504,6 +509,46 @@ const MONGO_OPERATORS: &[&str] = &[
     "$arrayFilters", "$position",
 ];
 
+/// 返回方法的参数模板和光标偏移（相对于模板起始位置）
+fn mongo_method_template(method: &str) -> (String, usize) {
+    match method {
+        "find" | "findOne" | "deleteOne" | "deleteMany" | "countDocuments" |
+        "findOneAndDelete" | "drop" => {
+            let t = format!("{}({})", method, if method == "drop" { "" } else { "{}" });
+            let c = method.len() + 1; // after '(' or after '{'
+            (t, c)
+        }
+        "insertOne" | "replaceOne" => {
+            (format!("{}({})", method, "{}"), method.len() + 1)
+        }
+        "updateOne" | "updateMany" | "findOneAndUpdate" | "findOneAndReplace" => {
+            (format!("{}({{ }}, {{ }})", method), method.len() + 2)
+        }
+        "insertMany" | "bulkWrite" | "aggregate" => {
+            (format!("{}([])", method), method.len() + 1)
+        }
+        "distinct" => {
+            (format!("distinct(\"\")"), 9) // after first "
+        }
+        "createIndex" | "dropIndex" => {
+            (format!("{}({})", method, "{}"), method.len() + 1)
+        }
+        // Cursor methods
+        "sort" | "project" | "hint" | "collation" => {
+            (format!("{}({})", method, "{}"), method.len() + 1)
+        }
+        "limit" | "skip" | "batchSize" | "maxTimeMS" => {
+            (format!("{}()", method), method.len() + 1)
+        }
+        "comment" => (format!("comment(\"\")"), 9),
+        "explain" | "allowDiskUse" => {
+            (format!("{}({})", method, if method == "allowDiskUse" { "true" } else { "" }),
+             method.len() + 1)
+        }
+        _ => (format!("{}()", method), method.len() + 1),
+    }
+}
+
 /// MongoDB 查询上下文
 enum MongoContext {
     /// db. → 建议集合名
@@ -664,6 +709,8 @@ impl AutocompleteEngine {
                                 SuggestionKind::Table
                             },
                             matched_indices: vec![],
+                            insertion_text: None,
+                            cursor_offset: None,
                         });
                     }
                     let filtered = Self::filter_by_prefix(suggestions, &prefix);
@@ -682,6 +729,8 @@ impl AutocompleteEngine {
                                 SuggestionKind::Table
                             },
                             matched_indices: vec![],
+                            insertion_text: None,
+                            cursor_offset: None,
                         });
                     }
                     let filtered = Self::filter_by_prefix(suggestions, &prefix);
@@ -697,6 +746,8 @@ impl AutocompleteEngine {
                                 parent_table: parent.clone(),
                             },
                             matched_indices: vec![],
+                            insertion_text: None,
+                            cursor_offset: None,
                         });
                     }
                 }
@@ -715,6 +766,8 @@ impl AutocompleteEngine {
                             SuggestionKind::Table
                         },
                         matched_indices: vec![],
+                        insertion_text: None,
+                        cursor_offset: None,
                     });
                 }
                 // Also suggest database and schema names (filtered by connection)
@@ -727,6 +780,8 @@ impl AutocompleteEngine {
                         label: name.to_string(),
                         kind: SuggestionKind::Database,
                         matched_indices: vec![],
+                        insertion_text: None,
+                        cursor_offset: None,
                     });
                 }
                 let schema_names = match connection_id {
@@ -738,6 +793,8 @@ impl AutocompleteEngine {
                         label: name.to_string(),
                         kind: SuggestionKind::Schema,
                         matched_indices: vec![],
+                        insertion_text: None,
+                        cursor_offset: None,
                     });
                 }
             }
@@ -753,6 +810,8 @@ impl AutocompleteEngine {
                                 parent_table: table_name.clone(),
                             },
                             matched_indices: vec![],
+                            insertion_text: None,
+                            cursor_offset: None,
                         });
                     }
                 }
@@ -767,6 +826,8 @@ impl AutocompleteEngine {
                                     parent_table: table_name.clone(),
                                 },
                                 matched_indices: vec![],
+                                insertion_text: None,
+                                cursor_offset: None,
                             });
                         }
                     }
@@ -777,6 +838,8 @@ impl AutocompleteEngine {
                         label: kw.to_string(),
                         kind: SuggestionKind::Keyword,
                         matched_indices: vec![],
+                        insertion_text: None,
+                        cursor_offset: None,
                     });
                 }
             }
@@ -787,6 +850,8 @@ impl AutocompleteEngine {
                         label: kw.to_string(),
                         kind: SuggestionKind::Keyword,
                         matched_indices: vec![],
+                        insertion_text: None,
+                        cursor_offset: None,
                     });
                 }
                 for name in cache.table_names() {
@@ -799,6 +864,8 @@ impl AutocompleteEngine {
                             SuggestionKind::Table
                         },
                         matched_indices: vec![],
+                        insertion_text: None,
+                        cursor_offset: None,
                     });
                 }
                 let db_names = match connection_id {
@@ -810,6 +877,8 @@ impl AutocompleteEngine {
                         label: name.to_string(),
                         kind: SuggestionKind::Database,
                         matched_indices: vec![],
+                        insertion_text: None,
+                        cursor_offset: None,
                     });
                 }
                 let schema_names = match connection_id {
@@ -821,6 +890,8 @@ impl AutocompleteEngine {
                         label: name.to_string(),
                         kind: SuggestionKind::Schema,
                         matched_indices: vec![],
+                        insertion_text: None,
+                        cursor_offset: None,
                     });
                 }
                 for (table_name, (_is_view, cols)) in &cache.tables {
@@ -831,6 +902,8 @@ impl AutocompleteEngine {
                                 parent_table: table_name.clone(),
                             },
                             matched_indices: vec![],
+                            insertion_text: None,
+                            cursor_offset: None,
                         });
                     }
                 }
@@ -858,16 +931,24 @@ impl AutocompleteEngine {
             }
             MongoContext::AfterCollection { .. } => {
                 for m in MONGO_METHODS {
-                    suggestions.push(AutocompleteSuggestion::new(
-                        m.to_string(),
-                        SuggestionKind::MongoKeyword,
-                    ));
+                    let (insertion, cursor_off) = mongo_method_template(m);
+                    suggestions.push(AutocompleteSuggestion {
+                        label: m.to_string(),
+                        kind: SuggestionKind::MongoKeyword,
+                        matched_indices: Vec::new(),
+                        insertion_text: Some(insertion),
+                        cursor_offset: Some(cursor_off),
+                    });
                 }
                 for m in MONGO_CURSOR_METHODS {
-                    suggestions.push(AutocompleteSuggestion::new(
-                        m.to_string(),
-                        SuggestionKind::MongoKeyword,
-                    ));
+                    let (insertion, cursor_off) = mongo_method_template(m);
+                    suggestions.push(AutocompleteSuggestion {
+                        label: m.to_string(),
+                        kind: SuggestionKind::MongoKeyword,
+                        matched_indices: Vec::new(),
+                        insertion_text: Some(insertion),
+                        cursor_offset: Some(cursor_off),
+                    });
                 }
             }
             MongoContext::AfterMethod { .. } => {
@@ -1010,13 +1091,13 @@ pub(crate) fn suggestion_kind_label(kind: SuggestionKind) -> String {
     }
 }
 
-/// Render the autocomplete popup. Returns the selected suggestion label if committed.
+/// Render the autocomplete popup. Returns (insertion_text, cursor_offset) if committed.
 pub(crate) fn render_autocomplete_popup(
     ctx: &egui::Context,
     state: &mut AutocompleteState,
     suggestions: &[AutocompleteSuggestion],
     palette: &AutocompletePalette,
-) -> Option<String> {
+) -> Option<(String, Option<usize>)> {
     if !state.visible || suggestions.is_empty() {
         state.dismiss();
         return None;
@@ -1068,7 +1149,7 @@ pub(crate) fn render_autocomplete_popup(
 
     let popup_id = Id::from("autocomplete-popup");
 
-    let mut committed: Option<String> = None;
+    let mut committed: Option<(String, Option<usize>)> = None;
 
     let area_response = Area::new(popup_id)
         .order(Order::Foreground)
@@ -1198,10 +1279,12 @@ pub(crate) fn render_autocomplete_popup(
                             // Single click: first click selects, second click commits
                             // Double click: commits directly
                             if row_response.double_clicked() {
-                                committed = Some(suggestion.label.clone());
+                                let text = suggestion.insertion_text.clone().unwrap_or_else(|| suggestion.label.clone());
+                                committed = Some((text, suggestion.cursor_offset));
                             } else if row_response.clicked() {
                                 if state.clicked_index == Some(i) {
-                                    committed = Some(suggestion.label.clone());
+                                    let text = suggestion.insertion_text.clone().unwrap_or_else(|| suggestion.label.clone());
+                                    committed = Some((text, suggestion.cursor_offset));
                                 } else {
                                     state.clicked_index = Some(i);
                                     state.selected_index = i;
@@ -1404,7 +1487,7 @@ mod tests {
 
     #[test]
     fn autocomplete_suggestion_clone_and_eq() {
-        let a = AutocompleteSuggestion { label: "x".into(), kind: SuggestionKind::Table, matched_indices: vec![] };
+        let a = AutocompleteSuggestion { label: "x".into(), kind: SuggestionKind::Table, matched_indices: vec![], insertion_text: None, cursor_offset: None };
         let b = a.clone();
         assert_eq!(a, b);
     }

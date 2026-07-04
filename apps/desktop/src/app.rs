@@ -9352,8 +9352,9 @@ impl eframe::App for DesktopApp {
                         let prefix_start = tab.autocomplete.prefix_start_index;
                         let before = tab.sql[..prefix_start].to_string();
                         let after = tab.sql[cursor..].to_string();
-                        let new_cursor = before.chars().count() + s.label.chars().count();
-                        tab.sql = format!("{}{}{}", before, s.label, after);
+                        let text = s.insertion_text.as_deref().unwrap_or(&s.label);
+                        let new_cursor = before.chars().count() + s.cursor_offset.unwrap_or(text.chars().count());
+                        tab.sql = format!("{}{}{}", before, text, after);
                         // +1 frame defer needed: TextEdit state not yet available
                         tab.autocomplete_cursor_target = Some(new_cursor);
                     }
@@ -19747,7 +19748,7 @@ fn render_query_editor(
                         } else {
                             let pal = autocomplete_palette(ui.visuals().dark_mode);
 
-                            if let Some(selected) = render_autocomplete_popup(
+                            if let Some((selected, cursor_offset)) = render_autocomplete_popup(
                                 ui.ctx(),
                                 &mut tab.autocomplete,
                                 &suggestions,
@@ -19760,7 +19761,7 @@ fn render_query_editor(
                                 let prefix_start = tab.autocomplete.prefix_start_index;
                                 let before = &tab.sql[..prefix_start];
                                 let after = &tab.sql[cursor..];
-                                let new_cursor = before.chars().count() + selected.chars().count();
+                                let new_cursor = before.chars().count() + cursor_offset.unwrap_or(selected.chars().count());
                                 tab.sql = format!("{}{}{}", before, selected, after);
                                 tab.autocomplete.dismiss();
                                 let eid = egui::Id::from(format!("query-editor-{}", tab.id));
