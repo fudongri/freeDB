@@ -2153,10 +2153,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if col.auto_increment {
                 continue;
             }
-            // 有默认值的列，30% 概率跳过
-            if col.default_value.is_some() && (row_index * 37 + col.name.len() * 13) % 100 < 30 {
-                continue;
-            }
             // nullable 列，10% 概率设为 NULL
             if col.nullable && (row_index * 41 + col.name.len() * 7) % 100 < 10 {
                 col_names.push(col.name.clone());
@@ -2226,7 +2222,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return format!("{:024x}", seed);
         }
         // 默认：字符串，带 test_ 前缀
-        format!("'test_{}_{}'", col_name, seed % 100000)
+        let safe_col_name = col_name.replace('\'', "");
+        format!("'test_{}_{}'", safe_col_name, seed % 100000)
     }
 
     /// 构建多行 INSERT 语句（MySQL/PostgreSQL）
@@ -2249,7 +2246,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         let cols = common_cols.unwrap_or_default();
-        let col_list = cols.join(", ");
+        let col_list: Vec<String> = cols.iter().map(|c| Self::quote_identifier(c, database_kind)).collect();
+        let col_list = col_list.join(", ");
         let table_name = Self::format_table_name(table, database_kind);
 
         let values_str: Vec<String> = all_rows
@@ -2260,20 +2258,28 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         format!("INSERT INTO {} ({}) VALUES {}", table_name, col_list, values_str.join(", "))
     }
 
+    fn quote_identifier(name: &str, db_kind: DatabaseKind) -> String {
+        match db_kind {
+            DatabaseKind::MySql => format!("`{}`", name.replace('`', "``")),
+            DatabaseKind::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+            DatabaseKind::MongoDb => name.to_string(),
+        }
+    }
+
     fn format_table_name(table: &TableRef, db_kind: DatabaseKind) -> String {
         match db_kind {
             DatabaseKind::MySql => {
                 if let Some(ref db) = table.database {
-                    format!("`{}`.`{}`", db, table.table)
+                    format!("{}.{}", Self::quote_identifier(db, db_kind), Self::quote_identifier(&table.table, db_kind))
                 } else {
-                    format!("`{}`", table.table)
+                    Self::quote_identifier(&table.table, db_kind)
                 }
             }
             DatabaseKind::Postgres => {
                 if let Some(ref schema) = table.schema {
-                    format!("\"{}\".\"{}\"", schema, table.table)
+                    format!("{}.{}", Self::quote_identifier(schema, db_kind), Self::quote_identifier(&table.table, db_kind))
                 } else {
-                    format!("\"{}\"", table.table)
+                    Self::quote_identifier(&table.table, db_kind)
                 }
             }
             DatabaseKind::MongoDb => table.table.clone(),
