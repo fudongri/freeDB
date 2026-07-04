@@ -499,6 +499,8 @@ fn en(key: &'static str) -> &'static str {
         "复制选中 {} 条为 insertMany" => "Copy {} selected as insertMany",
         "复制选中 {} 条数据" => "Copy {} selected rows",
         "已复制预览语句" => "Preview statement copied",
+        "完整复制" => "Full Copy",
+        "忽略主键复制" => "Copy Without PK",
         "已保存查询" => "Saved Queries",
         "更新" => "Update",
         "更新查询" => "Update Query",

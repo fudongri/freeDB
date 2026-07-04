@@ -4114,7 +4114,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.request_delete_active_table_rows(row_indices);
             }
             TabUiAction::CopyActiveTableRowsAsInsert(row_indices) => {
-                self.copy_active_table_rows_as_insert(ctx, &row_indices);
+                self.copy_active_table_rows_as_insert(ctx, &row_indices, false);
+            }
+            TabUiAction::CopyActiveTableRowsAsInsertWithoutPk(row_indices) => {
+                self.copy_active_table_rows_as_insert(ctx, &row_indices, true);
             }
             TabUiAction::CopyActiveTableRowsAsTsv(row_indices) => {
                 self.copy_active_table_rows_as_tsv(ctx, &row_indices);
@@ -5146,17 +5149,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.delete_active_table_rows(&pending.row_indices);
     }
 
-    fn copy_active_table_rows_as_insert(&mut self, ctx: &egui::Context, row_indices: &[usize]) {
+    fn copy_active_table_rows_as_insert(&mut self, ctx: &egui::Context, row_indices: &[usize], skip_primary_key: bool) {
         let Some((database_kind, table, definition, rows)) =
             self.active_table_row_contexts(row_indices)
         else {
             return;
         };
-        let columns = definition
+        let mut columns = definition
             .as_ref()
             .map(|item| item.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>())
             .filter(|columns| !columns.is_empty())
             .unwrap_or_else(|| rows.first().map(|row| row.keys().cloned().collect()).unwrap_or_default());
+        if skip_primary_key {
+            if let Some(def) = definition.as_ref() {
+                let pk_cols: std::collections::HashSet<String> = def.columns.iter()
+                    .filter(|c| c.primary_key)
+                    .map(|c| c.name.clone())
+                    .collect();
+                columns.retain(|c| !pk_cols.contains(c));
+            }
+        }
         let text = if database_kind == DatabaseKind::MongoDb {
             let mongo_types = self.tabs.get(self.active_tab)
                 .and_then(|tab| match tab {
@@ -9827,6 +9839,7 @@ enum TabUiAction {
     SavePendingInsertRow,
     DeleteActiveTableRows(Vec<usize>),
     CopyActiveTableRowsAsInsert(Vec<usize>),
+    CopyActiveTableRowsAsInsertWithoutPk(Vec<usize>),
     CopyActiveTableRowsAsTsv(Vec<usize>),
     ConnectionChanged {
         connection_id: Option<String>,
@@ -11936,23 +11949,26 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 ui.close();
                                             }
                                             let copy_label = if tab.database_kind == DatabaseKind::MongoDb {
-                                                if selected_count > 1 {
-                                                    tr!("复制选中 {} 条为 insertMany", selected_count)
-                                                } else {
-                                                    tr!("复制为 insertOne 命令").into()
-                                                }
-                                            } else if selected_count > 1 {
-                                                tr!("复制选中 {} 条为 INSERT", selected_count)
+                                                tr!("复制为 insertMany 命令")
                                             } else {
-                                                tr!("复制为 INSERT 语句").into()
+                                                tr!("复制为 INSERT 语句")
                                             };
-                                            if ui.button(copy_label).clicked() {
-                                                action =
-                                                    TabUiAction::CopyActiveTableRowsAsInsert(
-                                                        selected_row_indices,
-                                                    );
-                                                ui.close();
-                                            }
+                                            ui.menu_button(copy_label, |ui| {
+                                                if ui.button(tr!("完整复制")).clicked() {
+                                                    action =
+                                                        TabUiAction::CopyActiveTableRowsAsInsert(
+                                                            selected_row_indices.clone(),
+                                                        );
+                                                    ui.close();
+                                                }
+                                                if ui.button(tr!("忽略主键复制")).clicked() {
+                                                    action =
+                                                        TabUiAction::CopyActiveTableRowsAsInsertWithoutPk(
+                                                            selected_row_indices.clone(),
+                                                        );
+                                                    ui.close();
+                                                }
+                                            });
                                         });
                                         });
                                     }
@@ -12166,23 +12182,26 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     ui.close();
                                                 }
                                                 let copy_label = if tab.database_kind == DatabaseKind::MongoDb {
-                                                    if selected_count > 1 {
-                                                        tr!("复制选中 {} 条为 insertMany", selected_count)
-                                                    } else {
-                                                        tr!("复制为 insertOne 命令").into()
-                                                    }
-                                                } else if selected_count > 1 {
-                                                    tr!("复制选中 {} 条为 INSERT", selected_count)
+                                                    tr!("复制为 insertMany 命令")
                                                 } else {
-                                                    tr!("复制为 INSERT 语句").into()
+                                                    tr!("复制为 INSERT 语句")
                                                 };
-                                                if ui.button(copy_label).clicked() {
-                                                    action =
-                                                        TabUiAction::CopyActiveTableRowsAsInsert(
-                                                            selected_row_indices,
-                                                        );
-                                                    ui.close();
-                                                }
+                                                ui.menu_button(copy_label, |ui| {
+                                                    if ui.button(tr!("完整复制")).clicked() {
+                                                        action =
+                                                            TabUiAction::CopyActiveTableRowsAsInsert(
+                                                                selected_row_indices.clone(),
+                                                            );
+                                                        ui.close();
+                                                    }
+                                                    if ui.button(tr!("忽略主键复制")).clicked() {
+                                                        action =
+                                                            TabUiAction::CopyActiveTableRowsAsInsertWithoutPk(
+                                                                selected_row_indices.clone(),
+                                                            );
+                                                        ui.close();
+                                                    }
+                                                });
                                             });
                                         });
                                     }
