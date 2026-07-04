@@ -41,10 +41,10 @@ macro_rules! with_pool {
             };
             let mut guard = handle.lock().await;
             let $h: &mut driver_api::ConnectionHandle = &mut *guard;
-            let $d: &dyn DatabaseDriver = if matches!($profile.kind, DatabaseKind::Postgres) {
-                &$self.pool.postgres
-            } else {
-                &$self.pool.mysql
+            let $d: &dyn DatabaseDriver = match $profile.kind {
+                DatabaseKind::Postgres => &$self.pool.postgres,
+                DatabaseKind::MySql => &$self.pool.mysql,
+                DatabaseKind::MongoDb => &$self.pool.mongodb,
             };
             match $call.await {
                 Ok(val) => {
@@ -119,6 +119,7 @@ impl SessionManager {
         match kind {
             DatabaseKind::MySql => &self.pool.mysql,
             DatabaseKind::Postgres => &self.pool.postgres,
+            DatabaseKind::MongoDb => &self.pool.mongodb,
         }
     }
 
@@ -224,10 +225,10 @@ impl SessionManager {
         };
         let mut guard = handle.lock().await;
         let h: &mut driver_api::ConnectionHandle = &mut *guard;
-        let d: &dyn DatabaseDriver = if matches!(profile.kind, DatabaseKind::Postgres) {
-            &self.pool.postgres
-        } else {
-            &self.pool.mysql
+        let d: &dyn DatabaseDriver = match profile.kind {
+            DatabaseKind::Postgres => &self.pool.postgres,
+            DatabaseKind::MySql => &self.pool.mysql,
+            DatabaseKind::MongoDb => &self.pool.mongodb,
         };
         let mut results = Vec::with_capacity(statements.len());
         for stmt in statements {
@@ -272,10 +273,10 @@ impl SessionManager {
         };
         let mut guard = handle.lock().await;
         let h: &mut driver_api::ConnectionHandle = &mut *guard;
-        let d: &dyn DatabaseDriver = if matches!(profile.kind, DatabaseKind::Postgres) {
-            &self.pool.postgres
-        } else {
-            &self.pool.mysql
+        let d: &dyn DatabaseDriver = match profile.kind {
+            DatabaseKind::Postgres => &self.pool.postgres,
+            DatabaseKind::MySql => &self.pool.mysql,
+            DatabaseKind::MongoDb => &self.pool.mongodb,
         };
         for stmt in statements {
             let exec = QueryExecution {

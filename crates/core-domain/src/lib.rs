@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub enum DatabaseKind {
     MySql,
     Postgres,
+    MongoDb,
 }
 
 impl DatabaseKind {
@@ -15,6 +16,7 @@ impl DatabaseKind {
         match self {
             Self::MySql => "mysql",
             Self::Postgres => "postgres",
+            Self::MongoDb => "mongodb",
         }
     }
 
@@ -22,6 +24,7 @@ impl DatabaseKind {
         match self {
             Self::MySql => "utf8mb4",
             Self::Postgres => "UTF8",
+            Self::MongoDb => "",
         }
     }
 
@@ -29,6 +32,7 @@ impl DatabaseKind {
         match self {
             Self::MySql => "utf8mb4_unicode_ci",
             Self::Postgres => "",
+            Self::MongoDb => "",
         }
     }
 
@@ -36,6 +40,7 @@ impl DatabaseKind {
         match value {
             "mysql" => Ok(Self::MySql),
             "postgres" => Ok(Self::Postgres),
+            "mongodb" => Ok(Self::MongoDb),
             _ => Err(AppError::Validation(format!("unsupported database kind: {value}"))),
         }
     }
@@ -89,6 +94,7 @@ pub struct ConnectionProfileInput {
     pub connect_timeout_secs: u64,
     pub ssl_mode: SslMode,
     pub ssh_tunnel: Option<SshTunnelConfig>,
+    pub direct_connection: bool,
 }
 
 impl Default for ConnectionProfileInput {
@@ -106,6 +112,7 @@ impl Default for ConnectionProfileInput {
             connect_timeout_secs: 5,
             ssl_mode: SslMode::Prefer,
             ssh_tunnel: None,
+            direct_connection: false,
         }
     }
 }
@@ -128,6 +135,7 @@ pub struct ConnectionProfile {
     pub last_used_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub direct_connection: bool,
 }
 
 impl ConnectionProfile {
@@ -150,6 +158,7 @@ impl ConnectionProfile {
             last_used_at: None,
             created_at: now,
             updated_at: now,
+            direct_connection: input.direct_connection,
         }
     }
 }

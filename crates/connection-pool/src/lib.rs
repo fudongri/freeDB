@@ -1,5 +1,6 @@
 use core_domain::{AppError, AppResult, ConnectionProfile, DatabaseKind};
 use driver_api::{ConnectionHandle, ConnectionProvider};
+use driver_mongodb::MongoDbDriver;
 use driver_mysql::MySqlDriver;
 use driver_postgres::PostgresDriver;
 use ssh_tunnel::SshTunnelManager;
@@ -14,7 +15,7 @@ const PING_TIMEOUT_SECS: u64 = 3;
 fn pool_key(profile_id: &str, kind: DatabaseKind, database: Option<&str>) -> String {
     match kind {
         DatabaseKind::MySql => format!("{profile_id}::mysql"),
-        DatabaseKind::Postgres => match database {
+        DatabaseKind::Postgres | DatabaseKind::MongoDb => match database {
             Some(db) => format!("{profile_id}::{db}"),
             None => format!("{profile_id}::__no_db__"),
         },
@@ -27,6 +28,7 @@ pub struct ConnectionPool {
     entries: Arc<std::sync::Mutex<HashMap<String, Vec<ConnHandle>>>>,
     pub postgres: PostgresDriver,
     pub mysql: MySqlDriver,
+    pub mongodb: MongoDbDriver,
     ssh_tunnel: SshTunnelManager,
     keepalive_secs: u64,
 }
@@ -37,6 +39,7 @@ impl ConnectionPool {
             entries: Arc::new(std::sync::Mutex::new(HashMap::new())),
             postgres: PostgresDriver,
             mysql: MySqlDriver,
+            mongodb: MongoDbDriver,
             ssh_tunnel: SshTunnelManager,
             keepalive_secs,
         }
@@ -46,6 +49,7 @@ impl ConnectionPool {
         match kind {
             DatabaseKind::Postgres => &self.postgres,
             DatabaseKind::MySql => &self.mysql,
+            DatabaseKind::MongoDb => &self.mongodb,
         }
     }
 
@@ -53,6 +57,8 @@ impl ConnectionPool {
     async fn timed_ping(&self, handle: &mut ConnectionHandle) -> bool {
         let provider: &dyn ConnectionProvider = if handle.is_postgres() {
             &self.postgres
+        } else if handle.is_mongodb() {
+            &self.mongodb
         } else {
             &self.mysql
         };

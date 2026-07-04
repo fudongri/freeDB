@@ -562,6 +562,7 @@ struct TableFilterState {
 struct TableFilterClause {
     joiner: TableFilterJoiner,
     column: Option<String>,
+    column_type: Option<String>,
     operator: TableFilterOperator,
     value: String,
     second_value: String,
@@ -771,6 +772,7 @@ struct ConnectionFormState {
     ssh_host: String,
     ssh_port: u16,
     ssh_username: String,
+    direct_connection: bool,
 }
 
 impl Default for ConnectionFormState {
@@ -791,6 +793,7 @@ impl Default for ConnectionFormState {
             ssh_host: String::new(),
             ssh_port: 22,
             ssh_username: String::new(),
+            direct_connection: false,
         }
     }
 }
@@ -2003,6 +2006,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             &TableSortState::default(),
             Some(1000),
             Some(0),
+            None,
         );
         let preview_sql = build_table_preview_sql(
             database_kind,
@@ -2011,6 +2015,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             &TableSortState::default(),
             Some(1000),
             Some(0),
+            None,
         );
         handle.spawn(async move {
             let definition = services
@@ -2049,6 +2054,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         tab.error = None;
         tab.preview = None;
         tab.pending_cell_changes.clear();
+        let definition_for_filter = tab.definition.clone();
         if reload_definition {
             tab.definition = None;
         }
@@ -2066,6 +2072,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             &tab.preview_sort,
             Some(tab.preview_page_size.max(1)),
             Some(tab.current_page * tab.preview_page_size.max(1) as usize),
+            definition_for_filter.as_ref(),
         );
         let preview_sql = build_table_preview_sql(
             database_kind,
@@ -2074,6 +2081,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             &tab.preview_sort,
             Some(tab.preview_page_size.max(1)),
             Some(tab.current_page * tab.preview_page_size.max(1) as usize),
+            definition_for_filter.as_ref(),
         );
         handle.spawn(async move {
             let definition = if reload_definition {
@@ -3378,19 +3386,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         };
                         if menu_button_with_shortcut(ui, label, &shortcut) {
                             let kind = self.database_kind_for_connection(&node.connection_id);
-                            let from_clause = match kind {
-                                DatabaseKind::Postgres => {
-                                    match &node.schema {
-                                        Some(s) => format!("{s}.{}", node.name),
-                                        None => node.name.clone(),
-                                    }
-                                }
-                                _ => node.name.clone(),
-                            };
                             let db = node.database.clone();
-                            let sql = format!(
-                                "SELECT *\nFROM {from_clause}\nLIMIT 100;\n"
-                            );
+                            let sql = if kind == DatabaseKind::MongoDb {
+                                format!("db.{}.find({{}}).limit(100);\n", node.name)
+                            } else {
+                                let from_clause = match kind {
+                                    DatabaseKind::Postgres => {
+                                        match &node.schema {
+                                            Some(s) => format!("{s}.{}", node.name),
+                                            None => node.name.clone(),
+                                        }
+                                    }
+                                    _ => node.name.clone(),
+                                };
+                                format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n")
+                            };
                             self.create_query_tab(
                                 Some(node.connection_id.clone()),
                                 db,
@@ -3979,17 +3989,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 table,
             } => {
                 let kind = self.database_kind_for_connection(&connection_id);
-                let from_clause = match kind {
-                    DatabaseKind::Postgres => {
-                        // Postgres needs schema prefix
-                        match &schema {
-                            Some(s) => format!("{s}.{table}"),
-                            None => table.to_string(),
+                let sql = if kind == DatabaseKind::MongoDb {
+                    format!("db.{table}.find({{}}).limit(100);\n")
+                } else {
+                    let from_clause = match kind {
+                        DatabaseKind::Postgres => {
+                            match &schema {
+                                Some(s) => format!("{s}.{table}"),
+                                None => table.to_string(),
+                            }
                         }
-                    }
-                    _ => table.to_string(),
+                        _ => table.to_string(),
+                    };
+                    format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n")
                 };
-                let sql = format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n");
                 self.create_query_tab(Some(connection_id), database, Some(sql));
             }
             TabUiAction::ExecuteStructureSql(sql) => {
@@ -4611,6 +4624,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 schema_pattern.replace('\'', "''"),
                 table_pattern.replace('\'', "''"),
             ),
+            DatabaseKind::MongoDb => return None,
         };
 
         let result = self.runtime.block_on(self.services.execute_sql(QueryExecution {
@@ -6298,6 +6312,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             &tab.preview_sort,
                                             Some(tab.preview_page_size.max(1)),
                                             Some(tab.current_page * tab.preview_page_size.max(1) as usize),
+                                            tab.definition.as_ref(),
                                         );
                                         let mut column_btn_rect: Option<egui::Rect> = None;
                                         ui.horizontal(|ui| {
@@ -6690,6 +6705,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 &column_items_ref,
                                                             ) {
                                                                 clause.column = Some(available_columns[sel].clone());
+                                                                clause.column_type = tab.definition.as_ref().and_then(|def| {
+                                                                    def.columns.iter().find(|c| c.name == available_columns[sel]).map(|c| c.data_type.clone())
+                                                                });
                                                             }
                                                             let operator_items: Vec<(&str, bool)> = TableFilterOperator::ALL
                                                                 .iter()
@@ -6774,6 +6792,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         if clause.column.is_none() {
                                                             clause.column = available_columns.first().cloned();
                                                         }
+                                                        clause.column_type = clause.column.as_ref().and_then(|col_name| {
+                                                            tab.definition.as_ref().and_then(|def| {
+                                                                def.columns.iter().find(|c| &c.name == col_name).map(|c| c.data_type.clone())
+                                                            })
+                                                        });
                                                         clause.value.clear();
                                                         clause.second_value.clear();
                                                         tab.preview_filter.clauses.push(clause);
@@ -7181,6 +7204,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         .selected_text(match self.connection_form.kind {
                                             DatabaseKind::MySql => "MySQL",
                                             DatabaseKind::Postgres => "PostgreSQL",
+                                            DatabaseKind::MongoDb => "MongoDB",
                                         })
                                         .width(380.0)
                                         .show_ui(ui, |ui| {
@@ -7204,10 +7228,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 self.connection_form.kind = DatabaseKind::Postgres;
                                                 self.connection_form.port = 5432;
                                             }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(self.connection_form.kind, DatabaseKind::MongoDb),
+                                                    "MongoDB",
+                                                )
+                                                .clicked()
+                                            {
+                                                self.connection_form.kind = DatabaseKind::MongoDb;
+                                                self.connection_form.port = 27017;
+                                            }
                                         });
                                 });
                                 form_row(ui, tr!("名称"), &mut self.connection_form.name);
-                                form_row(ui, tr!("分组"), &mut self.connection_form.group_name);
                                 form_row(ui, tr!("主机"), &mut self.connection_form.host);
                                 form_row_u16(ui, tr!("端口"), &mut self.connection_form.port);
                                 form_row(ui, tr!("用户名"), &mut self.connection_form.username);
@@ -7259,6 +7292,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.checkbox(&mut self.connection_form.save_password, tr!("保存密码"));
                     ui.add_space(16.0);
                     ui.checkbox(&mut self.connection_form.ssh_enabled, tr!("启用 SSH Tunnel"));
+                    if self.connection_form.kind == DatabaseKind::MongoDb {
+                        ui.add_space(16.0);
+                        ui.checkbox(&mut self.connection_form.direct_connection, tr!("直接连接"));
+                    }
                 });
 
                 if self.connection_form.ssh_enabled {
@@ -8088,6 +8125,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     "WIN1251", "WIN1252", "WIN1253", "WIN1254", "WIN1255", "WIN1256",
                                     "WIN1257", "WIN1258",
                                 ],
+                                DatabaseKind::MongoDb => &[],
                             };
                             let charset_combo_id = egui::Id::new("ddl-charset-dropdown");
                             let collation_combo_id = egui::Id::new("ddl-collation-dropdown");
@@ -8125,6 +8163,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     let collation_choices: Vec<&str> = match db_kind {
                                         DatabaseKind::MySql => get_mysql_collations(&charset),
                                         DatabaseKind::Postgres => get_pg_collations(&charset),
+                                        DatabaseKind::MongoDb => Vec::new(),
                                     };
                                     let collation_display = if collation.is_empty() {
                                         tr!("（默认）").to_string()
@@ -9151,17 +9190,21 @@ impl eframe::App for DesktopApp {
                     }
                     ExplorerNodeType::Table | ExplorerNodeType::View => {
                         let kind = self.database_kind_for_connection(&node.connection_id);
-                        let from_clause = match kind {
-                            DatabaseKind::Postgres => {
-                                match &node.schema {
-                                    Some(s) => format!("{s}.{}", node.name),
-                                    None => node.name.clone(),
-                                }
-                            }
-                            _ => node.name.clone(),
-                        };
                         let db = node.database.clone();
-                        let sql = format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n");
+                        let sql = if kind == DatabaseKind::MongoDb {
+                            format!("db.{}.find({{}}).limit(100);\n", node.name)
+                        } else {
+                            let from_clause = match kind {
+                                DatabaseKind::Postgres => {
+                                    match &node.schema {
+                                        Some(s) => format!("{s}.{}", node.name),
+                                        None => node.name.clone(),
+                                    }
+                                }
+                                _ => node.name.clone(),
+                            };
+                            format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n")
+                        };
                         self.create_query_tab(Some(node.connection_id.clone()), db, Some(sql));
                     }
                     _ => {
@@ -9407,6 +9450,7 @@ impl ConnectionFormState {
                 .as_ref()
                 .map(|item| item.username.clone())
                 .unwrap_or_default(),
+            direct_connection: profile.direct_connection,
         }
     }
 
@@ -9434,6 +9478,7 @@ impl ConnectionFormState {
             } else {
                 None
             },
+            direct_connection: self.direct_connection,
         }
     }
 }
@@ -10062,6 +10107,7 @@ fn parse_explain_result(result: &QueryResult, kind: DatabaseKind) -> Vec<Explain
     match kind {
         DatabaseKind::Postgres => parse_explain_postgres(result),
         DatabaseKind::MySql => parse_explain_mysql(result),
+        DatabaseKind::MongoDb => Vec::new(),
     }
 }
 
@@ -13093,6 +13139,7 @@ fn generate_alter_table_sql(
                         q(&col.original_name), q(&col.name)
                     ));
                 }
+                DatabaseKind::MongoDb => {}
             }
         }
 
@@ -13188,6 +13235,7 @@ fn generate_alter_table_sql(
                     ));
                 }
             }
+            DatabaseKind::MongoDb => {}
         }
     }
 
@@ -13230,6 +13278,7 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
             format!("{}.{}", q(sch), q(name))
         }
         DatabaseKind::MySql => q(name),
+        DatabaseKind::MongoDb => q(name),
     };
 
     let mut lines = Vec::new();
@@ -13602,7 +13651,16 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState) {
 fn parse_indexes_from_create_sql(create_sql: &str) -> Vec<ExistingIndex> {
     let mut indexes = Vec::new();
     for line in create_sql.lines() {
-        let trimmed = line.trim().trim_end_matches(',');
+        let trimmed = line.trim().trim_end_matches(';').trim_end_matches(',');
+
+        // MongoDB: db.collection.createIndex({...}, {name: "...", unique: true})
+        if trimmed.contains(".createIndex(") {
+            if let Some(idx) = parse_mongo_create_index(trimmed) {
+                indexes.push(idx);
+            }
+            continue;
+        }
+
         let upper = trimmed.to_ascii_uppercase();
 
         // 跳过 PRIMARY KEY
@@ -13652,6 +13710,80 @@ fn parse_indexes_from_create_sql(create_sql: &str) -> Vec<ExistingIndex> {
     indexes
 }
 
+/// 解析单行 MongoDB createIndex 命令
+fn parse_mongo_create_index(line: &str) -> Option<ExistingIndex> {
+    // 格式: db.<coll>.createIndex({"col": 1, ...}, {name: "...", unique: true})
+    let start = line.find(".createIndex(")?;
+    let args = &line[start + ".createIndex(".len()..];
+    let args = args.strip_suffix(')').unwrap_or(args);
+
+    // 按顶层 {} 拆分参数
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut part_start = 0;
+    for (i, b) in args.bytes().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    parts.push(&args[part_start..=i]);
+                    part_start = i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 第一个 {} 是 keys 文档，第二个是 options
+    let keys_doc = parts.first()?;
+    let options_doc = parts.get(1);
+
+    // 解析 keys: {"col1": 1, "col2": -1}
+    let keys_inner = keys_doc.strip_prefix('{')?.strip_suffix('}')?;
+    let columns: Vec<String> = keys_inner
+        .split(',')
+        .filter_map(|entry| {
+            let (k, _) = entry.split_once(':')?;
+            let k = k.trim().trim_matches('"').trim_matches('\'');
+            if k.is_empty() { None } else { Some(k.to_string()) }
+        })
+        .collect();
+
+    // 解析 options: {name: "...", unique: true}
+    let mut name = String::new();
+    let mut unique = false;
+    if let Some(doc) = options_doc {
+        let inner = doc.strip_prefix('{').unwrap_or(doc).strip_suffix('}').unwrap_or("");
+        for entry in inner.split(',') {
+            let entry = entry.trim();
+            if let Some((k, v)) = entry.split_once(':') {
+                let k = k.trim();
+                let v = v.trim();
+                if k == "name" {
+                    name = v.trim_matches('"').trim_matches('\'').to_string();
+                } else if k == "unique" {
+                    unique = v == "true";
+                }
+            }
+        }
+    }
+
+    if columns.is_empty() {
+        return None;
+    }
+    if name.is_empty() {
+        name = columns.join("_");
+    }
+
+    Some(ExistingIndex {
+        name,
+        columns,
+        unique,
+        index_type: "BTREE".to_string(),
+    })
+}
+
 /// 生成索引变更 SQL（CREATE / DROP INDEX）
 fn generate_index_sql(
     table: &TableRef,
@@ -13660,6 +13792,9 @@ fn generate_index_sql(
     new_indexes: &[PendingIndex],
     db_kind: DatabaseKind,
 ) -> String {
+    if db_kind == DatabaseKind::MongoDb {
+        return generate_mongo_index_cmd(&table.table, existing, deleted, new_indexes);
+    }
     let schema_prefix = match &table.schema {
         Some(s) => format!("{}.", quote_identifier(db_kind, s)),
         None => String::new(),
@@ -13686,6 +13821,39 @@ fn generate_index_sql(
             "CREATE {unique}INDEX {} ON {full_table} ({cols})",
             quote_identifier(db_kind, &idx.name)
         ));
+    }
+    if stmts.is_empty() {
+        String::new()
+    } else {
+        format!("{};\n", stmts.join(";\n"))
+    }
+}
+
+fn generate_mongo_index_cmd(
+    collection: &str,
+    existing: &[ExistingIndex],
+    deleted: &BTreeSet<usize>,
+    new_indexes: &[PendingIndex],
+) -> String {
+    let mut stmts: Vec<String> = Vec::new();
+
+    for &idx in deleted {
+        if let Some(idx_def) = existing.get(idx) {
+            stmts.push(format!("db.{collection}.dropIndex(\"{}\")", idx_def.name));
+        }
+    }
+    for idx in new_indexes {
+        let keys: String = idx.columns
+            .iter()
+            .map(|c| format!("\"{c}\": 1"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let opts = if idx.unique {
+            format!("{{unique: true, name: \"{}\"}}", idx.name)
+        } else {
+            format!("{{name: \"{}\"}}", idx.name)
+        };
+        stmts.push(format!("db.{collection}.createIndex({{{keys}}}, {opts})"));
     }
     if stmts.is_empty() {
         String::new()
@@ -15172,6 +15340,7 @@ impl Default for TableFilterClause {
         Self {
             joiner: TableFilterJoiner::And,
             column: None,
+            column_type: None,
             operator: TableFilterOperator::default(),
             value: String::new(),
             second_value: String::new(),
@@ -15250,6 +15419,202 @@ fn table_filter_summary(filter: &TableFilterState) -> Option<String> {
     Some(result.join(" "))
 }
 
+fn build_mongo_preview_cmd(
+    collection: &str,
+    filter: &TableFilterState,
+    sort: &TableSortState,
+    limit: Option<u32>,
+    offset: Option<usize>,
+    definition: Option<&TableDefinition>,
+) -> String {
+    let filter_doc = build_mongo_filter_doc(filter, definition);
+    let mut cmd = format!("db.{collection}.find({filter_doc})");
+    if let Some(col) = sort.column.as_deref() {
+        let col = col.trim();
+        if !col.is_empty() {
+            let dir = if sort.descending { -1 } else { 1 };
+            cmd.push_str(&format!(".sort({{\"{col}\": {dir}}})"));
+        }
+    }
+    if let Some(limit) = limit {
+        cmd.push_str(&format!(".limit({limit})"));
+    }
+    if let Some(offset) = offset {
+        cmd.push_str(&format!(".skip({offset})"));
+    }
+    cmd
+}
+
+fn build_mongo_filter_doc(filter: &TableFilterState, definition: Option<&TableDefinition>) -> String {
+    use std::fmt::Write;
+
+    let active: Vec<_> = filter
+        .clauses
+        .iter()
+        .filter(|c| {
+            if c.operator == TableFilterOperator::Custom {
+                return !c.value.trim().is_empty();
+            }
+            c.column.as_deref().is_some_and(|col| !col.trim().is_empty())
+        })
+        .collect();
+
+    if active.is_empty() {
+        return "{}".to_string();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    for clause in &active {
+        if let Some(expr) = mongo_clause_expr(clause, definition) {
+            parts.push(expr);
+        }
+    }
+
+    if parts.is_empty() {
+        return "{}".to_string();
+    }
+
+    let has_or = active.iter().any(|c| c.joiner == TableFilterJoiner::Or);
+    if has_or {
+        let mut doc = String::from("{\"$or\": [");
+        for (i, p) in parts.iter().enumerate() {
+            if i > 0 {
+                doc.push_str(", ");
+            }
+            let _ = write!(doc, "{p}");
+        }
+        doc.push_str("]}");
+        doc
+    } else if parts.len() == 1 {
+        parts.pop().unwrap()
+    } else {
+        let mut doc = String::from("{\"$and\": [");
+        for (i, p) in parts.iter().enumerate() {
+            if i > 0 {
+                doc.push_str(", ");
+            }
+            let _ = write!(doc, "{p}");
+        }
+        doc.push_str("]}");
+        doc
+    }
+}
+
+fn mongo_clause_expr(clause: &TableFilterClause, definition: Option<&TableDefinition>) -> Option<String> {
+    if clause.operator == TableFilterOperator::Custom {
+        let raw = clause.value.trim();
+        return if raw.is_empty() { None } else { Some(raw.to_string()) };
+    }
+
+    let col = clause.column.as_deref()?.trim();
+    if col.is_empty() {
+        return None;
+    }
+    let primary = clause.value.trim();
+    let secondary = clause.second_value.trim();
+    let col_type = definition
+        .and_then(|def| def.columns.iter().find(|c| c.name == col).map(|c| c.data_type.as_str()));
+    let v = |s: &str| mongo_value_literal(s, col_type);
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+
+    match clause.operator {
+        TableFilterOperator::Eq if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {}}}", v(primary)))
+        }
+        TableFilterOperator::NotEq if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$ne\": {}}}}}", v(primary)))
+        }
+        TableFilterOperator::Lt if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$lt\": {}}}}}", v(primary)))
+        }
+        TableFilterOperator::LtEq if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$lte\": {}}}}}", v(primary)))
+        }
+        TableFilterOperator::Gt if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$gt\": {}}}}}", v(primary)))
+        }
+        TableFilterOperator::GtEq if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$gte\": {}}}}}", v(primary)))
+        }
+        TableFilterOperator::Contains if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$regex\": \"{v}\", \"$options\": \"i\"}}}}", v = esc(primary)))
+        }
+        TableFilterOperator::NotContains if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$not\": {{\"$regex\": \"{v}\", \"$options\": \"i\"}}}}}}", v = esc(primary)))
+        }
+        TableFilterOperator::BeginsWith if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$regex\": \"^{v}\", \"$options\": \"i\"}}}}", v = esc(primary)))
+        }
+        TableFilterOperator::NotBeginsWith if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$not\": {{\"$regex\": \"^{v}\", \"$options\": \"i\"}}}}}}", v = esc(primary)))
+        }
+        TableFilterOperator::EndsWith if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$regex\": \"{v}$\", \"$options\": \"i\"}}}}", v = esc(primary)))
+        }
+        TableFilterOperator::NotEndsWith if !primary.is_empty() => {
+            Some(format!("{{\"{col}\": {{\"$not\": {{\"$regex\": \"{v}$\", \"$options\": \"i\"}}}}}}", v = esc(primary)))
+        }
+        TableFilterOperator::IsNull => Some(format!("{{\"{col}\": null}}")),
+        TableFilterOperator::IsNotNull => Some(format!("{{\"{col}\": {{\"$ne\": null}}}}")),
+        TableFilterOperator::IsEmpty => Some(format!("{{\"{col}\": \"\"}}")),
+        TableFilterOperator::IsNotEmpty => Some(format!("{{\"{col}\": {{\"$ne\": \"\"}}}}")),
+        TableFilterOperator::Between if !primary.is_empty() && !secondary.is_empty() => {
+            Some(format!(
+                "{{\"{col}\": {{\"$gte\": {}, \"$lte\": {}}}}}",
+                v(primary),
+                v(secondary),
+            ))
+        }
+        TableFilterOperator::NotBetween if !primary.is_empty() && !secondary.is_empty() => {
+            Some(format!(
+                "{{\"{col}\": {{\"$not\": {{\"$gte\": {}, \"$lte\": {}}}}}}}",
+                v(primary),
+                v(secondary),
+            ))
+        }
+        TableFilterOperator::InList if !primary.is_empty() => {
+            let items: Vec<_> = primary
+                .split(|c: char| c == ',' || c == '\n')
+                .map(|s| v(s.trim()))
+                .collect();
+            Some(format!("{{\"{col}\": {{\"$in\": [{}]}}}}", items.join(", ")))
+        }
+        TableFilterOperator::NotInList if !primary.is_empty() => {
+            let items: Vec<_> = primary
+                .split(|c: char| c == ',' || c == '\n')
+                .map(|s| v(s.trim()))
+                .collect();
+            Some(format!("{{\"{col}\": {{\"$nin\": [{}]}}}}", items.join(", ")))
+        }
+        _ => None,
+    }
+}
+
+/// 将用户输入的筛选值转换为 MongoDB JSON 字面量
+/// 日期 → ISODate("...")，Decimal128 → NumberDecimal("...")，数值 → 无引号数字，其他 → 带引号字符串
+fn mongo_value_literal(value: &str, column_type: Option<&str>) -> String {
+    if looks_like_datetime(value) {
+        return format!("ISODate(\"{}\")", value.replace('\\', "\\\\").replace('"', "\\\""));
+    }
+    // ObjectId：column_type 为 ObjectId，或 24 位十六进制字符串（_id 常见）
+    if column_type == Some("ObjectId") || value.len() == 24 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        return format!("ObjectId(\"{}\")", escaped);
+    }
+    // Decimal128 字段需要 NumberDecimal() 包裹才能正确匹配
+    if column_type == Some("Decimal128") {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        return format!("NumberDecimal(\"{}\")", escaped);
+    }
+    if let Ok(n) = value.parse::<i64>() {
+        return n.to_string();
+    }
+    if let Ok(n) = value.parse::<f64>() {
+        return n.to_string();
+    }
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn build_table_preview_sql(
     database_kind: DatabaseKind,
     table: &TableRef,
@@ -15257,7 +15622,11 @@ fn build_table_preview_sql(
     sort: &TableSortState,
     limit: Option<u32>,
     offset: Option<usize>,
+    definition: Option<&TableDefinition>,
 ) -> String {
+    if database_kind == DatabaseKind::MongoDb {
+        return build_mongo_preview_cmd(&table.table, filter, sort, limit, offset, definition);
+    }
     let mut sql = format!("SELECT *\nFROM {}", qualified_table_name(database_kind, table));
 
     if let Some(filter_clause) = build_table_filter_clause(database_kind, filter) {
@@ -15288,7 +15657,11 @@ fn build_table_preview_display_sql(
     sort: &TableSortState,
     limit: Option<u32>,
     offset: Option<usize>,
+    definition: Option<&TableDefinition>,
 ) -> String {
+    if database_kind == DatabaseKind::MongoDb {
+        return build_mongo_preview_cmd(&table.table, filter, sort, limit, offset, definition);
+    }
     let mut parts = vec![format!(
         "SELECT * FROM {}",
         qualified_table_name_display(database_kind, table)
@@ -15598,6 +15971,11 @@ fn qualified_table_name(database_kind: DatabaseKind, table: &TableRef) -> String
                 segments.push(quote_identifier(database_kind, schema));
             }
         }
+        DatabaseKind::MongoDb => {
+            if let Some(database) = table.database.as_deref().filter(|value| !value.is_empty()) {
+                segments.push(database.to_string());
+            }
+        }
     }
     segments.push(quote_identifier(database_kind, &table.table));
     segments.join(".")
@@ -15616,6 +15994,11 @@ fn qualified_table_name_display(database_kind: DatabaseKind, table: &TableRef) -
                 segments.push(schema.to_string());
             }
         }
+        DatabaseKind::MongoDb => {
+            if let Some(database) = table.database.as_deref().filter(|value| !value.is_empty()) {
+                segments.push(database.to_string());
+            }
+        }
     }
     segments.push(table.table.clone());
     segments.join(".")
@@ -15625,6 +16008,7 @@ fn quote_identifier(database_kind: DatabaseKind, identifier: &str) -> String {
     match database_kind {
         DatabaseKind::MySql => format!("`{}`", identifier.replace('`', "``")),
         DatabaseKind::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        DatabaseKind::MongoDb => identifier.to_string(),
     }
 }
 
@@ -15632,6 +16016,7 @@ fn cast_column_to_text(database_kind: DatabaseKind, column: &str) -> String {
     match database_kind {
         DatabaseKind::MySql => format!("CAST({column} AS CHAR)"),
         DatabaseKind::Postgres => format!("CAST({column} AS TEXT)"),
+        DatabaseKind::MongoDb => column.to_string(),
     }
 }
 
@@ -17139,6 +17524,27 @@ fn pg_type_suggestions() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// MongoDB BSON 类型建议列表 (类型名, 中文描述)
+fn mongo_type_suggestions() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("String", tr!("字符串, 文本数据")),
+        ("Int32", tr!("32位整数, -2^31 ~ 2^31-1")),
+        ("Int64", tr!("64位整数, -2^63 ~ 2^63-1")),
+        ("Double", tr!("双精度浮点数, IEEE 754")),
+        ("Boolean", tr!("布尔, true/false")),
+        ("ObjectId", tr!("对象ID, 12字节唯一标识")),
+        ("Date", tr!("日期时间, UTC 日期时间")),
+        ("Array", tr!("数组, 值的有序列表")),
+        ("EmbeddedDocument", tr!("嵌入文档, 子文档")),
+        ("Binary", tr!("二进制, 二进制数据")),
+        ("Decimal128", tr!("128位十进制, 精确数值")),
+        ("Timestamp", tr!("时间戳, MongoDB 内部时间戳")),
+        ("RegularExpression", tr!("正则表达式, 模式匹配")),
+        ("JavaScript", tr!("JavaScript, JS 代码")),
+        ("Null", tr!("空值, null")),
+    ]
+}
+
 /// 渲染类型输入框 + 下拉选择，返回是否有变更
 fn render_type_input_with_dropdown(
     ui: &mut egui::Ui,
@@ -17150,6 +17556,7 @@ fn render_type_input_with_dropdown(
     let suggestions = match db_kind {
         core_domain::DatabaseKind::MySql => mysql_type_suggestions(),
         core_domain::DatabaseKind::Postgres => pg_type_suggestions(),
+        core_domain::DatabaseKind::MongoDb => mongo_type_suggestions(),
     };
     let mut changed = false;
     let popup_id = id_source.with("type_popup");
@@ -17628,6 +18035,7 @@ fn connection_kind_badge(kind: &DatabaseKind) -> RichText {
     let label = match kind {
         DatabaseKind::MySql => "MySQL",
         DatabaseKind::Postgres => "PostgreSQL",
+        DatabaseKind::MongoDb => "MongoDB",
     };
     RichText::new(label).size(10.5)
 }

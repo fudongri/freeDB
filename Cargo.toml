@@ -6,6 +6,7 @@ members = [
     "crates/connection-store",
     "crates/core-domain",
     "crates/driver-api",
+    "crates/driver-mongodb",
     "crates/driver-mysql",
     "crates/driver-postgres",
     "crates/export-service",
@@ -29,10 +30,12 @@ chrono = { version = "0.4", features = ["serde"] }
 csv = "1.4"
 dirs = "6.0"
 eframe = "0.33"
+hex = "0.4"
 egui = "0.33"
 egui_dock = "0.18"
 egui_extras = "0.33"
 muda = "0.16"
+mongodb = "3.2"
 mysql_async = "0.36"
 parking_lot = "0.12"
 raw-window-handle = "0.6"
@@ -49,4 +52,5 @@ tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "ti
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2.1"
 uuid = { version = "1.18", features = ["v4", "serde"] }

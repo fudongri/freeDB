@@ -10,11 +10,19 @@ pub enum ConnectionHandle {
     MySql {
         conn: mysql_async::Conn,
     },
+    MongoDb {
+        client: mongodb::Client,
+        database: Option<String>,
+    },
 }
 
 impl ConnectionHandle {
     pub fn is_postgres(&self) -> bool {
         matches!(self, Self::Postgres { .. })
+    }
+
+    pub fn is_mongodb(&self) -> bool {
+        matches!(self, Self::MongoDb { .. })
     }
 }
 

@@ -25,7 +25,8 @@ impl ConnectionStore {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
             "SELECT id, name, kind, group_name, host, port, username, default_database,
-                    connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at
+                    connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
+                    direct_connection
              FROM connection_profiles
              ORDER BY sort_order ASC, name ASC",
         )?;
@@ -49,8 +50,9 @@ impl ConnectionStore {
         connection.execute(
             "INSERT INTO connection_profiles (
                 id, name, kind, group_name, host, port, username, default_database,
-                connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
+                direct_connection
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 profile.id,
                 profile.name,
@@ -67,6 +69,7 @@ impl ConnectionStore {
                 profile.last_used_at.map(|item| item.to_rfc3339()),
                 profile.created_at.to_rfc3339(),
                 profile.updated_at.to_rfc3339(),
+                profile.direct_connection,
             ],
         )?;
         Ok(())
@@ -79,7 +82,8 @@ impl ConnectionStore {
             "UPDATE connection_profiles
              SET name = ?2, kind = ?3, group_name = ?4, host = ?5, port = ?6,
                  username = ?7, default_database = ?8, connect_timeout_secs = ?9,
-                 ssl_mode = ?10, ssh_tunnel_json = ?11, last_used_at = ?12, updated_at = ?13
+                 ssl_mode = ?10, ssh_tunnel_json = ?11, last_used_at = ?12, updated_at = ?13,
+                 direct_connection = ?14
              WHERE id = ?1",
             params![
                 profile.id,
@@ -95,6 +99,7 @@ impl ConnectionStore {
                 ssh_json,
                 profile.last_used_at.map(|item| item.to_rfc3339()),
                 profile.updated_at.to_rfc3339(),
+                profile.direct_connection,
             ],
         )?;
         Ok(())
@@ -114,7 +119,8 @@ impl ConnectionStore {
         connection
             .query_row(
                 "SELECT id, name, kind, group_name, host, port, username, default_database,
-                        connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at
+                        connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
+                        direct_connection
                  FROM connection_profiles WHERE id = ?1",
                 params![connection_id],
                 map_profile,
@@ -164,7 +170,7 @@ impl ConnectionStore {
             "CREATE TABLE IF NOT EXISTS connection_profiles (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                kind TEXT NOT NULL CHECK (kind IN ('mysql', 'postgres')),
+                kind TEXT NOT NULL CHECK (kind IN ('mysql', 'postgres', 'mongodb')),
                 group_name TEXT,
                 host TEXT NOT NULL,
                 port INTEGER NOT NULL,
@@ -176,7 +182,8 @@ impl ConnectionStore {
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 last_used_at TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                direct_connection INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id TEXT PRIMARY KEY,
@@ -190,6 +197,47 @@ impl ConnectionStore {
             "ALTER TABLE connection_profiles ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // 迁移：已有数据库添加 direct_connection 列
+        let _ = connection.execute(
+            "ALTER TABLE connection_profiles ADD COLUMN direct_connection INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        // 迁移：更新 kind CHECK 约束以包含 'mongodb'
+        let needs_check_migration = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='connection_profiles'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        if !needs_check_migration.contains("'mongodb'") {
+            let _ = connection.execute_batch(
+                "BEGIN;
+                 CREATE TABLE _connection_profiles_new (
+                     id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK (kind IN ('mysql', 'postgres', 'mongodb')),
+                     group_name TEXT, host TEXT NOT NULL, port INTEGER NOT NULL,
+                     username TEXT NOT NULL, default_database TEXT,
+                     connect_timeout_secs INTEGER NOT NULL DEFAULT 5,
+                     ssl_mode TEXT NOT NULL DEFAULT 'prefer',
+                     ssh_tunnel_json TEXT NOT NULL DEFAULT 'null',
+                     sort_order INTEGER NOT NULL DEFAULT 0,
+                     last_used_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                     direct_connection INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO _connection_profiles_new
+                     (id, name, kind, group_name, host, port, username, default_database,
+                      connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order,
+                      last_used_at, created_at, updated_at)
+                 SELECT id, name, kind, group_name, host, port, username, default_database,
+                        connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order,
+                        last_used_at, created_at, updated_at
+                 FROM connection_profiles;
+                 DROP TABLE connection_profiles;
+                 ALTER TABLE _connection_profiles_new RENAME TO connection_profiles;
+                 COMMIT;",
+            );
+        }
         Ok(())
     }
 
@@ -318,6 +366,7 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
         .map_err(to_sql_error)?;
     let created_at = parse_datetime(&row.get::<_, String>(13)?).map_err(to_sql_error)?;
     let updated_at = parse_datetime(&row.get::<_, String>(14)?).map_err(to_sql_error)?;
+    let direct_connection: i64 = row.get(15)?;
 
     Ok(ConnectionProfile {
         id: row.get(0)?,
@@ -336,6 +385,7 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
         last_used_at,
         created_at,
         updated_at,
+        direct_connection: direct_connection != 0,
     })
 }
 

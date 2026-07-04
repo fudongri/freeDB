@@ -36,6 +36,7 @@ pub fn dump_table_sql(
         DatabaseKind::Postgres => {
             out.push_str(&build_create_table_from_columns(table_name, table_def, db_kind));
         }
+        DatabaseKind::MongoDb => {}
     }
 
     // ── INSERT data ──
@@ -65,6 +66,7 @@ pub fn dump_database_sql(
     match db_kind {
         DatabaseKind::MySql => out.push_str("SET FOREIGN_KEY_CHECKS = 0;\n\n"),
         DatabaseKind::Postgres => out.push_str("SET session_replication_role = 'replica';\n\n"),
+        DatabaseKind::MongoDb => {}
     }
 
     for (name, def, data) in &tables {
@@ -75,6 +77,7 @@ pub fn dump_database_sql(
     match db_kind {
         DatabaseKind::MySql => out.push_str("SET FOREIGN_KEY_CHECKS = 1;\n"),
         DatabaseKind::Postgres => out.push_str("SET session_replication_role = 'origin';\n"),
+        DatabaseKind::MongoDb => {}
     }
     out
 }
@@ -85,6 +88,7 @@ fn quote_ident(name: &str, db_kind: DatabaseKind) -> String {
     match db_kind {
         DatabaseKind::MySql => format!("`{}`", name.replace('`', "``")),
         DatabaseKind::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        DatabaseKind::MongoDb => name.to_string(),
     }
 }
 
@@ -103,6 +107,7 @@ fn format_cell(value: &QueryCellValue, db_kind: DatabaseKind) -> String {
                 match db_kind {
                     DatabaseKind::MySql => format!("'{}'", escape_string(text)),
                     DatabaseKind::Postgres => format!("'{}'", escape_string(text)),
+                    DatabaseKind::MongoDb => format!("'{}'", escape_string(text)),
                 }
             }
         }
@@ -154,6 +159,7 @@ fn build_create_table_from_columns(
             match db_kind {
                 DatabaseKind::MySql => out.push_str(" AUTO_INCREMENT"),
                 DatabaseKind::Postgres => {} // SERIAL already implies this
+                DatabaseKind::MongoDb => {}
             }
         }
 
@@ -170,8 +176,8 @@ fn build_create_table_from_columns(
         if let Some(ref comment) = col.comment {
             match db_kind {
                 DatabaseKind::MySql => out.push_str(&format!(" COMMENT '{}'", escape_string(comment))),
-                // Postgres comments use separate ALTER TABLE statement (appended below)
                 DatabaseKind::Postgres => {}
+                DatabaseKind::MongoDb => {}
             }
         }
 
@@ -216,10 +222,9 @@ fn build_create_table_from_columns(
 fn map_data_type(data_type: &str, db_kind: DatabaseKind, is_auto: bool) -> String {
     let lower = data_type.to_ascii_lowercase();
     match db_kind {
-        DatabaseKind::MySql => data_type.to_string(), // MySQL SHOW CREATE TABLE gives exact type
+        DatabaseKind::MySql => data_type.to_string(),
         DatabaseKind::Postgres => {
             if is_auto {
-                // Map to SERIAL equivalent
                 match lower.as_str() {
                     "integer" | "int4" | "int" => "SERIAL".to_string(),
                     "bigint" | "int8" => "BIGSERIAL".to_string(),
@@ -230,6 +235,7 @@ fn map_data_type(data_type: &str, db_kind: DatabaseKind, is_auto: bool) -> Strin
                 data_type.to_string()
             }
         }
+        DatabaseKind::MongoDb => data_type.to_string(),
     }
 }
 

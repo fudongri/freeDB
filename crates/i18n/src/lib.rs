@@ -335,6 +335,15 @@ fn en(key: &'static str) -> &'static str {
         // ── driver-postgres.rs ──
         "PostgreSQL 表格编辑将在后续迭代中补全" => "PostgreSQL table editing will be available in a future release",
 
+        // ── driver-mongodb.rs ──
+        "MongoDB 表格编辑将在后续迭代中补全" => "MongoDB collection editing will be available in a future release",
+        "MongoDB 不支持重命名数据库" => "MongoDB does not support renaming databases",
+        "MongoDB 不支持 Schema" => "MongoDB does not support schemas",
+        "已切换到数据库: {}" => "Switched to database: {}",
+        "已删除集合: {}" => "Dropped collection: {}",
+        "查询完成，返回 {} 条记录" => "Query returned {} record(s)",
+        "无法解析 MongoDB 命令。支持的语法: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])" => "Cannot parse MongoDB command. Supported syntax: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])",
+
         // ── app-services.rs ──
         "测试连接需要密码" => "Password is required to test the connection",
         "该连接未保存密码，请重新编辑连接后保存密码" => "No saved password for this connection. Please edit and save the password.",
@@ -366,6 +375,7 @@ fn en(key: &'static str) -> &'static str {
         "不是 null" => "is not null",
         "设置为 NULL" => "Set to NULL",
         "启用 SSH Tunnel" => "Enable SSH Tunnel",
+        "直接连接" => "Direct Connection",
         "浮点数, 单精度" => "FLOAT, single precision",
         "定点数, 精确数值" => "DECIMAL, exact numeric",
         "二进制, 二进制数据" => "BINARY, binary data",
