@@ -584,6 +584,11 @@ enum TableHeaderSortChoice {
     Clear,
 }
 
+enum TableHeaderCopyAction {
+    CopyData,
+    CopyAsInCondition,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum TableFilterOperator {
     #[default]
@@ -4122,6 +4127,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::CopyActiveTableRowsAsTsv(row_indices) => {
                 self.copy_active_table_rows_as_tsv(ctx, &row_indices);
             }
+            TabUiAction::CopyColumnData(values) => {
+                let text = values.join("\n");
+                ctx.copy_text(text);
+                self.status_message = tr!("已复制列数据").into();
+            }
+            TabUiAction::CopyColumnAsInCondition(values, col_type) => {
+                let need_quote = col_type.as_deref().map_or(true, |dt| !is_numeric_type(dt));
+                let items: Vec<String> = values.iter()
+                    .map(|s| {
+                        if need_quote {
+                            format!("'{}'", s.replace('\'', "''"))
+                        } else {
+                            s.clone()
+                        }
+                    })
+                    .collect();
+                let text = format!("IN (\n{}\n)", items.join(",\n"));
+                ctx.copy_text(text);
+                self.status_message = tr!("已复制 IN 条件").into();
+            }
             TabUiAction::NewQueryFromTable {
                 connection_id,
                 database,
@@ -6173,7 +6198,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             .header(30.0, |mut header| {
                                 for title in [tr!("字段名"), tr!("类型"), tr!("非空"), "PK", tr!("自增"), tr!("默认值"), tr!("注释"), ""] {
                                     header.col(|ui| {
-                                        table_header_cell(ui, &palette, title, false, None, false, false);
+                                        table_header_cell(ui, &palette, title, false, None, false, false, None, None);
                                     });
                                 }
                             })
@@ -6341,7 +6366,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             .header(30.0, |mut header| {
                                 for title in [tr!("索引名"), tr!("唯一"), tr!("包含列"), ""] {
                                     header.col(|ui| {
-                                        table_header_cell(ui, &palette, title, false, None, false, false);
+                                        table_header_cell(ui, &palette, title, false, None, false, false, None, None);
                                     });
                                 }
                             })
@@ -9841,6 +9866,8 @@ enum TabUiAction {
     CopyActiveTableRowsAsInsert(Vec<usize>),
     CopyActiveTableRowsAsInsertWithoutPk(Vec<usize>),
     CopyActiveTableRowsAsTsv(Vec<usize>),
+    CopyColumnData(Vec<String>),
+    CopyColumnAsInCondition(Vec<String>, Option<String>),
     ConnectionChanged {
         connection_id: Option<String>,
     },
@@ -10790,14 +10817,14 @@ fn render_result_table(
                         .header(30.0, |mut header| {
                             // Row number header
                             header.col(|ui| {
-                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false);
+                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, None);
                             });
                             for (col_idx, column) in display_columns.iter().enumerate() {
                                 header.col(|ui| {
                                     let cell_rect = ui.max_rect();
                                     let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let is_selected = selected_columns.contains(&col_idx);
-                                    let (sort_choice, clicked, cell_dragged) = table_header_cell(
+                                    let (sort_choice, clicked, cell_dragged, _) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
@@ -10805,6 +10832,8 @@ fn render_result_table(
                                         sort_indicator(sort_state, column),
                                         is_selected,
                                         is_dragged,
+                                        None,
+                                        None,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
@@ -11223,14 +11252,14 @@ fn render_editable_result_table(
                     table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false);
+                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, None);
                             });
                             for (col_idx, column) in display_columns.iter().enumerate() {
                                 header.col(|ui| {
                                     let cell_rect = ui.max_rect();
                                     let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let is_selected = selected_columns.contains(&col_idx);
-                                    let (sort_choice, clicked, cell_dragged) = table_header_cell(
+                                    let (sort_choice, clicked, cell_dragged, _) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
@@ -11238,6 +11267,8 @@ fn render_editable_result_table(
                                         sort_indicator(sort_state, column),
                                         is_selected,
                                         is_dragged,
+                                        None,
+                                        None,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
@@ -11672,6 +11703,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
     let editable_columns = table_editable_columns(tab);
     let mut action = TabUiAction::None;
     let mut selected_sort = None;
+    let mut pending_header_copy: Option<(TableHeaderCopyAction, String, Option<String>)> = None;
     let mut should_cancel_pending_insert = false;
 
     egui::Frame::new()
@@ -11731,7 +11763,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             // Row number header
                             if show_row_number {
                                 header.col(|ui| {
-                                    let _ = table_header_cell(ui, &palette, "#", false, None, false, false);
+                                    let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, None);
                                 });
                             }
                             for (col_idx, column) in columns.iter().enumerate() {
@@ -11739,7 +11771,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     let cell_rect = ui.max_rect();
                                     let is_selected = tab.selected_columns.contains(&col_idx);
                                     let is_dragged = tab.column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
-                                    let (sort_choice, clicked, cell_dragged) = table_header_cell(
+                                    let col_data_type = tab.definition.as_ref()
+                                        .and_then(|d| d.columns.iter().find(|c| c.name == *column))
+                                        .map(|c| c.data_type.as_str());
+                                    let col_values: Vec<QueryCellValue> = tab.preview.as_ref()
+                                        .map(|p| p.rows.iter().filter_map(|r| r.get(column).cloned()).collect())
+                                        .unwrap_or_default();
+                                    let (sort_choice, clicked, cell_dragged, copy_action) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
@@ -11747,6 +11785,8 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         sort_indicator(&tab.preview_sort, column),
                                         is_selected,
                                         is_dragged,
+                                        col_data_type,
+                                        Some(&col_values),
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
@@ -11763,6 +11803,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             tab.selected_columns.insert(col_idx);
                                         }
                                         ctx.request_repaint();
+                                    }
+                                    if copy_action.is_some() {
+                                        pending_header_copy = copy_action.map(|a| (a, column.clone(), col_data_type.map(|s| s.to_string())));
                                     }
                                     // 拖拽开始：记录原始列位置
                                     if cell_dragged && tab.column_drag.is_none() {
@@ -11825,6 +11868,20 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                         } else {
                             drag.scroll_speed_x = 0.0;
                         }
+                    }
+                    if let Some((copy_act, col_name, col_type)) = pending_header_copy.take() {
+                        let non_null_values: Vec<String> = tab.preview.as_ref()
+                            .map(|p| p.rows.iter()
+                                .filter_map(|r| r.get(&col_name))
+                                .filter(|v| !v.is_null())
+                                .map(|v| v.as_text().unwrap_or_default().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect())
+                            .unwrap_or_default();
+                        action = match copy_act {
+                            TableHeaderCopyAction::CopyData => TabUiAction::CopyColumnData(non_null_values),
+                            TableHeaderCopyAction::CopyAsInCondition => TabUiAction::CopyColumnAsInCondition(non_null_values, col_type),
+                        };
                     }
                     table_header
                         .body(|mut body| {
@@ -13300,11 +13357,11 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                         .column(egui_extras::Column::initial(60.0).at_least(50.0))
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let (_, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false);
+                                let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, None);
                             });
                             for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键"), tr!("自增")] {
                                 header.col(|ui| {
-                                    let (_, _, _) = table_header_cell(ui, &palette, title, false, None, false, false);
+                                    let (_, _, _, _) = table_header_cell(ui, &palette, title, false, None, false, false, None, None);
                                 });
                             }
                         })
@@ -14244,11 +14301,11 @@ fn render_index_table(
                 .column(egui_extras::Column::initial(50.0).at_least(50.0))
                 .header(30.0, |mut header| {
                     header.col(|ui| {
-                        let (_, _, _) = table_header_cell(ui, palette, "#", false, None, false, false);
+                        let (_, _, _, _) = table_header_cell(ui, palette, "#", false, None, false, false, None, None);
                     });
                     for title in [tr!("索引名"), tr!("唯一性"), tr!("类型"), tr!("包含列"), tr!("来源"), tr!("删除")] {
                         header.col(|ui| {
-                            let (_, _, _) = table_header_cell(ui, palette, title, false, None, false, false);
+                            let (_, _, _, _) = table_header_cell(ui, palette, title, false, None, false, false, None, None);
                         });
                     }
                 })
@@ -14639,12 +14696,12 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                         .column(egui_extras::Column::initial(48.0).at_least(48.0))
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let (_, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false);
+                                let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, None);
                             });
                             for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键"), tr!("自增"), tr!("删除")] {
                                 header.col(|ui| {
-                                    let (_, _, _) =
-                                        table_header_cell(ui, &palette, title, false, None, false, false);
+                                    let (_, _, _, _) =
+                                        table_header_cell(ui, &palette, title, false, None, false, false, None, None);
                                 });
                             }
                         })
@@ -14801,8 +14858,11 @@ fn table_header_cell(
     sort_state: Option<bool>,
     selected: bool,
     dragged: bool,
-) -> (Option<TableHeaderSortChoice>, bool, bool) {
+    column_data_type: Option<&str>,
+    column_values: Option<&[QueryCellValue]>,
+) -> (Option<TableHeaderSortChoice>, bool, bool, Option<TableHeaderCopyAction>) {
     let mut sort_choice = None;
+    let mut copy_action = None;
     let header_bg = if dragged {
         // 被拖拽列：背景降低不透明度，营造"抬起"效果
         let base = if selected {
@@ -14865,6 +14925,18 @@ fn table_header_cell(
             ui.ctx().copy_text(text.to_string());
             ui.close();
         }
+        if column_values.is_some() {
+            ui.menu_button(tr!("复制整列为"), |ui| {
+                if ui.button(tr!("复制列值")).clicked() {
+                    copy_action = Some(TableHeaderCopyAction::CopyData);
+                    ui.close();
+                }
+                if ui.button(tr!("复制为 IN 子句")).clicked() {
+                    copy_action = Some(TableHeaderCopyAction::CopyAsInCondition);
+                    ui.close();
+                }
+            });
+        }
         if sortable {
             ui.separator();
             if ui
@@ -14896,7 +14968,7 @@ fn table_header_cell(
         subtle_grid_color(palette.table_grid, 40),
         subtle_grid_color(palette.table_grid, 40),
     );
-    (sort_choice, column_clicked, cell_response.dragged())
+    (sort_choice, column_clicked, cell_response.dragged(), copy_action)
 }
 
 fn table_body_cell(
@@ -16382,6 +16454,20 @@ fn cast_column_to_text(database_kind: DatabaseKind, column: &str) -> String {
         DatabaseKind::Postgres => format!("CAST({column} AS TEXT)"),
         DatabaseKind::MongoDb => column.to_string(),
     }
+}
+
+fn is_numeric_type(data_type: &str) -> bool {
+    let t = data_type.to_lowercase();
+    let base = t.split('(').next().unwrap_or(&t);
+    matches!(
+        base,
+        "int" | "integer" | "bigint" | "smallint" | "tinyint"
+            | "mediumint" | "float" | "double" | "decimal" | "numeric"
+            | "number" | "real" | "double precision" | "serial" | "bigserial"
+            | "money" | "smallserial"
+            | "int2" | "int4" | "int8" | "float4" | "float8"
+            | "oid" | "xid"
+    )
 }
 
 fn sql_string_literal(value: &str) -> String {
