@@ -48,6 +48,7 @@ impl AppServices {
 
     pub fn save_connection(&self, input: ConnectionProfileInput) -> Result<ConnectionProfile> {
         validate_connection_input(&input)?;
+        self.ensure_unique_connection_name(&input.name, None)?;
         let password = input.password.clone();
         let profile = ConnectionProfile::from_input(Uuid::new_v4().to_string(), input);
         if profile.password_saved {
@@ -67,6 +68,7 @@ impl AppServices {
         input: ConnectionProfileInput,
     ) -> Result<ConnectionProfile> {
         validate_connection_input(&input)?;
+        self.ensure_unique_connection_name(&input.name, Some(connection_id))?;
         let mut profile = self
             .connection_store
             .get_connection(connection_id)?
@@ -99,6 +101,17 @@ impl AppServices {
         self.connection_store.delete_connection(connection_id)?;
         self.secure_store.delete_password(connection_id)?;
         self.session_manager.disconnect_connection(connection_id);
+        Ok(())
+    }
+
+    fn ensure_unique_connection_name(&self, name: &str, exclude_id: Option<&str>) -> Result<()> {
+        let existing = self.connection_store.list_connections()?;
+        let duplicate = existing.iter().any(|c| {
+            c.name == name && exclude_id.map_or(true, |id| c.id != id)
+        });
+        if duplicate {
+            return Err(anyhow!("{}", tr!("连接名称 \"{}\" 已存在", name)));
+        }
         Ok(())
     }
 

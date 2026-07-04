@@ -1004,6 +1004,19 @@ impl DesktopApp {
         self.connection_form = form;
     }
 
+    fn open_copy_connection_dialog(&mut self, profile: &ConnectionProfile) {
+        self.is_connection_dialog_open = true;
+        self.editing_connection_id = None;
+        let mut form = ConnectionFormState::from_profile(profile);
+        form.name = format!("{} (副本)", profile.name);
+        if profile.password_saved {
+            if let Ok(Some(password)) = self.services.load_password(&profile.id) {
+                form.password = password;
+            }
+        }
+        self.connection_form = form;
+    }
+
     fn request_load_connection_tree(&mut self, connection_id: String) {
         // 清除"用户主动断开"标记，允许后续 set_connected() 正常生效
         self.services.clear_user_disconnect(&connection_id);
@@ -2228,7 +2241,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.status_message = tr!("连接已保存").into();
             }
             Err(error) => {
-                self.status_message = tr!("保存连接失败: {}", error)
+                self.connection_test_result = Some((false, tr!("保存连接失败: {}", error)));
             }
         }
     }
@@ -2896,6 +2909,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 if ui.button(tr!("编辑连接")).clicked() {
                                     let conn = connection.clone();
                                     self.open_edit_connection_dialog(&conn);
+                                    ui.close();
+                                }
+                                if ui.button(tr!("复制连接")).clicked() {
+                                    let conn = connection.clone();
+                                    self.open_copy_connection_dialog(&conn);
                                     ui.close();
                                 }
                                 if ui.button(tr!("关闭连接")).clicked() {
@@ -7507,6 +7525,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             {
                                                 self.connection_form.kind = DatabaseKind::MySql;
                                                 self.connection_form.port = 3306;
+                                                self.connection_form.direct_connection = false;
                                             }
                                             if ui
                                                 .selectable_label(
@@ -7517,6 +7536,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             {
                                                 self.connection_form.kind = DatabaseKind::Postgres;
                                                 self.connection_form.port = 5432;
+                                                self.connection_form.direct_connection = false;
                                             }
                                             if ui
                                                 .selectable_label(
@@ -7527,6 +7547,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             {
                                                 self.connection_form.kind = DatabaseKind::MongoDb;
                                                 self.connection_form.port = 27017;
+                                                self.connection_form.direct_connection = true;
                                             }
                                         });
                                 });
