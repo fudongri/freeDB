@@ -9144,7 +9144,7 @@ fn render_result_table(
                             }
                         // 边缘自动滚动：指针接近左右边缘时产生滚动速度
                         let edge_width = 80.0;
-                        let speed_max = 1200.0; // px/s
+                        let speed_max = 1600.0; // px/s
                         // 使用上一帧的 clip_rect（保存于 scroll_clip_rect，是 ScrollArea 可见区域）
                         let left_edge = scroll_clip_rect.left() + edge_width;
                         let right_edge = (scroll_clip_rect.right() - edge_width).max(left_edge);
@@ -9571,7 +9571,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             }
                             // 边缘自动滚动：指针接近左右边缘时产生滚动速度
                             let edge_width = 80.0;
-                            let speed_max = 1200.0; // px/s
+                            let speed_max = 1600.0; // px/s
                             let left_edge = scroll_clip_rect.left() + edge_width;
                             let right_edge = (scroll_clip_rect.right() - edge_width).max(left_edge);
                             if pointer.x < left_edge {
