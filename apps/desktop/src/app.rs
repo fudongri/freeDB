@@ -65,6 +65,7 @@ pub struct DesktopApp {
     pending_saved_query_dialog: Option<SavedQueryDialogState>,
     pending_saved_query_delete: Option<PendingSavedQueryDelete>,
     pending_batch_save: bool,
+    pending_query_batch_save: bool,
     batch_save_error: Option<String>,
     tab_drag_source: Option<usize>,
     tab_drag_target: Option<usize>,
@@ -884,6 +885,7 @@ impl DesktopApp {
             pending_saved_query_dialog: None,
             pending_saved_query_delete: None,
             pending_batch_save: false,
+            pending_query_batch_save: false,
             batch_save_error: None,
             tab_drag_source: None,
             tab_drag_target: None,
@@ -3647,6 +3649,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .inner_margin(egui::Margin::same(0))
             .show(ui, |ui| {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let pending_query_batch_save = self.pending_query_batch_save;
                     let action = match tab {
                         WorkspaceTab::Query(tab) => Self::render_query_tab(
                             ui,
@@ -3656,6 +3659,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             &self.database_cache,
                             &self.services,
                             &self.schema_cache,
+                            pending_query_batch_save,
                         ),
                         WorkspaceTab::Table(tab) => Self::render_table_tab(ui, tab),
                         WorkspaceTab::CreateTable(tab) => Self::render_create_table_tab(ui, tab),
@@ -3811,7 +3815,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
             }
             TabUiAction::SaveQueryTabCellChanges => {
-                // 提交当前编辑并保存查询页的单元格修改
+                // 提交当前编辑，然后显示确认弹窗
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
                     if let Some(ref mut ctx) = tab.edit_context {
                         if let Some(edit) = ctx.editing_cell.take() {
@@ -3832,10 +3836,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                     }
                 }
-                let error = self.save_query_tab_cell_changes();
-                if error.is_some() {
-                    self.status_level = StatusLevel::Error;
-                }
+                self.pending_query_batch_save = true;
             }
             TabUiAction::CancelQueryTabCellChanges => {
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
@@ -5014,6 +5015,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         database_cache: &HashMap<String, Vec<String>>,
         services: &AppServices,
         schema_cache: &SchemaCache,
+        pending_query_batch_save: bool,
     ) -> TabUiAction {
         let mut action = TabUiAction::None;
         let chrome = mac_ui_palette(ui.visuals());
@@ -5030,6 +5032,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages);
         // 首次打开编辑器高度取默认值
         let editor_height = tab.editor_height.unwrap_or(200.0);
+        let mut query_batch_dialog_open = pending_query_batch_save;
         let mut strip_builder = StripBuilder::new(ui)
             .size(Size::exact(90.0));
         if has_result {
@@ -5439,8 +5442,69 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         tab.active_bottom_tab = pane;
                                     }
                                 }
-                                // 当自动检测未启用编辑时，显示手动启用按钮
-                                // (已移除手动按钮，仅依赖自动检测)
+                                // 编辑工具栏（紧跟 History 按钮）
+                                if let Some(ref mut edit_ctx) = tab.edit_context {
+                                    if edit_ctx.definition.is_some() {
+                                        // ESC 在所有情况下都触发取消（独立于 has_pending 检测）
+                                        // 但当保存确认弹窗打开时，跳过 ESC 以避免与弹窗冲突
+                                        if !edit_ctx.committed_edit_this_frame && !query_batch_dialog_open {
+                                            let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
+                                            if cancel_esc {
+                                                if edit_ctx.editing_cell.is_some() {
+                                                    // 有激活的编辑器：取消当前编辑
+                                                    if let Some(edit) = edit_ctx.editing_cell.take() {
+                                                        if let TableEditTarget::ExistingRow(row_index) = edit.target {
+                                                            edit_ctx.pending_cell_changes.remove(&(row_index, edit.column));
+                                                        }
+                                                    }
+                                                } else {
+                                                    // 无编辑器：取消全部待保存修改
+                                                    action = TabUiAction::CancelQueryTabCellChanges;
+                                                }
+                                            }
+                                        }
+
+                                        let current_edit_changed = edit_ctx.editing_cell.as_ref().map_or(false, |e| {
+                                            e.value != e.original_value || e.is_null != e.original_is_null
+                                        });
+                                        let has_pending = !edit_ctx.pending_cell_changes.is_empty() || current_edit_changed;
+                                        if has_pending {
+                                            ui.separator();
+                                            if edit_ctx.deferred_save_action {
+                                                edit_ctx.deferred_save_action = false;
+                                                action = TabUiAction::SaveQueryTabCellChanges;
+                                                query_batch_dialog_open = true;
+                                            }
+                                            let editing_active = edit_ctx.editing_cell.is_some();
+                                            if editing_active {
+                                                let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
+                                                if save_enter {
+                                                    edit_ctx.deferred_save_action = true;
+                                                }
+                                            } else if !edit_ctx.committed_edit_this_frame {
+                                                let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
+                                                if save_enter {
+                                                    action = TabUiAction::SaveQueryTabCellChanges;
+                                                    query_batch_dialog_open = true;
+                                                }
+                                            }
+                                            if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), ToolbarButtonKind::Danger, Some(90.0)).clicked() {
+                                                action = TabUiAction::CancelQueryTabCellChanges;
+                                            }
+                                            if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), ToolbarButtonKind::Accent, Some(90.0)).clicked() {
+                                                action = TabUiAction::SaveQueryTabCellChanges;
+                                                query_batch_dialog_open = true;
+                                            }
+                                            let count = edit_ctx.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
+                                            ui.label(
+                                                RichText::new(tr!("● {} 处未保存的修改", count))
+                                                    .size(11.0)
+                                                    .color(chrome.danger),
+                                            );
+                                        }
+                                        edit_ctx.committed_edit_this_frame = false;
+                                    }
+                                }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let summary = match tab.active_bottom_tab {
                                         QueryBottomTab::Results => tab
@@ -5497,63 +5561,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         ui.add_space(4.0);
                                     }
                                     if let Some(result) = &mut tab.result {
-                                        // 编辑工具栏
-                                        if let Some(ref mut edit_ctx) = tab.edit_context {
-                                            if edit_ctx.definition.is_some() {
-                                                ui.horizontal(|ui| {
-                                                    if edit_ctx.deferred_save_action {
-                                                        edit_ctx.deferred_save_action = false;
-                                                        action = TabUiAction::SaveQueryTabCellChanges;
-                                                    }
-                                                    let current_edit_changed = edit_ctx.editing_cell.as_ref().map_or(false, |e| {
-                                                        e.value != e.original_value || e.is_null != e.original_is_null
-                                                    });
-                                                    let has_pending = !edit_ctx.pending_cell_changes.is_empty() || current_edit_changed;
-                                                    if has_pending {
-                                                        let editing_active = edit_ctx.editing_cell.is_some();
-                                                        if editing_active {
-                                                            let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
-                                                            if save_enter {
-                                                                edit_ctx.deferred_save_action = true;
-                                                            }
-                                                            let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
-                                                            if cancel_esc {
-                                                                if let Some(edit) = edit_ctx.editing_cell.take() {
-                                                                    if let TableEditTarget::ExistingRow(row_index) = edit.target {
-                                                                        edit_ctx.pending_cell_changes.remove(&(row_index, edit.column));
-                                                                    }
-                                                                }
-                                                            }
-                                                        } else if !edit_ctx.committed_edit_this_frame {
-                                                            let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
-                                                            if save_enter {
-                                                                action = TabUiAction::SaveQueryTabCellChanges;
-                                                            }
-                                                            let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
-                                                            if cancel_esc {
-                                                                action = TabUiAction::CancelQueryTabCellChanges;
-                                                            }
-                                                        }
-                                                        ui.separator();
-                                                        if toolbar_button(ui, tr!("✕ 取消 (Esc)"), ToolbarButtonKind::Subtle).clicked() {
-                                                            action = TabUiAction::CancelQueryTabCellChanges;
-                                                        }
-                                                        if toolbar_button(ui, tr!("💾 保存 (Enter)"), ToolbarButtonKind::Accent).clicked() {
-                                                            action = TabUiAction::SaveQueryTabCellChanges;
-                                                        }
-                                                        let count = edit_ctx.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
-                                                        ui.label(
-                                                            RichText::new(tr!("● {} 处未保存的修改", count))
-                                                                .size(11.0)
-                                                                .color(chrome.danger),
-                                                        );
-                                                    }
-                                                });
-                                                edit_ctx.committed_edit_this_frame = false;
-                                                ui.add_space(4.0);
-                                            }
-                                        }
-                                        // 渲染表格
+                                        // 渲染表格（先于编辑工具栏）
                                         if let Some(ref mut edit_ctx) = tab.edit_context {
                                             if edit_ctx.definition.is_some() {
                                                 let _ = render_editable_result_table(
@@ -5568,7 +5576,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
                                             }
                                         } else {
-                                            // 无编辑上下文：显示只读表格
                                             let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
                                         }
                                     } else {
@@ -6372,10 +6379,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                 }
                                                 ui.separator();
-                                                if toolbar_button(ui, tr!("✕ 取消 (Esc)"), ToolbarButtonKind::Subtle).clicked() {
+                                                if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), ToolbarButtonKind::Danger, Some(90.0)).clicked() {
                                                     action = TabUiAction::CancelPendingCellChanges;
                                                 }
-                                                if toolbar_button(ui, tr!("💾 保存 (Enter)"), ToolbarButtonKind::Accent).clicked() {
+                                                if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), ToolbarButtonKind::Accent, Some(90.0)).clicked() {
                                                     action = TabUiAction::SavePendingCellChanges;
                                                 }
                                                 let count = tab.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
@@ -7797,6 +7804,152 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
+    fn render_query_batch_save_confirm_dialog(&mut self, ctx: &egui::Context) {
+        if !self.pending_query_batch_save {
+            return;
+        }
+        #[derive(Clone)]
+        struct ChangeDetail {
+            column: String,
+            old_value: String,
+            new_value: String,
+        }
+        let mut changes: Vec<ChangeDetail> = Vec::new();
+        if let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) {
+            if let Some(ref ctx) = tab.edit_context {
+                for ((_row, col), change) in &ctx.pending_cell_changes {
+                    changes.push(ChangeDetail {
+                        column: col.clone(),
+                        old_value: if change.old_is_null { "NULL".to_string() } else { change.old_value.clone() },
+                        new_value: if change.new_is_null { "NULL".to_string() } else { change.new_value.clone() },
+                    });
+                }
+            }
+        }
+        let total_changes = changes.len();
+        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let is_dark = ctx.style().visuals.dark_mode;
+        let mut should_close = false;
+        let mut should_confirm = false;
+
+        ctx.input_mut(|input| {
+            if input.key_pressed(egui::Key::Escape) {
+                should_close = true;
+            }
+        });
+
+        let screen = ctx.screen_rect();
+        let backdrop_color = if is_dark {
+            Color32::from_rgba_premultiplied(0, 0, 0, 120)
+        } else {
+            Color32::from_rgba_premultiplied(0, 0, 0, 60)
+        };
+        let mut backdrop_clicked = false;
+        let overlay_response = egui::Area::new("query-batch-save-backdrop".into())
+            .order(egui::Order::Background)
+            .fixed_pos(screen.left_top())
+            .show(ctx, |ui| {
+                ui.allocate_response(screen.size(), egui::Sense::click());
+                ui.painter().rect_filled(screen, 0.0, backdrop_color);
+            });
+        if overlay_response.response.clicked() {
+            backdrop_clicked = true;
+        }
+
+        if self.pending_query_batch_save {
+            ctx.input_mut(|input| {
+                if input.key_pressed(egui::Key::Enter) {
+                    should_confirm = true;
+                    should_close = true;
+                }
+            });
+        }
+
+        egui::Area::new("query-batch-save-confirm".into())
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .interactable(true)
+            .show(ctx, |ui| {
+                apply_mac_dialog_style(ui, palette);
+                let card_w = 420.0;
+                let changes_h = (total_changes as f32 * 20.0).min(120.0);
+                let card_h = 24.0 + 10.0 + 18.0 + 14.0 + changes_h + 14.0 + 32.0 + 40.0;
+                let max_rect = ui.max_rect();
+                let card_rect =
+                    egui::Rect::from_center_size(max_rect.center(), egui::vec2(card_w, card_h));
+
+                ui.allocate_ui_at_rect(card_rect, |ui| {
+                    let r = 12.0;
+                    let bg = if is_dark {
+                        Color32::from_rgb(44, 47, 54)
+                    } else {
+                        Color32::from_rgb(252, 252, 252)
+                    };
+                    let shadow_offset = egui::vec2(0.0, 4.0);
+                    let shadow_rect = ui.max_rect().translate(shadow_offset);
+                    ui.painter().rect_filled(shadow_rect, r, Color32::from_rgba_premultiplied(0, 0, 0, 30));
+                    ui.painter().rect_filled(ui.max_rect(), r, bg);
+                    ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
+
+                    let inner = ui.max_rect().shrink(20.0);
+                    ui.allocate_ui_at_rect(inner, |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 10.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                            ui.label(RichText::new("💾").size(18.0).color(Color32::from_rgb(0, 122, 255)));
+                            ui.label(RichText::new(tr!("确认保存")).size(15.0).color(palette.title).strong());
+                        });
+                        ui.label(RichText::new(tr!("即将保存 {} 处修改到数据库：", total_changes)).size(13.0).color(palette.text));
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical().max_height(changes_h).show(ui, |ui| {
+                            ui.set_width(card_w - 40.0);
+                            for change in &changes {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+                                    ui.label(RichText::new(&change.column).size(12.0).color(palette.title).strong());
+                                    ui.label(RichText::new(change_display_value(&change.old_value)).size(12.0).color(Color32::from_rgb(220, 53, 69)).strikethrough());
+                                    ui.label(RichText::new("→").size(12.0).color(palette.text));
+                                    ui.label(RichText::new(change_display_value(&change.new_value)).size(12.0).color(Color32::from_rgb(40, 167, 69)));
+                                });
+                            }
+                        });
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
+                                let confirm_btn = egui::Button::new(
+                                    RichText::new(tr!("确认 (Enter)")).size(13.0).color(Color32::WHITE),
+                                ).fill(Color32::from_rgb(0, 122, 255)).corner_radius(6.0);
+                                if ui.add(confirm_btn).clicked() {
+                                    should_confirm = true;
+                                    should_close = true;
+                                }
+                                let cancel_btn = egui::Button::new(
+                                    RichText::new(tr!("取消 (Esc)")).size(13.0).color(palette.title),
+                                ).fill(palette.input_bg).stroke(Stroke::new(1.0, palette.border)).corner_radius(6.0);
+                                if ui.add(cancel_btn).clicked() {
+                                    should_close = true;
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+
+        if should_confirm || backdrop_clicked {
+            if should_confirm && total_changes > 0 {
+                let error = self.save_query_tab_cell_changes();
+                if error.is_some() {
+                    self.status_level = StatusLevel::Error;
+                }
+            }
+            self.pending_query_batch_save = false;
+        } else if should_close {
+            self.pending_query_batch_save = false;
+        }
+    }
+
     // ── DDL 对话框 ──
 
     fn render_ddl_input_dialog(&mut self, ctx: &egui::Context) {
@@ -8649,10 +8802,19 @@ impl eframe::App for DesktopApp {
             Some(WorkspaceTab::Table(tab)) if !tab.pending_cell_changes.is_empty()
                 || tab.editing_cell.as_ref().map_or(false, |e| e.value != e.original_value || e.is_null != e.original_is_null)
         );
+        let has_query_pending = matches!(
+            self.tabs.get(self.active_tab),
+            Some(WorkspaceTab::Query(tab)) if tab.edit_context.as_ref().map_or(false, |ctx| {
+                !ctx.pending_cell_changes.is_empty()
+                    || ctx.editing_cell.as_ref().map_or(false, |e| e.value != e.original_value || e.is_null != e.original_is_null)
+            })
+        );
         let dialog_open = self.pending_delete_confirmation.is_some()
             || self.pending_saved_query_delete.is_some()
             || self.pending_batch_save
-            || has_table_pending;
+            || self.pending_query_batch_save
+            || has_table_pending
+            || has_query_pending;
         let esc_pressed = if dialog_open {
             false
         } else {
@@ -8920,6 +9082,7 @@ impl eframe::App for DesktopApp {
         self.render_ddl_input_dialog(ctx);
         self.render_ddl_delete_dialog(ctx);
         self.render_batch_save_confirm_dialog(ctx);
+        self.render_query_batch_save_confirm_dialog(ctx);
         self.render_shortcuts_dialog(ctx);
         self.render_log_window(ctx);
         self.render_scroll_speed_dialog(ctx);
@@ -16442,6 +16605,15 @@ fn toolbar_button(
     label: &str,
     kind: ToolbarButtonKind,
 ) -> egui::Response {
+    toolbar_button_sized(ui, label, kind, None)
+}
+
+fn toolbar_button_sized(
+    ui: &mut egui::Ui,
+    label: &str,
+    kind: ToolbarButtonKind,
+    fixed_width: Option<f32>,
+) -> egui::Response {
     let palette = mac_ui_palette(ui.visuals());
     let (fill, text, stroke) = match kind {
         ToolbarButtonKind::Primary => (
@@ -16476,12 +16648,13 @@ fn toolbar_button(
         ),
     };
 
+    let w = fixed_width.unwrap_or(0.0);
     ui.add(
         egui::Button::new(RichText::new(label).size(12.5).color(text))
             .fill(fill)
             .stroke(stroke)
             .corner_radius(5.0)
-            .min_size(Vec2::new(0.0, 26.0)),
+            .min_size(Vec2::new(w, 26.0)),
     )
 }
 
