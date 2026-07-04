@@ -9311,7 +9311,7 @@ fn render_result_table(
                             // 数据文本
                             let fid = egui::FontId::monospace(12.0);
                             let tc = palette.text;
-                            let cn = &result.columns[drag.source_index];
+                            let cn = &display_columns[drag.source_index];
                             for (i, row) in result.rows.iter().enumerate() {
                                 let y = hb + row_h * (i as f32) + 8.0;
                                 if y > bb { break; }
