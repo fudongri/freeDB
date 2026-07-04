@@ -9045,7 +9045,14 @@ fn render_result_table(
                 ui.add_space(2.0);
             }
             let scroll_target_row = search.scroll_to_row.take();
-            let mut sa_result = egui::ScrollArea::both()
+            let mut selected_sort = None;
+            let ctx = ui.ctx().clone();
+            let modifiers = ctx.input(|input| input.modifiers);
+            let ctrl_held = modifiers.ctrl || modifiers.command;
+            let column_widths = estimate_query_column_widths(&display_columns, &result.rows);
+            let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
+            let mut sort_click_result = None;
+            let mut sa_result = egui::ScrollArea::horizontal()
                 .id_salt(format!(
                     "result-grid-{}-{}",
                     result.columns.len(),
@@ -9056,13 +9063,8 @@ fn render_result_table(
                     // 保存 clip_rect 供后续边缘检测使用
                     let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    let mut selected_sort = None;
-                    let ctx = ui.ctx().clone();
-                    let modifiers = ctx.input(|input| input.modifiers);
-                    let ctrl_held = modifiers.ctrl || modifiers.command;
-                    let column_widths = estimate_query_column_widths(&display_columns, &result.rows);
                     let mut table = TableBuilder::new(ui)
-                        .vscroll(false)
+                        .vscroll(true)
                         .striped(true)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
@@ -9083,8 +9085,7 @@ fn render_result_table(
                                 .clip(true),
                         );
                     }
-                    let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
-                    let table_header = table
+                    table
                         .header(30.0, |mut header| {
                             // Row number header
                             header.col(|ui| {
@@ -9128,62 +9129,7 @@ fn render_result_table(
                                     header_cell_rects.push(cell_rect);
                                 });
                             }
-                        });
-                    // 拖拽中更新 target_index + 边缘自动滚动（不在此处绘制，等 body 完成后绘制）
-                    if let Some(drag) = column_drag.as_mut() {
-                        if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
-                            let mut new_target = drag.source_index;
-                            for (i, rect) in header_cell_rects.iter().enumerate() {
-                                if pointer.x < rect.left() && i == 0 {
-                                    new_target = 0;
-                                    break;
-                                }
-                                let mid_x = rect.center().x;
-                                if pointer.x >= rect.left() && pointer.x < mid_x {
-                                    new_target = i;
-                                    break;
-                                }
-                                if pointer.x >= mid_x && pointer.x <= rect.right() {
-                                    new_target = (i + 1).min(header_cell_rects.len());
-                                    break;
-                                }
-                                if i == header_cell_rects.len() - 1 && pointer.x > rect.right() {
-                                    new_target = header_cell_rects.len();
-                                }
-                            }
-                            drag.target_index = new_target;
-                            // 插入线目标 X
-                            drag.line_x_target = if new_target < header_cell_rects.len() {
-                                header_cell_rects[new_target].left()
-                            } else {
-                                header_cell_rects.last().map(|r| r.right()).unwrap_or(0.0)
-                            };
-                            // 幽灵列目标偏移
-                            if drag.source_index < header_cell_rects.len() {
-                                let src_center = header_cell_rects[drag.source_index].center().x;
-                                drag.ghost_x_target = pointer.x - src_center;
-                            }
-                        // 边缘自动滚动：指针接近左右边缘时产生滚动速度
-                        let edge_width = 80.0;
-                        let speed_max = 1600.0; // px/s
-                        // 使用上一帧的 clip_rect（保存于 scroll_clip_rect，是 ScrollArea 可见区域）
-                        let left_edge = scroll_clip_rect.left() + edge_width;
-                        let right_edge = (scroll_clip_rect.right() - edge_width).max(left_edge);
-                        if pointer.x < left_edge {
-                            let t = ((left_edge - pointer.x) / edge_width).clamp(0.0, 1.0);
-                            drag.scroll_speed_x = -t * speed_max;
-                        } else if pointer.x > right_edge {
-                            let t = ((pointer.x - right_edge) / edge_width).clamp(0.0, 1.0);
-                            drag.scroll_speed_x = t * speed_max;
-                        } else {
-                            drag.scroll_speed_x = 0.0;
-                        }
-                        ctx.request_repaint();
-                        } else {
-                            drag.scroll_speed_x = 0.0;
-                        }
-                    }
-                    table_header
+                        })
                         .body(|body| {
                             body.rows(28.0, result.rows.len(), |mut row_ui| {
                                 let index = row_ui.index();
@@ -9239,6 +9185,59 @@ fn render_result_table(
                                 }
                             });
                         });
+                    // 拖拽中更新 target_index + 边缘自动滚动
+                    if let Some(drag) = column_drag.as_mut() {
+                        if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
+                            let mut new_target = drag.source_index;
+                            for (i, rect) in header_cell_rects.iter().enumerate() {
+                                if pointer.x < rect.left() && i == 0 {
+                                    new_target = 0;
+                                    break;
+                                }
+                                let mid_x = rect.center().x;
+                                if pointer.x >= rect.left() && pointer.x < mid_x {
+                                    new_target = i;
+                                    break;
+                                }
+                                if pointer.x >= mid_x && pointer.x <= rect.right() {
+                                    new_target = (i + 1).min(header_cell_rects.len());
+                                    break;
+                                }
+                                if i == header_cell_rects.len() - 1 && pointer.x > rect.right() {
+                                    new_target = header_cell_rects.len();
+                                }
+                            }
+                            drag.target_index = new_target;
+                            // 插入线目标 X
+                            drag.line_x_target = if new_target < header_cell_rects.len() {
+                                header_cell_rects[new_target].left()
+                            } else {
+                                header_cell_rects.last().map(|r| r.right()).unwrap_or(0.0)
+                            };
+                            // 幽灵列目标偏移
+                            if drag.source_index < header_cell_rects.len() {
+                                let src_center = header_cell_rects[drag.source_index].center().x;
+                                drag.ghost_x_target = pointer.x - src_center;
+                            }
+                            // 边缘自动滚动：指针接近左右边缘时产生滚动速度
+                            let edge_width = 80.0;
+                            let speed_max = 1600.0; // px/s
+                            let left_edge = scroll_clip_rect.left() + edge_width;
+                            let right_edge = (scroll_clip_rect.right() - edge_width).max(left_edge);
+                            if pointer.x < left_edge {
+                                let t = ((left_edge - pointer.x) / edge_width).clamp(0.0, 1.0);
+                                drag.scroll_speed_x = -t * speed_max;
+                            } else if pointer.x > right_edge {
+                                let t = ((pointer.x - right_edge) / edge_width).clamp(0.0, 1.0);
+                                drag.scroll_speed_x = t * speed_max;
+                            } else {
+                                drag.scroll_speed_x = 0.0;
+                            }
+                            ctx.request_repaint();
+                        } else {
+                            drag.scroll_speed_x = 0.0;
+                        }
+                    }
                     // 列拖拽释放、ESC 取消、绘制插入线
                     let esc_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
                     if esc_pressed {
@@ -9250,9 +9249,6 @@ fn render_result_table(
                     if column_drag_released {
                         if let Some(drag) = column_drag.take() {
                             if drag.source_index != drag.target_index {
-                                // 直接基于 display_columns 计算最终顺序，避免
-                                // target_index (display_columns 空间) 与
-                                // column_order (可能缺新列) 索引不匹配
                                 let col_name = &display_columns[drag.source_index];
                                 let mut new_display = display_columns.clone();
                                 new_display.remove(drag.source_index);
@@ -9262,8 +9258,6 @@ fn render_result_table(
                                     drag.target_index.min(new_display.len())
                                 };
                                 new_display.insert(insert_at, col_name.clone());
-                                // 同步到 column_order：保留新 display_columns
-                                // 中存在的列（跳过不在 column_order 中的新列）
                                 *column_order = new_display
                                     .into_iter()
                                     .filter(|c| result.columns.contains(c))
@@ -9358,6 +9352,7 @@ fn render_result_table(
                     sa_result.state.store(ui.ctx(), sa_result.id);
                 }
             }
+            sort_click_result
         });
     if let Some((column, choice)) = sort_click_result {
         match choice {
@@ -9473,18 +9468,19 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                 scroll_target_row = Some(row_count);
                 tab.scroll_to_insert_row = false;
             }
-            let mut sa_editable = egui::ScrollArea::both()
+            let ctx = ui.ctx().clone();
+            let modifiers = ctx.input(|input| input.modifiers);
+            let ctrl_held = modifiers.ctrl || modifiers.command;
+            let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(columns.len());
+            let mut sa_editable = egui::ScrollArea::horizontal()
                 .id_salt(format!("editable-table-grid-{}", tab.title))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     // 保存 clip_rect 供后续边缘检测使用
                     let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    let ctx = ui.ctx().clone();
-                    let modifiers = ctx.input(|input| input.modifiers);
-                    let ctrl_held = modifiers.ctrl || modifiers.command;
                     let mut table = TableBuilder::new(ui)
-                        .vscroll(false)
+                        .vscroll(true)
                         .striped(true)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
@@ -9508,7 +9504,6 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 .clip(true),
                         );
                     }
-                    let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(columns.len());
                     let table_header = table
                         .header(30.0, |mut header| {
                             // Row number header
@@ -9556,7 +9551,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 });
                             }
                         });
-                // 拖拽中更新 target_index（不在此处绘制，等 body 完成后绘制）
+                    // 拖拽中更新 target_index（不在此处绘制，等 body 完成后绘制）
                     if let Some(drag) = tab.column_drag.as_mut() {
                         if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
                             let mut new_target = drag.source_index;
