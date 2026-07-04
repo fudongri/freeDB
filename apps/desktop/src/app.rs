@@ -15,6 +15,7 @@ use rfd::FileDialog;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use crate::autocomplete::{
@@ -72,6 +73,8 @@ pub struct DesktopApp {
     database_cache: HashMap<String, Vec<String>>,
     pending_database_list: Option<Receiver<DatabaseListResult>>,
     pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
+    generate_data_receiver: Option<Receiver<GenerateDataEvent>>,
+    generate_data_cancel: Option<Arc<AtomicBool>>,
     pending_query_definition: Option<Receiver<QueryDefinitionLoadResult>>,
     pending_query_edit_context: Option<QueryEditContextTrigger>,
     pending_schema_load: Option<Receiver<SchemaLoadResult>>,
@@ -343,6 +346,17 @@ enum ExplainViewMode {
 }
 
 #[derive(Clone)]
+struct GenerateDataProgress {
+    completed: usize,
+    total: usize,
+}
+
+enum GenerateDataEvent {
+    Progress { completed: usize, total: usize },
+    Done(Result<usize, String>),
+}
+
+#[derive(Clone)]
 struct TableTabState {
     id: String,
     table: TableRef,
@@ -391,6 +405,11 @@ struct TableTabState {
     search: TableSearchState,
     // MongoDB 游标分页：每页最后一条的 _id
     mongo_page_cursors: Vec<String>,
+    // 生成测试数据
+    show_generate_data_popup: bool,
+    generate_data_count: String,
+    generate_data_running: bool,
+    generate_data_progress: Option<GenerateDataProgress>,
 }
 
 impl Default for TableSortState {
@@ -933,6 +952,8 @@ impl DesktopApp {
             tab_drag_target: None,
             database_cache: HashMap::new(),
             pending_table_preview: None,
+            generate_data_receiver: None,
+            generate_data_cancel: None,
             pending_query_definition: None,
             pending_query_edit_context: None,
             pending_schema_load: None,
@@ -2064,6 +2085,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             show_column_filter: false,
             search: TableSearchState::default(),
             mongo_page_cursors: Vec::new(),
+            show_generate_data_popup: false,
+            generate_data_count: "100".to_string(),
+            generate_data_running: false,
+            generate_data_progress: None,
         };
         self.tabs.push(WorkspaceTab::Table(table_tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
