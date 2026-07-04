@@ -12,6 +12,7 @@ use eframe::egui::{
 };
 use egui_extras::{Size, StripBuilder, TableBuilder};
 use rfd::FileDialog;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -259,6 +260,9 @@ struct QueryTabState {
     last_executed_sql: Option<String>,
     result_sort: TableSortState,
     selected_columns: BTreeSet<usize>,
+    selected_result_rows: BTreeSet<usize>,
+    selected_result_row: Option<usize>,
+    selection_anchor_row: Option<usize>,
     column_order: Vec<String>,
     column_drag: Option<TableColumnDragState>,
     multi_results: Vec<QueryResult>,
@@ -410,6 +414,7 @@ struct TableTabState {
     generate_data_count: String,
     generate_data_running: bool,
     generate_data_progress: Option<GenerateDataProgress>,
+    generate_data_allow_null: bool,
 }
 
 impl Default for TableSortState {
@@ -2042,7 +2047,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         let table_tab = TableTabState {
             id: tab_id.clone(),
-            title: table.label(),
+            title: format!("{}@{}", table.label(), self.connection_name(&node.connection_id)),
             database_kind,
             table: table.clone(),
             definition: None,
@@ -2089,6 +2094,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             generate_data_count: "100".to_string(),
             generate_data_running: false,
             generate_data_progress: None,
+            generate_data_allow_null: false,
         };
         self.tabs.push(WorkspaceTab::Table(table_tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
@@ -2145,6 +2151,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         database_kind: DatabaseKind,
         row_index: usize,
         skip_cols: &std::collections::HashSet<String>,
+        allow_null: bool,
     ) -> (Vec<String>, Vec<String>) {
         let mut col_names = Vec::new();
         let mut values = Vec::new();
@@ -2158,8 +2165,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if skip_cols.contains(&col.name) {
                 continue;
             }
-            // nullable 列，10% 概率设为 NULL
-            if col.nullable && (row_index * 41 + col.name.len() * 7) % 100 < 10 {
+            // nullable 列，仅在 allow_null 时 10% 概率设为 NULL
+            if allow_null && col.nullable && (row_index * 41 + col.name.len() * 7) % 100 < 10 {
                 col_names.push(col.name.clone());
                 values.push("NULL".to_string());
                 continue;
@@ -2238,6 +2245,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         database_kind: DatabaseKind,
         start_index: usize,
         count: usize,
+        allow_null: bool,
     ) -> String {
         // 本批跳过的 default_value 列集合：每列独立 30% 概率，整批一致
         use std::collections::hash_map::DefaultHasher;
@@ -2258,7 +2266,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut common_cols: Option<Vec<String>> = None;
 
         for i in 0..count {
-            let (col_names, values) = Self::generate_test_row(columns, database_kind, start_index + i, &skip_cols);
+            let (col_names, values) = Self::generate_test_row(columns, database_kind, start_index + i, &skip_cols, allow_null);
             if common_cols.is_none() {
                 common_cols = Some(col_names.clone());
             }
@@ -4487,8 +4495,73 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::CopyActiveTableRowsAsInsertWithoutPk(row_indices) => {
                 self.copy_active_table_rows_as_insert(ctx, &row_indices, true);
             }
-            TabUiAction::CopyActiveTableRowsAsTsv(row_indices) => {
-                self.copy_active_table_rows_as_tsv(ctx, &row_indices);
+            TabUiAction::CopyActiveTableRowsAsTsv(row_indices, include_header) => {
+                self.copy_active_table_rows_as_tsv(ctx, &row_indices, include_header);
+            }
+            TabUiAction::CopyActiveTableRowsAsJson(row_indices) => {
+                self.copy_active_table_rows_as_json(ctx, &row_indices);
+            }
+            TabUiAction::CopyQueryRowsAsTsv(row_indices, columns, include_header) => {
+                let result = match self.tabs.get(self.active_tab) {
+                    Some(WorkspaceTab::Query(tab)) => tab.result.as_ref(),
+                    Some(WorkspaceTab::Table(tab)) => tab.preview.as_ref(),
+                    _ => None,
+                };
+                if let Some(result) = result {
+                    let mut lines: Vec<String> = Vec::new();
+                    if include_header {
+                        lines.push(columns.join("\t"));
+                    }
+                    for &row_index in &row_indices {
+                        if let Some(row) = result.rows.get(row_index) {
+                            let line: Vec<String> = columns
+                                .iter()
+                                .map(|col| row.get(col).map(|v| v.as_text().unwrap_or_default().to_string()).unwrap_or_default())
+                                .collect();
+                            lines.push(line.join("\t"));
+                        }
+                    }
+                    ctx.copy_text(lines.join("\n"));
+                    self.status_message = if row_indices.len() > 1 {
+                        tr!("已复制 {} 条记录", row_indices.len())
+                    } else {
+                        tr!("已复制数据").into()
+                    };
+                }
+            }
+            TabUiAction::CopyQueryRowsAsJson(row_indices, columns) => {
+                let result = match self.tabs.get(self.active_tab) {
+                    Some(WorkspaceTab::Query(tab)) => tab.result.as_ref(),
+                    Some(WorkspaceTab::Table(tab)) => tab.preview.as_ref(),
+                    _ => None,
+                };
+                if let Some(result) = result {
+                    let json_rows: Vec<serde_json::Value> = row_indices
+                        .iter()
+                        .filter_map(|&row_index| result.rows.get(row_index))
+                        .map(|row| {
+                            let map: serde_json::Map<String, serde_json::Value> = columns
+                                .iter()
+                                .map(|col| {
+                                    let val = match row.get(col) {
+                                        Some(QueryCellValue::Text(s)) => serde_json::Value::String(s.clone()),
+                                        _ => serde_json::Value::Null,
+                                    };
+                                    (col.clone(), val)
+                                })
+                                .collect();
+                            serde_json::Value::Object(map)
+                        })
+                        .collect();
+                    let value = if json_rows.len() == 1 {
+                        json_rows.into_iter().next().unwrap()
+                    } else {
+                        serde_json::Value::Array(json_rows)
+                    };
+                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+                    ctx.copy_text(text);
+                    self.status_message = tr!("已复制为 JSON").into();
+                }
             }
             TabUiAction::CopyColumnData(values) => {
                 let text = values.join("\n");
@@ -5591,7 +5664,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         };
     }
 
-    fn copy_active_table_rows_as_tsv(&mut self, ctx: &egui::Context, row_indices: &[usize]) {
+    fn copy_active_table_rows_as_tsv(&mut self, ctx: &egui::Context, row_indices: &[usize], include_header: bool) {
         let Some((_database_kind, _table, definition, rows)) =
             self.active_table_row_contexts(row_indices)
         else {
@@ -5602,7 +5675,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .map(|item| item.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>())
             .filter(|cols| !cols.is_empty())
             .unwrap_or_else(|| rows.first().map(|row| row.keys().cloned().collect()).unwrap_or_default());
-        let mut lines: Vec<String> = Vec::with_capacity(rows.len());
+        let mut lines: Vec<String> = Vec::with_capacity(rows.len() + 1);
+        if include_header {
+            lines.push(columns.join("\t"));
+        }
         for row in &rows {
             let line: Vec<String> = columns
                 .iter()
@@ -5615,6 +5691,47 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             lines.push(line.join("\t"));
         }
         let text = lines.join("\n");
+        ctx.copy_text(text);
+        self.status_message = if row_indices.len() > 1 {
+            tr!("已复制 {} 条记录", row_indices.len())
+        } else {
+            tr!("已复制数据").into()
+        };
+    }
+
+    fn copy_active_table_rows_as_json(&mut self, ctx: &egui::Context, row_indices: &[usize]) {
+        let Some((_database_kind, _table, definition, rows)) =
+            self.active_table_row_contexts(row_indices)
+        else {
+            return;
+        };
+        let columns = definition
+            .as_ref()
+            .map(|item| item.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>())
+            .filter(|cols| !cols.is_empty())
+            .unwrap_or_else(|| rows.first().map(|row| row.keys().cloned().collect()).unwrap_or_default());
+        let json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let map: serde_json::Map<String, serde_json::Value> = columns
+                    .iter()
+                    .map(|col| {
+                        let val = match row.get(col) {
+                            Some(QueryCellValue::Text(s)) => serde_json::Value::String(s.clone()),
+                            _ => serde_json::Value::Null,
+                        };
+                        (col.clone(), val)
+                    })
+                    .collect();
+                serde_json::Value::Object(map)
+            })
+            .collect();
+        let value = if json_rows.len() == 1 {
+            json_rows.into_iter().next().unwrap()
+        } else {
+            serde_json::Value::Array(json_rows)
+        };
+        let text = serde_json::to_string_pretty(&value).unwrap_or_default();
         ctx.copy_text(text);
         self.status_message = if row_indices.len() > 1 {
             tr!("已复制 {} 条记录", row_indices.len())
@@ -6228,19 +6345,31 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         // 渲染表格（先于编辑工具栏）
                                         if let Some(ref mut edit_ctx) = tab.edit_context {
                                             if edit_ctx.definition.is_some() {
-                                                let _ = render_editable_result_table(
+                                                let result_action = render_editable_result_table(
                                                     ui, result, edit_ctx,
                                                     &mut tab.result_sort,
                                                     &mut tab.selected_columns,
+                                                    &mut tab.selected_result_rows,
+                                                    &mut tab.selected_result_row,
+                                                    &mut tab.selection_anchor_row,
                                                     &mut tab.search,
                                                     &mut tab.column_order,
                                                     &mut tab.column_drag,
                                                 );
+                                                if !matches!(result_action.action, TabUiAction::None) {
+                                                    action = result_action.action;
+                                                }
                                             } else {
-                                                let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                                let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.selected_result_rows, &mut tab.selected_result_row, &mut tab.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                                if !matches!(result_action.action, TabUiAction::None) {
+                                                    action = result_action.action;
+                                                }
                                             }
                                         } else {
-                                            let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                            let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.selected_result_rows, &mut tab.selected_result_row, &mut tab.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                            if !matches!(result_action.action, TabUiAction::None) {
+                                                action = result_action.action;
+                                            }
                                         }
                                     } else {
                                         render_query_empty_state(
@@ -6900,7 +7029,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(tab.table.label())
+                                    RichText::new(tab.title.as_str())
                                         .strong()
                                         .color(palette.text),
                                 );
@@ -7312,6 +7441,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     ).strong());
                                                                     ui.add_space(4.0);
                                                                     ui.label(RichText::new(tr!("数据为随机测试数据")).small().color(palette.weak_text));
+                                                                    ui.add_space(8.0);
+                                                                    if ui.button(tr!("再次生成")).clicked() {
+                                                                        tab.generate_data_progress = None;
+                                                                    }
                                                                     // 点击外部关闭
                                                                     let pointer = ui.ctx().input(|i| i.pointer.any_pressed());
                                                                     if pointer {
@@ -7350,6 +7483,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             );
                                                                         }
                                                                     }
+                                                                    ui.add_space(8.0);
+                                                                    ui.checkbox(&mut tab.generate_data_allow_null, tr!("允许 NULL"));
                                                                     ui.add_space(8.0);
                                                                     if ui.button(tr!("开始生成")).clicked() {
                                                                         action = TabUiAction::GenerateData;
@@ -9600,6 +9735,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let definition = tab.definition.clone();
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
+        let allow_null = tab.generate_data_allow_null;
 
         let cancel = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::channel();
@@ -9651,7 +9787,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         return;
                     }
                     let count = batch_size.min(total - completed);
-                    let sql = DesktopApp::build_batch_insert_sql(&table, &def.columns, database_kind, completed, count);
+                    let sql = DesktopApp::build_batch_insert_sql(&table, &def.columns, database_kind, completed, count, allow_null);
                     let execution = QueryExecution {
                         connection_id: table.connection_id.clone(),
                         database: table.database.clone(),
@@ -10711,6 +10847,9 @@ impl QueryTabState {
             last_executed_sql: None,
             result_sort: TableSortState::default(),
             selected_columns: BTreeSet::new(),
+            selected_result_rows: BTreeSet::new(),
+            selected_result_row: None,
+            selection_anchor_row: None,
             column_order: Vec::new(),
             column_drag: None,
             multi_results: Vec::new(),
@@ -10910,7 +11049,10 @@ enum TabUiAction {
     DeleteActiveTableRows(Vec<usize>),
     CopyActiveTableRowsAsInsert(Vec<usize>),
     CopyActiveTableRowsAsInsertWithoutPk(Vec<usize>),
-    CopyActiveTableRowsAsTsv(Vec<usize>),
+    CopyActiveTableRowsAsTsv(Vec<usize>, bool),
+    CopyActiveTableRowsAsJson(Vec<usize>),
+    CopyQueryRowsAsTsv(Vec<usize>, Vec<String>, bool),
+    CopyQueryRowsAsJson(Vec<usize>, Vec<String>),
     CopyColumnData(Vec<String>),
     CopyColumnAsInCondition(Vec<String>, Option<String>),
     ConnectionChanged {
@@ -11761,20 +11903,28 @@ fn render_explain_stats_row(ui: &mut egui::Ui, node: &ExplainNode) {
     });
 }
 
+struct ResultTableActionResult {
+    sort_click: Option<(String, bool)>,
+    action: TabUiAction,
+}
+
 fn render_result_table(
     ui: &mut egui::Ui,
     result: &mut QueryResult,
     sort_state: &mut TableSortState,
     sql_driven_sort: bool,
     selected_columns: &mut BTreeSet<usize>,
+    selected_rows: &mut BTreeSet<usize>,
+    selected_row: &mut Option<usize>,
+    selection_anchor: &mut Option<usize>,
     search: &mut TableSearchState,
     column_order: &mut Vec<String>,
     column_drag: &mut Option<TableColumnDragState>,
-) -> Option<(String, bool)> {
+) -> ResultTableActionResult {
     let palette = mac_ui_palette(ui.visuals());
     if result.columns.is_empty() {
         ui.label(tr!("当前语句没有结果集"));
-        return None;
+        return ResultTableActionResult { sort_click: None, action: TabUiAction::None };
     }
 
     // Recompute search matches when needed
@@ -11809,6 +11959,22 @@ fn render_result_table(
         }
         ordered
     };
+
+    let pending_header_copy: Cell<Option<(TableHeaderCopyAction, String, Option<String>)>> = Cell::new(None);
+    let pending_row_action: Cell<Option<TabUiAction>> = Cell::new(None);
+
+    // 预收集每列的非空值，供复制整列使用（result 会被 Frame 闭包捕获）
+    let col_non_null_values: BTreeMap<String, Vec<String>> = display_columns.iter()
+        .map(|col| {
+            let vals = result.rows.iter()
+                .filter_map(|r| r.get(col))
+                .filter(|v| !v.is_null())
+                .map(|v| v.as_text().unwrap_or_default().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            (col.clone(), vals)
+        })
+        .collect();
 
     egui::Frame::new()
         .fill(palette.card_bg)
@@ -11873,7 +12039,10 @@ fn render_result_table(
                                     let cell_rect = ui.max_rect();
                                     let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let is_selected = selected_columns.contains(&col_idx);
-                                    let (sort_choice, clicked, cell_dragged, _) = table_header_cell(
+                                    let col_values: Vec<QueryCellValue> = result.rows.iter()
+                                        .filter_map(|r| r.get(column).cloned())
+                                        .collect();
+                                    let (sort_choice, clicked, cell_dragged, copy_action) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
@@ -11882,10 +12051,13 @@ fn render_result_table(
                                         is_selected,
                                         is_dragged,
                                         None,
-                                        None,
+                                        Some(&col_values),
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
+                                    }
+                                    if let Some(act) = copy_action {
+                                        pending_header_copy.set(Some((act, column.clone(), None)));
                                     }
                                     if clicked {
                                         if ctrl_held {
@@ -11912,36 +12084,70 @@ fn render_result_table(
                         .body(|body| {
                             body.rows(28.0, result.rows.len(), |mut row_ui| {
                                 let index = row_ui.index();
-                                let fill = if index % 2 == 0 {
-                                    palette.card_bg
-                                } else {
-                                    palette.table_alt_bg
-                                };
+                                let row_selected = query_row_is_selected(selected_rows, selected_row, index);
+                                let fill = table_row_fill(&palette, index, row_selected, false);
                                 // Row number cell
                                 row_ui.col(|ui| {
-                                    let rect = ui.max_rect();
-                                    ui.painter().rect_filled(rect, 0.0, fill);
-                                    paint_table_grid_lines(
+                                    let row_num_value = QueryCellValue::Text(format!("{}", index + 1));
+                                    let response = render_table_body_interactive_cell(
                                         ui,
-                                        rect,
-                                        subtle_grid_color(palette.table_grid, 26),
-                                        subtle_grid_color(palette.table_grid, 40),
+                                        &palette,
+                                        fill,
+                                        &row_num_value,
+                                        false,
+                                        row_selected,
+                                        false,
+                                        false,
+                                        false,
+                                        "",
                                     );
-                                    let clipped_rect = table_cell_content_rect(rect);
-                                    let num_text = format!("{}", index + 1);
-                                    let label = egui::Label::new(
-                                        egui::RichText::new(num_text)
-                                            .size(12.0)
-                                            .family(FontFamily::Monospace)
-                                            .color(palette.weak_text),
-                                    )
-                                    .truncate();
-                                    let mut child_ui = ui.new_child(
-                                        egui::UiBuilder::new()
-                                            .max_rect(clipped_rect)
-                                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                                    );
-                                    let _ = child_ui.add(label);
+                                    let modifiers = ui.ctx().input(|input| input.modifiers);
+                                    if response.secondary_clicked() {
+                                        if !query_row_is_selected(selected_rows, selected_row, index) {
+                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                        } else {
+                                            *selected_row = Some(index);
+                                            normalize_query_selection(selected_rows, selected_row, selection_anchor);
+                                        }
+                                    }
+                                    if response.clicked() {
+                                        if modifiers.shift {
+                                            extend_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                        } else if modifiers.ctrl || modifiers.command {
+                                            toggle_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                        } else {
+                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                        }
+                                        ui.ctx().request_repaint();
+                                    }
+                                    response.context_menu(|ui| {
+                                        if !query_row_is_selected(selected_rows, selected_row, index) {
+                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                        } else {
+                                            *selected_row = Some(index);
+                                            normalize_query_selection(selected_rows, selected_row, selection_anchor);
+                                        }
+                                        let selected_indices = query_selected_row_indices(selected_rows, selected_row, index);
+                                        let copy_label = if selected_indices.len() > 1 {
+                                            tr!("复制选中 {} 条数据", selected_indices.len())
+                                        } else {
+                                            tr!("复制数据").into()
+                                        };
+                                        ui.menu_button(copy_label, |ui| {
+                                            if ui.button(tr!("带表头复制")).clicked() {
+                                                pending_row_action.set(Some(TabUiAction::CopyQueryRowsAsTsv(selected_indices.clone(), display_columns.clone(), true)));
+                                                ui.close();
+                                            }
+                                            if ui.button(tr!("不带表头复制")).clicked() {
+                                                pending_row_action.set(Some(TabUiAction::CopyQueryRowsAsTsv(selected_indices.clone(), display_columns.clone(), false)));
+                                                ui.close();
+                                            }
+                                        });
+                                        if ui.button(tr!("复制为 JSON")).clicked() {
+                                            pending_row_action.set(Some(TabUiAction::CopyQueryRowsAsJson(selected_indices, display_columns.clone())));
+                                            ui.close();
+                                        }
+                                    });
                                 });
                                 let row = &result.rows[index];
                                 for (col_idx, column) in display_columns.iter().enumerate() {
@@ -12142,18 +12348,29 @@ fn render_result_table(
             }
             sort_click_result
         });
+    let action = if let Some(row_act) = pending_row_action.into_inner() {
+        row_act
+    } else if let Some((copy_act, col_name, col_type)) = pending_header_copy.into_inner() {
+        let non_null_values = col_non_null_values.get(&col_name).cloned().unwrap_or_default();
+        match copy_act {
+            TableHeaderCopyAction::CopyData => TabUiAction::CopyColumnData(non_null_values),
+            TableHeaderCopyAction::CopyAsInCondition => TabUiAction::CopyColumnAsInCondition(non_null_values, col_type),
+        }
+    } else {
+        TabUiAction::None
+    };
     if let Some((column, choice)) = sort_click_result {
         match choice {
             TableHeaderSortChoice::Clear => {
                 clear_table_sort_state(sort_state);
-                return None;
+                return ResultTableActionResult { sort_click: None, action };
             }
             TableHeaderSortChoice::Ascending | TableHeaderSortChoice::Descending => {
                 if sql_driven_sort {
-                    return Some((
-                        column,
-                        matches!(choice, TableHeaderSortChoice::Descending),
-                    ));
+                    return ResultTableActionResult {
+                        sort_click: Some((column, matches!(choice, TableHeaderSortChoice::Descending))),
+                        action,
+                    };
                 }
                 apply_table_sort_choice(
                     result,
@@ -12164,7 +12381,7 @@ fn render_result_table(
             }
         }
     }
-    None
+    ResultTableActionResult { sort_click: None, action }
 }
 
 /// Commit the current editing cell to pending_cell_changes / pending_insert_row if its value changed.
@@ -12210,13 +12427,16 @@ fn render_editable_result_table(
     edit: &mut QueryEditContext,
     sort_state: &mut TableSortState,
     selected_columns: &mut BTreeSet<usize>,
+    selected_rows: &mut BTreeSet<usize>,
+    selected_row: &mut Option<usize>,
+    selection_anchor: &mut Option<usize>,
     search: &mut TableSearchState,
     column_order: &mut Vec<String>,
     column_drag: &mut Option<TableColumnDragState>,
-) -> TabUiAction {
+) -> ResultTableActionResult {
     let palette = mac_ui_palette(ui.visuals());
     if result.columns.is_empty() {
-        return TabUiAction::None;
+        return ResultTableActionResult { sort_click: None, action: TabUiAction::None };
     }
 
     // 搜索匹配重算
@@ -12250,8 +12470,22 @@ fn render_editable_result_table(
         ordered
     };
 
-    let mut action = TabUiAction::None;
-    let mut selected_sort = None;
+    let action: Cell<Option<TabUiAction>> = Cell::new(None);
+    let selected_sort: Cell<Option<(String, bool)>> = Cell::new(None);
+    let pending_header_copy: Cell<Option<(TableHeaderCopyAction, String, Option<String>)>> = Cell::new(None);
+
+    // 预收集每列的非空值，供复制整列使用（result 会被 Frame 闭包捕获）
+    let col_non_null_values: BTreeMap<String, Vec<String>> = display_columns.iter()
+        .map(|col| {
+            let vals = result.rows.iter()
+                .filter_map(|r| r.get(col))
+                .filter(|v| !v.is_null())
+                .map(|v| v.as_text().unwrap_or_default().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            (col.clone(), vals)
+        })
+        .collect();
 
     egui::Frame::new()
         .fill(palette.card_bg)
@@ -12308,7 +12542,13 @@ fn render_editable_result_table(
                                     let cell_rect = ui.max_rect();
                                     let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let is_selected = selected_columns.contains(&col_idx);
-                                    let (sort_choice, clicked, cell_dragged, _) = table_header_cell(
+                                    let col_data_type = edit.definition.as_ref()
+                                        .and_then(|d| d.columns.iter().find(|c| c.name == *column))
+                                        .map(|c| c.data_type.as_str());
+                                    let col_values: Vec<QueryCellValue> = result.rows.iter()
+                                        .filter_map(|r| r.get(column).cloned())
+                                        .collect();
+                                    let (sort_choice, clicked, cell_dragged, copy_action) = table_header_cell(
                                         ui,
                                         &palette,
                                         column,
@@ -12316,11 +12556,14 @@ fn render_editable_result_table(
                                         sort_indicator(sort_state, column),
                                         is_selected,
                                         is_dragged,
-                                        None,
-                                        None,
+                                        col_data_type,
+                                        Some(&col_values),
                                     );
                                     if let Some(choice) = sort_choice {
-                                        selected_sort = Some((column.clone(), choice));
+                                        selected_sort.set(Some((column.clone(), matches!(choice, TableHeaderSortChoice::Descending))));
+                                    }
+                                    if let Some(act) = copy_action {
+                                        pending_header_copy.set(Some((act, column.clone(), col_data_type.map(|s| s.to_string()))));
                                     }
                                     if clicked {
                                         if ctrl_held {
@@ -12345,36 +12588,70 @@ fn render_editable_result_table(
                         .body(|body| {
                             body.rows(28.0, result.rows.len(), |mut row_ui| {
                                 let row_index = row_ui.index();
-                                let fill = if row_index % 2 == 0 {
-                                    palette.card_bg
-                                } else {
-                                    palette.table_alt_bg
-                                };
+                                let row_selected = query_row_is_selected(selected_rows, selected_row, row_index);
+                                let fill = table_row_fill(&palette, row_index, row_selected, false);
                                 // 行号
                                 row_ui.col(|ui| {
-                                    let rect = ui.max_rect();
-                                    ui.painter().rect_filled(rect, 0.0, fill);
-                                    paint_table_grid_lines(
+                                    let row_num_value = QueryCellValue::Text(format!("{}", row_index + 1));
+                                    let response = render_table_body_interactive_cell(
                                         ui,
-                                        rect,
-                                        subtle_grid_color(palette.table_grid, 26),
-                                        subtle_grid_color(palette.table_grid, 40),
+                                        &palette,
+                                        fill,
+                                        &row_num_value,
+                                        false,
+                                        row_selected,
+                                        false,
+                                        false,
+                                        false,
+                                        "",
                                     );
-                                    let clipped_rect = table_cell_content_rect(rect);
-                                    let num_text = format!("{}", row_index + 1);
-                                    let label = egui::Label::new(
-                                        egui::RichText::new(num_text)
-                                            .size(12.0)
-                                            .family(FontFamily::Monospace)
-                                            .color(palette.weak_text),
-                                    )
-                                    .truncate();
-                                    let mut child_ui = ui.new_child(
-                                        egui::UiBuilder::new()
-                                            .max_rect(clipped_rect)
-                                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                                    );
-                                    let _ = child_ui.add(label);
+                                    let modifiers = ui.ctx().input(|input| input.modifiers);
+                                    if response.secondary_clicked() {
+                                        if !query_row_is_selected(selected_rows, selected_row, row_index) {
+                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                        } else {
+                                            *selected_row = Some(row_index);
+                                            normalize_query_selection(selected_rows, selected_row, selection_anchor);
+                                        }
+                                    }
+                                    if response.clicked() {
+                                        if modifiers.shift {
+                                            extend_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                        } else if modifiers.ctrl || modifiers.command {
+                                            toggle_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                        } else {
+                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                        }
+                                        ui.ctx().request_repaint();
+                                    }
+                                    response.context_menu(|ui| {
+                                        if !query_row_is_selected(selected_rows, selected_row, row_index) {
+                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                        } else {
+                                            *selected_row = Some(row_index);
+                                            normalize_query_selection(selected_rows, selected_row, selection_anchor);
+                                        }
+                                        let selected_indices = query_selected_row_indices(selected_rows, selected_row, row_index);
+                                        let copy_label = if selected_indices.len() > 1 {
+                                            tr!("复制选中 {} 条数据", selected_indices.len())
+                                        } else {
+                                            tr!("复制数据").into()
+                                        };
+                                        ui.menu_button(copy_label, |ui| {
+                                            if ui.button(tr!("带表头复制")).clicked() {
+                                                action.set(Some(TabUiAction::CopyQueryRowsAsTsv(selected_indices.clone(), display_columns.clone(), true)));
+                                                ui.close();
+                                            }
+                                            if ui.button(tr!("不带表头复制")).clicked() {
+                                                action.set(Some(TabUiAction::CopyQueryRowsAsTsv(selected_indices.clone(), display_columns.clone(), false)));
+                                                ui.close();
+                                            }
+                                        });
+                                        if ui.button(tr!("复制为 JSON")).clicked() {
+                                            action.set(Some(TabUiAction::CopyQueryRowsAsJson(selected_indices, display_columns.clone())));
+                                            ui.close();
+                                        }
+                                    });
                                 });
                                 // 数据单元格
                                 for (col_idx, column) in display_columns.iter().enumerate() {
@@ -12661,7 +12938,7 @@ fn render_editable_result_table(
                         }
                     }
                     if let Some(sort_request) = sort_click_result {
-                        selected_sort = Some(sort_request);
+                        selected_sort.set(Some(sort_request));
                     }
                 });
             // 边缘自动滚动
@@ -12674,23 +12951,25 @@ fn render_editable_result_table(
                     sa_result.state.store(ui.ctx(), sa_result.id);
                 }
             }
-            if let Some((column, choice)) = selected_sort {
-                match choice {
-                    TableHeaderSortChoice::Clear => {
-                        clear_table_sort_state(sort_state);
-                    }
-                    TableHeaderSortChoice::Ascending | TableHeaderSortChoice::Descending => {
-                        apply_table_sort_choice(
-                            result,
-                            sort_state,
-                            &column,
-                            matches!(choice, TableHeaderSortChoice::Descending),
-                        );
-                    }
-                }
+            // 处理复制整列动作
+            if let Some((copy_act, col_name, col_type)) = pending_header_copy.take() {
+                let non_null_values = col_non_null_values.get(&col_name).cloned().unwrap_or_default();
+                action.set(Some(match copy_act {
+                    TableHeaderCopyAction::CopyData => TabUiAction::CopyColumnData(non_null_values),
+                    TableHeaderCopyAction::CopyAsInCondition => TabUiAction::CopyColumnAsInCondition(non_null_values, col_type),
+                }));
+            }
+            // 处理排序
+            if let Some((column, descending)) = selected_sort.take() {
+                apply_table_sort_choice(
+                    result,
+                    sort_state,
+                    &column,
+                    descending,
+                );
             }
         });
-    action
+    ResultTableActionResult { sort_click: None, action: action.take().unwrap_or(TabUiAction::None) }
 }
 
 /// 将当前编辑中的单元格变更提交到待保存队列（查询页版本）
@@ -13047,13 +13326,16 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             } else {
                                                 tr!("复制数据").into()
                                             };
-                                            if ui.button(copy_tsv_label).clicked() {
-                                                action =
-                                                    TabUiAction::CopyActiveTableRowsAsTsv(
-                                                        selected_row_indices.clone(),
-                                                    );
-                                                ui.close();
-                                            }
+                                            ui.menu_button(copy_tsv_label, |ui| {
+                                                if ui.button(tr!("带表头复制")).clicked() {
+                                                    action = TabUiAction::CopyActiveTableRowsAsTsv(selected_row_indices.clone(), true);
+                                                    ui.close();
+                                                }
+                                                if ui.button(tr!("不带表头复制")).clicked() {
+                                                    action = TabUiAction::CopyActiveTableRowsAsTsv(selected_row_indices.clone(), false);
+                                                    ui.close();
+                                                }
+                                            });
                                             let copy_label = if tab.database_kind == DatabaseKind::MongoDb {
                                                 tr!("复制为 insertMany 命令")
                                             } else {
@@ -13075,6 +13357,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     ui.close();
                                                 }
                                             });
+                                            if ui.button(tr!("复制为 JSON")).clicked() {
+                                                action =
+                                                    TabUiAction::CopyActiveTableRowsAsJson(
+                                                        selected_row_indices.clone(),
+                                                    );
+                                                ui.close();
+                                            }
                                         });
                                         });
                                     }
@@ -13280,13 +13569,16 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 } else {
                                                     tr!("复制数据").into()
                                                 };
-                                                if ui.button(copy_tsv_label).clicked() {
-                                                    action =
-                                                        TabUiAction::CopyActiveTableRowsAsTsv(
-                                                            selected_row_indices.clone(),
-                                                        );
-                                                    ui.close();
-                                                }
+                                                ui.menu_button(copy_tsv_label, |ui| {
+                                                    if ui.button(tr!("带表头复制")).clicked() {
+                                                        action = TabUiAction::CopyActiveTableRowsAsTsv(selected_row_indices.clone(), true);
+                                                        ui.close();
+                                                    }
+                                                    if ui.button(tr!("不带表头复制")).clicked() {
+                                                        action = TabUiAction::CopyActiveTableRowsAsTsv(selected_row_indices.clone(), false);
+                                                        ui.close();
+                                                    }
+                                                });
                                                 let copy_label = if tab.database_kind == DatabaseKind::MongoDb {
                                                     tr!("复制为 insertMany 命令")
                                                 } else {
@@ -13308,6 +13600,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         ui.close();
                                                     }
                                                 });
+                                                if ui.button(tr!("复制为 JSON")).clicked() {
+                                                    action =
+                                                        TabUiAction::CopyActiveTableRowsAsJson(
+                                                            selected_row_indices.clone(),
+                                                        );
+                                                    ui.close();
+                                                }
                                             });
                                         });
                                     }
@@ -13867,6 +14166,87 @@ fn preview_selected_row_indices(tab: &TableTabState, fallback_row_index: usize) 
         vec![tab.selected_preview_row.unwrap_or(fallback_row_index)]
     } else {
         tab.selected_preview_rows.iter().copied().collect()
+    }
+}
+
+fn query_row_is_selected(rows: &BTreeSet<usize>, row: &Option<usize>, row_index: usize) -> bool {
+    rows.contains(&row_index) || *row == Some(row_index)
+}
+
+fn set_single_query_selection(
+    selected_rows: &mut BTreeSet<usize>,
+    selected_row: &mut Option<usize>,
+    anchor: &mut Option<usize>,
+    row_index: usize,
+) {
+    selected_rows.clear();
+    selected_rows.insert(row_index);
+    *selected_row = Some(row_index);
+    *anchor = Some(row_index);
+}
+
+fn toggle_query_selection(
+    selected_rows: &mut BTreeSet<usize>,
+    selected_row: &mut Option<usize>,
+    anchor: &mut Option<usize>,
+    row_index: usize,
+) {
+    if !selected_rows.remove(&row_index) {
+        selected_rows.insert(row_index);
+    }
+    *selected_row = if selected_rows.contains(&row_index) {
+        Some(row_index)
+    } else {
+        selected_rows.iter().next_back().copied()
+    };
+    *anchor = Some(row_index);
+    normalize_query_selection(selected_rows, selected_row, anchor);
+}
+
+fn extend_query_selection(
+    selected_rows: &mut BTreeSet<usize>,
+    selected_row: &mut Option<usize>,
+    anchor: &Option<usize>,
+    row_index: usize,
+) {
+    let a = anchor.or(*selected_row).unwrap_or(row_index);
+    selected_rows.clear();
+    for index in a.min(row_index)..=a.max(row_index) {
+        selected_rows.insert(index);
+    }
+    *selected_row = Some(row_index);
+}
+
+fn normalize_query_selection(
+    selected_rows: &mut BTreeSet<usize>,
+    selected_row: &mut Option<usize>,
+    anchor: &mut Option<usize>,
+) {
+    if let Some(row_index) = *selected_row {
+        selected_rows.insert(row_index);
+    }
+    if selected_rows.is_empty() {
+        *selected_row = None;
+        *anchor = None;
+        return;
+    }
+    if selected_row.is_none_or(|r| !selected_rows.contains(&r)) {
+        *selected_row = selected_rows.iter().next_back().copied();
+    }
+    if anchor.is_none() {
+        *anchor = *selected_row;
+    }
+}
+
+fn query_selected_row_indices(
+    selected_rows: &BTreeSet<usize>,
+    selected_row: &Option<usize>,
+    fallback: usize,
+) -> Vec<usize> {
+    if selected_rows.is_empty() {
+        vec![selected_row.unwrap_or(fallback)]
+    } else {
+        selected_rows.iter().copied().collect()
     }
 }
 
