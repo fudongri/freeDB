@@ -6437,15 +6437,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                             if tab.pending_insert_row.is_some() {
                                                 ui.separator();
-                                                if mini_button(ui, tr!("保存新增"), MiniButtonKind::Accent).clicked()
-                                                {
-                                                    action = TabUiAction::SavePendingInsertRow;
-                                                }
                                                 if mini_button(ui, tr!("取消新增"), MiniButtonKind::Danger)
                                                     .clicked()
                                                 {
                                                     tab.pending_insert_row = None;
                                                     tab.editing_cell = None;
+                                                }
+                                                if mini_button(ui, tr!("保存新增"), MiniButtonKind::Accent).clicked()
+                                                {
+                                                    action = TabUiAction::SavePendingInsertRow;
                                                 }
                                             }
                                             if let Some(summary) =
