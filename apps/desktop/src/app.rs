@@ -71,6 +71,8 @@ pub struct DesktopApp {
     database_cache: HashMap<String, Vec<String>>,
     pending_database_list: Option<Receiver<DatabaseListResult>>,
     pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
+    pending_query_definition: Option<Receiver<QueryDefinitionLoadResult>>,
+    pending_query_edit_context: Option<QueryEditContextTrigger>,
     pending_schema_load: Option<Receiver<SchemaLoadResult>>,
     schema_cache: SchemaCache,
     connection_test_result: Option<(bool, String)>,
@@ -255,6 +257,8 @@ struct QueryTabState {
     column_drag: Option<TableColumnDragState>,
     multi_results: Vec<QueryResult>,
     multi_statements: Vec<String>,
+    /// 所有执行过的语句（包括 SET/PREPARE 等非查询语句，用于 EXECUTE 回溯）
+    executed_statements: Vec<String>,
     selected_result_index: usize,
     editor_focus_requested: bool,
     editor_height: Option<f32>,
@@ -279,6 +283,50 @@ struct QueryTabState {
     explain_view_mode: ExplainViewMode,
     search: TableSearchState,
     find: EditorFindState,
+    /// 可编辑查询上下文（简单单表 SELECT 时自动创建）
+    edit_context: Option<QueryEditContext>,
+    /// 结果切换后标记需要重新分析编辑上下文
+    pending_edit_context_analysis: bool,
+    /// 手动编辑模式：等待用户输入表名
+    manual_edit_prompt: bool,
+}
+
+/// SQL 查询页的内联编辑上下文。当检测到简单单表 SELECT 时创建。
+#[derive(Clone)]
+struct QueryEditContext {
+    /// 查询所针对的表
+    table_ref: TableRef,
+    /// 数据库类型（MySQL / Postgres）
+    database_kind: DatabaseKind,
+    /// 表定义（异步加载中时为 None）
+    definition: Option<TableDefinition>,
+    /// 原始 SQL（用于保存后重新执行刷新）
+    source_sql: String,
+    /// 当前正在编辑的单元格
+    editing_cell: Option<TableCellEditState>,
+    /// 待保存的变更
+    pending_cell_changes: BTreeMap<(usize, String), PendingCellChange>,
+    /// 本帧是否刚提交了编辑
+    committed_edit_this_frame: bool,
+    /// 延迟保存动作（Enter 提交编辑后下一帧触发保存）
+    deferred_save_action: bool,
+}
+
+struct QueryDefinitionLoadResult {
+    tab_id: String,
+    result_index: usize,
+    definition: Result<TableDefinition, String>,
+}
+
+/// 延迟触发查询编辑上下文初始化的参数
+struct QueryEditContextTrigger {
+    tab_id: String,
+    sql: String,
+    connection_id: String,
+    database: Option<String>,
+    result_index: usize,
+    /// 所有语句（用于 EXECUTE → PREPARE → SET 回溯）
+    all_statements: Vec<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -838,6 +886,8 @@ impl DesktopApp {
             tab_drag_target: None,
             database_cache: HashMap::new(),
             pending_table_preview: None,
+            pending_query_definition: None,
+            pending_query_edit_context: None,
             pending_schema_load: None,
             schema_cache: SchemaCache::new(),
             connection_test_result: None,
@@ -1234,6 +1284,7 @@ impl DesktopApp {
         if let Some(receiver) = self.pending_query_execution.take() {
             // 处理所有可用的消息
             let mut keep_receiver = true;
+            let mut trigger_edit_context: Option<QueryEditContextTrigger> = None;
             loop {
                 match receiver.try_recv() {
                     Ok(message) => {
@@ -1247,6 +1298,7 @@ impl DesktopApp {
                             match message.result {
                                 Ok(result) => {
                                     query_tab.last_executed_sql = Some(message.sql.clone());
+                                    query_tab.executed_statements.push(message.statement.clone());
                                     let elapsed_sec = result.elapsed_ms as f64 / 1000.0;
 
                                     if result.columns.is_empty() {
@@ -1282,6 +1334,19 @@ impl DesktopApp {
                                         self.status_message = tr!("SQL 执行完成").into();
                                         query_tab.abort_sender = None;
                                         keep_receiver = false;
+                                        // 准备编辑上下文触发器
+                                        let stmt_sql = query_tab.multi_statements
+                                            .get(query_tab.selected_result_index)
+                                            .cloned()
+                                            .unwrap_or_else(|| message.statement.clone());
+                                        trigger_edit_context = Some(QueryEditContextTrigger {
+                                            tab_id: query_tab.id.clone(),
+                                            sql: stmt_sql,
+                                            connection_id: message.connection_id.clone(),
+                                            database: query_tab.database.clone(),
+                                            result_index: query_tab.selected_result_index,
+                                            all_statements: query_tab.executed_statements.clone(),
+                                        });
                                         let (history, saved_queries, all_saved_queries) =
                                             load_query_library(&services, &message.connection_id);
                                         query_tab.history = history;
@@ -1322,6 +1387,49 @@ impl DesktopApp {
             if keep_receiver {
                 self.pending_query_execution = Some(receiver);
             }
+            if trigger_edit_context.is_some() {
+                self.pending_query_edit_context = trigger_edit_context;
+            }
+        }
+
+        // 查询执行完成后，检测是否为简单单表查询并初始化编辑上下文
+        if let Some(trigger) = self.pending_query_edit_context.take() {
+            self.try_init_query_edit_context(trigger);
+        }
+
+        // Poll query table definition (async: try_init_query_edit_context)
+        self.poll_query_definition();
+
+        // 处理结果切换后的编辑上下文重新分析
+        let pending_analysis: Vec<QueryEditContextTrigger> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                WorkspaceTab::Query(q) if q.pending_edit_context_analysis => {
+                    let idx = q.selected_result_index;
+                    let sql = q.multi_statements.get(idx).cloned()?;
+                    let conn_id = q.connection_id.clone()?;
+                    Some(QueryEditContextTrigger {
+                        tab_id: q.id.clone(),
+                        sql,
+                        connection_id: conn_id,
+                        database: q.database.clone(),
+                        result_index: idx,
+                        all_statements: q.executed_statements.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        for trigger in pending_analysis {
+            if let Some(WorkspaceTab::Query(tab)) = self
+                .tabs
+                .iter_mut()
+                .find(|t| matches!(t, WorkspaceTab::Query(q) if q.id == trigger.tab_id))
+            {
+                tab.pending_edit_context_analysis = false;
+            }
+            self.try_init_query_edit_context(trigger);
         }
 
         // Poll table preview results (async: open_table_tab)
@@ -2125,11 +2233,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         query_tab.result = None;
         query_tab.multi_results.clear();
         query_tab.multi_statements.clear();
+        query_tab.executed_statements.clear();
         query_tab.error = None;
         query_tab.messages.clear();
         query_tab.explain_tree = None;
         query_tab.is_explain = false;
         query_tab.explain_view_mode = ExplainViewMode::Tree;
+        query_tab.edit_context = None;
 
         // 检测是否为 EXPLAIN 查询
         let is_explain = statements.iter().any(|s| is_explain_query(s));
@@ -2169,42 +2279,37 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         handle.spawn(async move {
             let mut abort_rx = abort_rx;
             let total = statements.len();
-            for (i, statement) in statements.iter().enumerate() {
-                let execution = QueryExecution {
+            // 批量执行：所有语句在同一连接上运行，保持用户变量持久性
+            let results = services
+                .execute_sql_batch(&connection_id, database.as_deref(), statements.clone())
+                .await;
+            for (i, (statement, result)) in statements.iter().zip(results.into_iter()).enumerate() {
+                // 检查是否被取消
+                if abort_rx.try_recv().is_ok() {
+                    let _ = sender.send(QueryExecutionLoadResult {
+                        tab_id: tab_id.clone(),
+                        connection_id: connection_id.clone(),
+                        sql: statement.clone(),
+                        statement: statement.clone(),
+                        result: Err(tr!("已取消").to_string()),
+                        is_last: true,
+                        is_explain: false,
+                    });
+                    break;
+                }
+                let result = result.map_err(|e| e.to_string());
+                let is_err = result.is_err();
+                let _ = sender.send(QueryExecutionLoadResult {
+                    tab_id: tab_id.clone(),
                     connection_id: connection_id.clone(),
-                    database: database.clone(),
                     sql: statement.clone(),
-                };
-                tokio::select! {
-                    result = services.execute_sql(execution) => {
-                        let result = result.map_err(|e| e.to_string());
-                        let is_err = result.is_err();
-                        let _ = sender.send(QueryExecutionLoadResult {
-                            tab_id: tab_id.clone(),
-                            connection_id: connection_id.clone(),
-                            sql: statement.clone(),
-                            statement: statement.clone(),
-                            result,
-                            is_last: i == total - 1 || is_err,
-                            is_explain: explain_flag,
-                        });
-                        if is_err {
-                            break;
-                        }
-                    }
-                    _ = &mut abort_rx => {
-                        // 用户取消
-                        let _ = sender.send(QueryExecutionLoadResult {
-                            tab_id: tab_id.clone(),
-                            connection_id: connection_id.clone(),
-                            sql: statement.clone(),
-                            statement: statement.clone(),
-                            result: Err(tr!("已取消").to_string()),
-                            is_last: true,
-                            is_explain: false,
-                        });
-                        break;
-                    }
+                    statement: statement.clone(),
+                    result,
+                    is_last: i == total - 1 || is_err,
+                    is_explain: explain_flag,
+                });
+                if is_err {
+                    break;
                 }
             }
         });
@@ -3693,6 +3798,109 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     self.refresh_active_table_preview(false);
                 }
             }
+            TabUiAction::SaveQueryTabCellChanges => {
+                // 提交当前编辑并保存查询页的单元格修改
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(ref mut ctx) = tab.edit_context {
+                        if let Some(edit) = ctx.editing_cell.take() {
+                            if edit.value != edit.original_value || edit.is_null != edit.original_is_null {
+                                if let TableEditTarget::ExistingRow(row_index) = edit.target {
+                                    ctx.pending_cell_changes.insert(
+                                        (row_index, edit.column.clone()),
+                                        PendingCellChange {
+                                            column: edit.column,
+                                            old_value: edit.original_value,
+                                            old_is_null: edit.original_is_null,
+                                            new_value: edit.value,
+                                            new_is_null: edit.is_null,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                let error = self.save_query_tab_cell_changes();
+                if error.is_some() {
+                    self.status_level = StatusLevel::Error;
+                }
+            }
+            TabUiAction::CancelQueryTabCellChanges => {
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(ref mut ctx) = tab.edit_context {
+                        ctx.editing_cell = None;
+                        ctx.pending_cell_changes.clear();
+                    }
+                }
+            }
+            TabUiAction::EnableManualQueryEdit(table_name) => {
+                // 用户手动指定表名启用编辑
+                let connection_id;
+                let database;
+                let source_sql;
+                let tab_id;
+                let result_index;
+                {
+                    let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) else { return };
+                    connection_id = match tab.connection_id.clone() {
+                        Some(id) => id,
+                        None => return,
+                    };
+                    database = tab.database.clone();
+                    source_sql = tab.multi_statements
+                        .get(tab.selected_result_index)
+                        .cloned()
+                        .unwrap_or_default();
+                    tab_id = tab.id.clone();
+                    result_index = tab.selected_result_index;
+                    tab.manual_edit_prompt = false;
+                }
+                let db_kind = self.database_kind_for_connection(&connection_id);
+                // 解析 schema.table
+                let (schema, t_name) = if let Some(dot_pos) = table_name.rfind('.') {
+                    (Some(table_name[..dot_pos].to_string()), table_name[dot_pos + 1..].to_string())
+                } else {
+                    (None, table_name.clone())
+                };
+                let table_ref = TableRef {
+                    connection_id: connection_id.clone(),
+                    database: database.clone(),
+                    schema,
+                    table: t_name,
+                    is_view: false,
+                };
+                // 创建编辑上下文
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.iter_mut().find(|t| {
+                    matches!(t, WorkspaceTab::Query(q) if q.id == tab_id)
+                }) {
+                    tab.edit_context = Some(QueryEditContext {
+                        table_ref: table_ref.clone(),
+                        database_kind: db_kind,
+                        definition: None,
+                        source_sql,
+                        editing_cell: None,
+                        pending_cell_changes: BTreeMap::new(),
+                        committed_edit_this_frame: false,
+                        deferred_save_action: false,
+                    });
+                }
+                // 异步加载表定义
+                let services = self.services.clone();
+                let handle = self.runtime.handle().clone();
+                let (sender, receiver) = mpsc::channel();
+                self.pending_query_definition = Some(receiver);
+                handle.spawn(async move {
+                    let definition = services
+                        .load_table_definition(&table_ref)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = sender.send(QueryDefinitionLoadResult {
+                        tab_id,
+                        result_index,
+                        definition,
+                    });
+                });
+            }
             TabUiAction::SavePendingInsertRow => self.save_pending_insert_row(),
             TabUiAction::DeleteActiveTableRows(row_indices) => {
                 self.request_delete_active_table_rows(row_indices);
@@ -4201,6 +4409,398 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             self.refresh_active_table_preview(false);
         }
         last_error
+    }
+
+    /// 检测查询是否为简单单表 SELECT，若是则初始化编辑上下文并异步加载表定义
+    fn try_init_query_edit_context(&mut self, trigger: QueryEditContextTrigger) {
+        let db_kind = self.database_kind_for_connection(&trigger.connection_id);
+        let sql_lower = trigger.sql.trim().to_ascii_lowercase();
+
+        // 尝试解析（直接 SELECT 或 EXECUTE → SELECT @var）
+        let resolved: Option<(TableRef, String)> = if sql_lower.starts_with("execute ") {
+            // EXECUTE 场景：回溯到 PREPARE → 变量名 → 执行 SELECT @var 获取完整 SQL
+            let stmt_name = trigger.sql.trim()[8..].split_whitespace().next().unwrap_or("");
+            let stmt_lower = stmt_name.to_ascii_lowercase();
+            if let Some(var_name) = extract_prepare_var_name(&stmt_lower, &trigger.all_statements) {
+                if has_variable_definition(&var_name, &trigger.all_statements) {
+                    // 执行 SELECT @var 获取完整 SQL
+                    let select_sql = format!("SELECT {}", var_name);
+                    match self.runtime.block_on(self.services.execute_sql(QueryExecution {
+                        connection_id: trigger.connection_id.clone(),
+                        database: trigger.database.clone(),
+                        sql: select_sql,
+                    })) {
+                        Ok(result) => {
+                            let resolved_sql = result.rows.first()
+                                .and_then(|row| row.values().next()?.as_text())
+                                .map(|s| s.to_string())
+                                .unwrap_or_default();
+                            if !resolved_sql.is_empty() {
+                                analyze_simple_select(&resolved_sql, &trigger.connection_id, trigger.database.as_deref(), db_kind)
+                                    .map(|tr| (tr, resolved_sql))
+                            } else {
+                                None
+                            }
+                        }
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            // 直接 SELECT 场景
+            parse_simple_select_table_with_context(
+                &trigger.sql,
+                &trigger.all_statements,
+                &trigger.connection_id,
+                trigger.database.as_deref(),
+                db_kind,
+            )
+            .or_else(|| {
+                parse_simple_select_table(
+                    &trigger.sql,
+                    &trigger.connection_id,
+                    trigger.database.as_deref(),
+                    db_kind,
+                )
+                .map(|tr| (tr, trigger.sql.clone()))
+            })
+        };
+
+        let (table_ref, source_sql) = match resolved {
+            Some((tr, sql)) => (Some(tr), sql),
+            None => (None, trigger.sql.clone()),
+        };
+
+        // 如果表名/模式名以 _ 结尾（被变量截断），尝试在 schema cache 中前缀匹配
+        let table_ref = table_ref.and_then(|tr| {
+            let needs_resolve = tr.table.ends_with('_')
+                || tr.schema.as_ref().map_or(false, |s| s.ends_with('_'));
+            if needs_resolve {
+                resolve_partial_table_ref(&tr, &self.schema_cache, &trigger)
+                    .or_else(|| self.resolve_partial_table_from_db(&tr, &trigger, db_kind))
+            } else {
+                Some(tr)
+            }
+        });
+        let Some(table_ref) = table_ref else {
+            // 非简单查询，清除编辑上下文
+            if let Some(WorkspaceTab::Query(tab)) = self
+                .tabs
+                .iter_mut()
+                .find(|t| matches!(t, WorkspaceTab::Query(q) if q.id == trigger.tab_id))
+            {
+                tab.edit_context = None;
+            }
+            return;
+        };
+
+        // 创建编辑上下文（definition 暂为 None，异步加载中）
+        let edit_ctx = QueryEditContext {
+            table_ref: table_ref.clone(),
+            database_kind: db_kind,
+            definition: None,
+            source_sql,
+            editing_cell: None,
+            pending_cell_changes: BTreeMap::new(),
+            committed_edit_this_frame: false,
+            deferred_save_action: false,
+        };
+        if let Some(WorkspaceTab::Query(tab)) = self
+            .tabs
+            .iter_mut()
+            .find(|t| matches!(t, WorkspaceTab::Query(q) if q.id == trigger.tab_id))
+        {
+            tab.edit_context = Some(edit_ctx);
+        }
+
+        // 异步加载表定义
+        let services = self.services.clone();
+        let handle = self.runtime.handle().clone();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_query_definition = Some(receiver);
+        let tab_id = trigger.tab_id;
+        let result_index = trigger.result_index;
+        handle.spawn(async move {
+            let definition = services
+                .load_table_definition(&table_ref)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send(QueryDefinitionLoadResult {
+                tab_id,
+                result_index,
+                definition,
+            });
+        });
+    }
+
+    /// 当 schema cache 中找不到匹配的表时，查询数据库 information_schema 前缀匹配
+    fn resolve_partial_table_from_db(
+        &mut self,
+        partial: &TableRef,
+        trigger: &QueryEditContextTrigger,
+        db_kind: DatabaseKind,
+    ) -> Option<TableRef> {
+        let partial_schema = partial.schema.as_deref().unwrap_or("");
+        let partial_table = &partial.table;
+        // 构建 LIKE 模式：前缀 + %
+        let schema_pattern = format!("{}%", partial_schema);
+        let table_pattern = format!("{}%", partial_table);
+
+        let sql = match db_kind {
+            DatabaseKind::MySql => format!(
+                "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema LIKE '{}' AND table_name LIKE '{}' LIMIT 10",
+                schema_pattern.replace('\'', "''"),
+                table_pattern.replace('\'', "''"),
+            ),
+            DatabaseKind::Postgres => format!(
+                "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema LIKE '{}' AND table_name LIKE '{}' LIMIT 10",
+                schema_pattern.replace('\'', "''"),
+                table_pattern.replace('\'', "''"),
+            ),
+        };
+
+        let result = self.runtime.block_on(self.services.execute_sql(QueryExecution {
+            connection_id: partial.connection_id.clone(),
+            database: trigger.database.clone(),
+            sql,
+        }));
+
+        let result = result.ok()?;
+        let row = result.rows.first()?;
+        let schema_val = row.get("table_schema").and_then(|v| v.as_text()).unwrap_or("");
+        let table_val = row.get("table_name").and_then(|v| v.as_text()).unwrap_or("");
+
+        if table_val.is_empty() {
+            return None;
+        }
+
+        Some(TableRef {
+            connection_id: partial.connection_id.clone(),
+            database: trigger.database.clone(),
+            schema: if schema_val.is_empty() { None } else { Some(schema_val.to_string()) },
+            table: table_val.to_string(),
+            is_view: false,
+        })
+    }
+
+    /// 轮询异步加载的表定义结果
+    fn poll_query_definition(&mut self) {
+        let Some(receiver) = self.pending_query_definition.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(message) => {
+                if let Some(WorkspaceTab::Query(tab)) =
+                    self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::Query(q) if q.id == message.tab_id)
+                    })
+                {
+                    if let Some(ref mut ctx) = tab.edit_context {
+                        match message.definition {
+                            Ok(def) => {
+                                ctx.definition = Some(def);
+                            }
+                            Err(_) => {
+                                // 表定义加载失败，禁用编辑
+                                tab.edit_context = None;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.pending_query_definition = Some(receiver);
+            }
+            Err(TryRecvError::Disconnected) => {}
+        }
+    }
+
+    /// 保存查询页的单元格修改
+    fn save_query_tab_cell_changes(&mut self) -> Option<String> {
+        let changes: Vec<(usize, String, PendingCellChange)>;
+        let database_kind: DatabaseKind;
+        let table: TableRef;
+        let definition: Option<TableDefinition>;
+        let source_sql: String;
+
+        if let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) {
+            let Some(ref edit_ctx) = tab.edit_context else {
+                return None;
+            };
+            if edit_ctx.pending_cell_changes.is_empty() {
+                self.status_message = tr!("没有待保存的修改").into();
+                return None;
+            }
+            changes = edit_ctx
+                .pending_cell_changes
+                .iter()
+                .map(|((row_idx, col), change)| (*row_idx, col.clone(), change.clone()))
+                .collect();
+            database_kind = edit_ctx.database_kind;
+            table = edit_ctx.table_ref.clone();
+            definition = edit_ctx.definition.clone();
+            source_sql = edit_ctx.source_sql.clone();
+        } else {
+            return None;
+        }
+
+        let mut success_count = 0;
+        let mut last_error: Option<String> = None;
+
+        for (row_index, column, change) in &changes {
+            let row = self
+                .tabs
+                .get(self.active_tab)
+                .and_then(|t| match t {
+                    WorkspaceTab::Query(tab) => {
+                        tab.result.as_ref()?.rows.get(*row_index).cloned()
+                    }
+                    _ => None,
+                });
+            let Some(row) = row else {
+                last_error = Some(tr!("无法获取行数据").into());
+                continue;
+            };
+            let Some(where_clause) =
+                build_table_row_match_clause(database_kind, definition.as_ref(), &row, &table)
+            else {
+                last_error = Some(tr!("无法构建 WHERE 条件").into());
+                continue;
+            };
+            let sql = format!(
+                "UPDATE {}\nSET {} = {}\nWHERE {}",
+                qualified_table_name(database_kind, &table),
+                quote_identifier(database_kind, column),
+                sql_editor_value_literal(&change.new_value, change.new_is_null),
+                where_clause
+            );
+            if self.execute_query_tab_mutation(sql, "") {
+                success_count += 1;
+            } else {
+                let err = self.tabs.get(self.active_tab).and_then(|t| match t {
+                    WorkspaceTab::Query(tab) => tab.error.clone(),
+                    _ => None,
+                });
+                last_error = err.or(Some(tr!("执行失败").into()));
+            }
+        }
+
+        if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+            if last_error.is_none() {
+                if let Some(ref mut ctx) = tab.edit_context {
+                    ctx.pending_cell_changes.clear();
+                }
+            }
+        }
+
+        if last_error.is_none() {
+            self.status_message = tr!("已保存 {} 处修改", success_count);
+            self.re_execute_query_tab_sql(&source_sql);
+        } else if success_count > 0 {
+            self.status_message = tr!("部分保存：成功 {}，有失败", success_count);
+            self.re_execute_query_tab_sql(&source_sql);
+        }
+        last_error
+    }
+
+    /// 执行查询页的 SQL 变更语句（INSERT/UPDATE/DELETE）
+    fn execute_query_tab_mutation(&mut self, sql: String, success_message: &str) -> bool {
+        let (connection_id, database) = match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Query(tab)) => {
+                if let Some(ref ctx) = tab.edit_context {
+                    (ctx.table_ref.connection_id.clone(), ctx.table_ref.database.clone())
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        };
+        match self.runtime.block_on(self.services.execute_sql(QueryExecution {
+            connection_id,
+            database,
+            sql,
+        })) {
+            Ok(result) => {
+                let affected = result.affected_rows.unwrap_or(0);
+                if !success_message.is_empty() {
+                    self.status_message = tr!("{}，影响 {} 行", success_message, affected);
+                }
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.error = None;
+                }
+                true
+            }
+            Err(error) => {
+                let error = error.to_string();
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.error = Some(error.clone());
+                }
+                self.status_message = tr!("执行失败: {}", error);
+                false
+            }
+        }
+    }
+
+    /// 保存后重新执行查询 SQL 以刷新结果
+    fn re_execute_query_tab_sql(&mut self, source_sql: &str) {
+        // 只有简单 SELECT 才能重新执行；EXECUTE/PREPARE 等动态 SQL 无法直接重跑
+        let lower = source_sql.trim().to_ascii_lowercase();
+        if !lower.starts_with("select ") {
+            // 清除编辑状态但不重新执行
+            if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                if let Some(ref mut ctx) = tab.edit_context {
+                    ctx.editing_cell = None;
+                    ctx.pending_cell_changes.clear();
+                }
+            }
+            return;
+        }
+        let (connection_id, database, tab_id) = match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Query(tab)) => {
+                if let Some(ref ctx) = tab.edit_context {
+                    (
+                        ctx.table_ref.connection_id.clone(),
+                        ctx.table_ref.database.clone(),
+                        tab.id.clone(),
+                    )
+                } else {
+                    return;
+                }
+            }
+            _ => return,
+        };
+        match self.runtime.block_on(self.services.execute_sql(QueryExecution {
+            connection_id,
+            database,
+            sql: source_sql.to_string(),
+        })) {
+            Ok(result) => {
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.iter_mut().find(|t| {
+                    matches!(t, WorkspaceTab::Query(q) if q.id == tab_id)
+                }) {
+                    tab.result = Some(result.clone());
+                    if let Some(entry) = tab.multi_results.get_mut(tab.selected_result_index) {
+                        *entry = result;
+                    }
+                    // 清除编辑状态但保留 edit_context（查询仍为简单单表查询）
+                    if let Some(ref mut ctx) = tab.edit_context {
+                        ctx.editing_cell = None;
+                        ctx.pending_cell_changes.clear();
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.iter_mut().find(|t| {
+                    matches!(t, WorkspaceTab::Query(q) if q.id == tab_id)
+                }) {
+                    tab.error = Some(e.to_string());
+                }
+            }
+        }
     }
 
     fn save_pending_insert_row(&mut self) {
@@ -4825,6 +5425,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         tab.active_bottom_tab = pane;
                                     }
                                 }
+                                // 当自动检测未启用编辑时，显示手动启用按钮
+                                // (已移除手动按钮，仅依赖自动检测)
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let summary = match tab.active_bottom_tab {
                                         QueryBottomTab::Results => tab
@@ -4863,6 +5465,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 let is_selected = index == tab.selected_result_index;
                                                 if segment_button(ui, &label, is_selected).clicked() {
                                                     tab.selected_result_index = index;
+                                                    tab.edit_context = None; // 切换时清除编辑上下文
                                                     if let Some(mut selected) =
                                                         tab.multi_results.get(index).cloned()
                                                     {
@@ -4872,6 +5475,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         );
                                                         tab.result = Some(selected);
                                                     }
+                                                    // 标记需要重新分析编辑上下文
+                                                    tab.pending_edit_context_analysis = true;
                                                 }
                                             }
                                         });
@@ -4880,7 +5485,81 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         ui.add_space(8.0);
                                     }
                                     if let Some(result) = &mut tab.result {
-                                        let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                        // 编辑工具栏
+                                        if let Some(ref mut edit_ctx) = tab.edit_context {
+                                            if edit_ctx.definition.is_some() {
+                                                ui.horizontal(|ui| {
+                                                    if edit_ctx.deferred_save_action {
+                                                        edit_ctx.deferred_save_action = false;
+                                                        action = TabUiAction::SaveQueryTabCellChanges;
+                                                    }
+                                                    let current_edit_changed = edit_ctx.editing_cell.as_ref().map_or(false, |e| {
+                                                        e.value != e.original_value || e.is_null != e.original_is_null
+                                                    });
+                                                    let has_pending = !edit_ctx.pending_cell_changes.is_empty() || current_edit_changed;
+                                                    if has_pending {
+                                                        let editing_active = edit_ctx.editing_cell.is_some();
+                                                        if editing_active {
+                                                            let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
+                                                            if save_enter {
+                                                                edit_ctx.deferred_save_action = true;
+                                                            }
+                                                            let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
+                                                            if cancel_esc {
+                                                                if let Some(edit) = edit_ctx.editing_cell.take() {
+                                                                    if let TableEditTarget::ExistingRow(row_index) = edit.target {
+                                                                        edit_ctx.pending_cell_changes.remove(&(row_index, edit.column));
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else if !edit_ctx.committed_edit_this_frame {
+                                                            let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
+                                                            if save_enter {
+                                                                action = TabUiAction::SaveQueryTabCellChanges;
+                                                            }
+                                                            let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
+                                                            if cancel_esc {
+                                                                action = TabUiAction::CancelQueryTabCellChanges;
+                                                            }
+                                                        }
+                                                        ui.separator();
+                                                        if toolbar_button(ui, tr!("✕ 取消 (Esc)"), ToolbarButtonKind::Subtle).clicked() {
+                                                            action = TabUiAction::CancelQueryTabCellChanges;
+                                                        }
+                                                        if toolbar_button(ui, tr!("💾 保存 (Enter)"), ToolbarButtonKind::Accent).clicked() {
+                                                            action = TabUiAction::SaveQueryTabCellChanges;
+                                                        }
+                                                        let count = edit_ctx.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
+                                                        ui.label(
+                                                            RichText::new(tr!("● {} 处未保存的修改", count))
+                                                                .size(11.0)
+                                                                .color(chrome.danger),
+                                                        );
+                                                    }
+                                                });
+                                                edit_ctx.committed_edit_this_frame = false;
+                                                ui.add_space(4.0);
+                                            }
+                                        }
+                                        // 渲染表格
+                                        if let Some(ref mut edit_ctx) = tab.edit_context {
+                                            if edit_ctx.definition.is_some() {
+                                                let _ = render_editable_result_table(
+                                                    ui, result, edit_ctx,
+                                                    &mut tab.result_sort,
+                                                    &mut tab.selected_columns,
+                                                    &mut tab.search,
+                                                    &mut tab.column_order,
+                                                    &mut tab.column_drag,
+                                                );
+                                            } else {
+                                                let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                                ui.label(RichText::new(tr!("正在加载表结构...")).size(11.0).color(chrome.weak_text));
+                                            }
+                                        } else {
+                                            // 无编辑上下文：显示只读表格
+                                            let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                        }
                                     } else {
                                         render_query_empty_state(
                                             ui,
@@ -8383,7 +9062,7 @@ impl QueryTabState {
             column_drag: None,
             multi_results: Vec::new(),
             multi_statements: Vec::new(),
-            selected_result_index: 0,
+            executed_statements: Vec::new(),            selected_result_index: 0,
             editor_focus_requested: true,
             editor_height: None,
             bottom_panel_collapsed: true,
@@ -8402,6 +9081,9 @@ impl QueryTabState {
             explain_view_mode: ExplainViewMode::Tree,
             search: TableSearchState::default(),
             find: EditorFindState::default(),
+            edit_context: None,
+            pending_edit_context_analysis: false,
+            manual_edit_prompt: false,
         }
     }
 }
@@ -8565,6 +9247,9 @@ enum TabUiAction {
     },
     SavePendingCellChanges,
     CancelPendingCellChanges,
+    SaveQueryTabCellChanges,
+    CancelQueryTabCellChanges,
+    EnableManualQueryEdit(String),
     SavePendingInsertRow,
     DeleteActiveTableRows(Vec<usize>),
     CopyActiveTableRowsAsInsert(Vec<usize>),
@@ -8708,6 +9393,432 @@ impl TableViewMode {
 fn is_explain_query(sql: &str) -> bool {
     let trimmed = sql.trim().to_ascii_lowercase();
     trimmed.starts_with("explain")
+}
+
+/// 检测 SQL 是否为简单单表 SELECT 查询（无 JOIN/子查询/聚合等）。
+/// 若是，返回可编辑的 `TableRef`；否则返回 `None`。
+fn parse_simple_select_table(
+    sql: &str,
+    connection_id: &str,
+    database: Option<&str>,
+    kind: DatabaseKind,
+) -> Option<TableRef> {
+    // 去除 SQL 注释
+    let stripped = Regex::new(r#"--[^\n]*|/\*[\s\S]*?\*/"#)
+        .ok()?
+        .replace_all(sql, " ")
+        .to_string();
+    let normalized = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = normalized.to_ascii_lowercase().trim().to_string();
+
+    // 直接 SELECT
+    if lower.starts_with("select ") || lower.starts_with("select\n") {
+        return analyze_simple_select(&normalized, connection_id, database, kind);
+    }
+    None
+}
+
+/// 带有完整语句上下文的解析（支持 EXECUTE → PREPARE → SET → SELECT 回溯）
+/// 返回 (TableRef, 实际SELECT语句)
+fn parse_simple_select_table_with_context(
+    current_sql: &str,
+    all_statements: &[String],
+    connection_id: &str,
+    database: Option<&str>,
+    kind: DatabaseKind,
+) -> Option<(TableRef, String)> {
+    let stripped = Regex::new(r#"--[^\n]*|/\*[\s\S]*?\*/"#)
+        .ok()?
+        .replace_all(current_sql, " ")
+        .to_string();
+    let normalized = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = normalized.to_ascii_lowercase();
+
+    // 直接 SELECT
+    if lower.starts_with("select ") {
+        let table_ref = analyze_simple_select(&normalized, connection_id, database, kind)?;
+        return Some((table_ref, normalized));
+    }
+
+    // EXECUTE 场景已移至 try_init_query_edit_context 处理（需要执行 SELECT @var）
+    None
+}
+
+/// 从 SET @var = ... 中检查变量是否存在（不解析具体内容）
+fn has_variable_definition(
+    var_name: &str,
+    all_statements: &[String],
+) -> bool {
+    let var_lower = var_name.to_ascii_lowercase();
+    all_statements.iter().any(|s| {
+        let stripped = Regex::new(r#"--[^\n]*|/\*[\s\S]*?\*/"#)
+            .ok().map(|r| r.replace_all(s, " ").to_string())
+            .unwrap_or_else(|| s.to_string());
+        let lower = stripped.to_ascii_lowercase();
+        lower.starts_with("set ") && lower.contains(&var_lower)
+    })
+}
+
+/// 从 PREPARE stmtN FROM @var 中提取变量名
+fn extract_prepare_var_name(
+    stmt_name_lower: &str,
+    all_statements: &[String],
+) -> Option<String> {
+    for prep_sql in all_statements {
+        let prep_stripped = Regex::new(r#"--[^\n]*|/\*[\s\S]*?\*/"#)
+            .ok()?
+            .replace_all(prep_sql, " ")
+            .to_string();
+        let prep_norm = prep_stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+        let prep_lower = prep_norm.to_ascii_lowercase();
+        if prep_lower.starts_with("prepare ") {
+            let after_prepare = &prep_lower[8..];
+            let parts: Vec<&str> = after_prepare.split_whitespace().collect();
+            if parts.len() >= 3 && parts[0] == stmt_name_lower && parts[1] == "from" {
+                let var_name = parts[2];
+                if var_name.starts_with('@') {
+                    return Some(var_name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 从表达式（字符串字面量或 CONCAT）中提取表名，返回 (TableRef, 解析出的SQL)
+fn extract_table_from_expression(
+    expr: &str,
+    connection_id: &str,
+    database: Option<&str>,
+    kind: DatabaseKind,
+) -> Option<(TableRef, String)> {
+    let expr_trimmed = expr.trim();
+
+    // 情况1: 直接字符串字面量 'SELECT * from schema.table where ...'
+    if expr_trimmed.starts_with('\'') {
+        let inner = extract_string_literal(expr_trimmed)?;
+        if let Some(table_ref) = analyze_simple_select(&inner, connection_id, database, kind) {
+            return Some((table_ref, inner));
+        }
+    }
+
+    // 情况2: CONCAT('SELECT * from prefix', @var, '.table_part', @var, ...)
+    let concat_lower = expr_trimmed.to_ascii_lowercase();
+    if concat_lower.starts_with("concat(") || concat_lower.starts_with("concat (") {
+        let inner_start = expr_trimmed.find('(')? + 1;
+        let inner_end = find_matching_paren(expr_trimmed, inner_start - 1)?;
+        let inner = &expr_trimmed[inner_start..inner_end];
+        // 提取所有字符串字面量
+        let literals = extract_all_string_literals(inner);
+        if literals.is_empty() {
+            return None;
+        }
+        // 拼接字面量作为解析后的 SQL
+        let reconstructed = literals.join("");
+        if let Some(table_ref) = analyze_simple_select(&reconstructed, connection_id, database, kind) {
+            return Some((table_ref, reconstructed));
+        }
+        // 如果拼接后无法解析，尝试从字面量中提取表名模式
+        if let Some(table_ref) = extract_table_from_concat_literals(&literals, connection_id, database, kind) {
+            return Some((table_ref, reconstructed));
+        }
+    }
+    None
+}
+
+/// 从 CONCAT 的字面量片段中推断表名
+fn extract_table_from_concat_literals(
+    literals: &[String],
+    connection_id: &str,
+    database: Option<&str>,
+    kind: DatabaseKind,
+) -> Option<TableRef> {
+    // 拼接所有字面量
+    let combined = literals.join("");
+    let lower = combined.to_ascii_lowercase();
+
+    // 找 "from " 后面的内容
+    let from_pos = lower.find("from ")?;
+    let after_from = &combined[from_pos + 5..];
+    let after_from_lower = &lower[from_pos + 5..];
+
+    // 提取表名部分（可能被变量截断，如 "testing_zeus_plutus_" + @db + ".pmt_order_original_" + @tbl）
+    // 尝试匹配 schema.table 模式
+    let from_re = Regex::new(r#"(?i)([`"\w]+(?:\.[`"\w]+)?)"#).ok()?;
+    if let Some(caps) = from_re.captures(after_from) {
+        let token = caps.get(1)?.as_str();
+        // 可能包含尾部下划线（被变量截断），去掉
+        let cleaned = token.trim_end_matches('_');
+        let (schema, table_name) = if let Some(dot_pos) = cleaned.rfind('.') {
+            let s = &cleaned[..dot_pos];
+            let t = &cleaned[dot_pos + 1..];
+            (Some(unquote_identifier(s, kind)), unquote_identifier(t, kind))
+        } else {
+            (None, unquote_identifier(cleaned, kind))
+        };
+        if !table_name.is_empty() {
+            return Some(TableRef {
+                connection_id: connection_id.to_string(),
+                database: database.map(|s| s.to_string()),
+                schema,
+                table: table_name,
+                is_view: false,
+            });
+        }
+    }
+    None
+}
+
+/// 提取单引号字符串字面量内容
+fn extract_string_literal(s: &str) -> Option<String> {
+    if !s.starts_with('\'') {
+        return None;
+    }
+    let mut result = String::new();
+    let mut chars = s[1..].chars();
+    loop {
+        match chars.next() {
+            None => break,
+            Some('\'') => {
+                // 检查是否是转义的 ''
+                if chars.clone().next() == Some('\'') {
+                    result.push('\'');
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            Some(c) => result.push(c),
+        }
+    }
+    Some(result)
+}
+
+/// 提取表达式中所有单引号字符串字面量
+fn extract_all_string_literals(s: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            let mut lit = String::new();
+            loop {
+                match chars.next() {
+                    None => break,
+                    Some('\'') => {
+                        if chars.peek() == Some(&'\'') {
+                            lit.push('\'');
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(c) => lit.push(c),
+                }
+            }
+            literals.push(lit);
+        }
+    }
+    literals
+}
+
+/// 当表名/模式名被变量截断（以 _ 结尾）时，在 schema cache 中前缀匹配实际表名
+fn resolve_partial_table_ref(
+    partial: &TableRef,
+    schema_cache: &SchemaCache,
+    trigger: &QueryEditContextTrigger,
+) -> Option<TableRef> {
+    let partial_table = &partial.table;
+    let partial_schema = partial.schema.as_deref().unwrap_or("");
+
+    // 在 schema cache 中搜索匹配的 schema
+    let matching_schemas: Vec<String> = if partial_schema.ends_with('_') {
+        schema_cache
+            .schema_names()
+            .iter()
+            .filter(|s| s.starts_with(partial_schema))
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        vec![partial_schema.to_string()]
+    };
+
+    // 也搜索 database_tables（schema 名可能存为 database）
+    let matching_databases: Vec<String> = if partial_schema.ends_with('_') {
+        schema_cache
+            .database_names()
+            .iter()
+            .filter(|d| d.starts_with(partial_schema))
+            .map(|d| d.to_string())
+            .collect()
+    } else {
+        vec![]
+    };
+
+    // 在每个匹配的 schema/database 中搜索匹配的表名
+    let mut candidates: Vec<(Option<String>, String)> = Vec::new(); // (schema, table)
+
+    for schema in &matching_schemas {
+        if let Some(tables) = schema_cache.tables_for_schema(schema) {
+            for t in tables {
+                if t.starts_with(partial_table) {
+                    candidates.push((Some(schema.clone()), t.clone()));
+                }
+            }
+        }
+    }
+    for db in &matching_databases {
+        if let Some(tables) = schema_cache.tables_for_database(db) {
+            for t in tables {
+                if t.starts_with(partial_table) {
+                    candidates.push((Some(db.clone()), t.clone()));
+                }
+            }
+        }
+    }
+
+    // 如果没有 schema/database 匹配，尝试在全局表名中搜索
+    if candidates.is_empty() && partial_schema.is_empty() {
+        for t in schema_cache.table_names() {
+            if t.starts_with(partial_table) {
+                candidates.push((None, t.to_string()));
+            }
+        }
+    }
+
+    // 只有一个候选时直接返回
+    if candidates.len() == 1 {
+        let (schema, table) = candidates.into_iter().next().unwrap();
+        return Some(TableRef {
+            connection_id: partial.connection_id.clone(),
+            database: trigger.database.clone(),
+            schema,
+            table,
+            is_view: false,
+        });
+    }
+
+    // 多个候选时，尝试用当前数据库限定
+    if candidates.len() > 1 {
+        if let Some(ref target_db) = trigger.database {
+            let filtered: Vec<_> = candidates
+                .iter()
+                .filter(|(s, _)| s.as_ref() == Some(target_db))
+                .cloned()
+                .collect();
+            if filtered.len() == 1 {
+                let (schema, table) = filtered.into_iter().next().unwrap();
+                return Some(TableRef {
+                    connection_id: partial.connection_id.clone(),
+                    database: trigger.database.clone(),
+                    schema,
+                    table,
+                    is_view: false,
+                });
+            }
+        }
+        // 仍然多个候选，取第一个
+        let (schema, table) = candidates.into_iter().next().unwrap();
+        return Some(TableRef {
+            connection_id: partial.connection_id.clone(),
+            database: trigger.database.clone(),
+            schema,
+            table,
+            is_view: false,
+        });
+    }
+
+    None
+}
+
+/// 分析简单 SELECT 语句，提取单表引用
+fn analyze_simple_select(
+    sql: &str,
+    connection_id: &str,
+    database: Option<&str>,
+    kind: DatabaseKind,
+) -> Option<TableRef> {
+    let lower = sql.to_ascii_lowercase();
+    if !lower.starts_with("select ") {
+        return None;
+    }
+
+    // 检测顶层关键字
+    let forbidden = [
+        " join ", " inner ", " left ", " right ", " outer ", " cross ", " full ", " natural ",
+        " union ", " intersect ", " except ",
+        " group by ", " having ",
+        " into ", " update ", " delete ", " insert ",
+    ];
+    let chars: Vec<char> = sql.chars().collect();
+    let mut depth = 0i32;
+    let mut top_level = String::new();
+    for ch in &chars {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ if depth <= 0 => top_level.push(*ch),
+            _ => {}
+        }
+    }
+    let top_lower = top_level.to_ascii_lowercase();
+
+    if top_lower.contains("select ") && top_lower.starts_with("select ") {
+        let after_select = &top_lower[7..];
+        if after_select.contains(" select ") {
+            return None;
+        }
+    }
+    for kw in &forbidden {
+        if top_lower.contains(*kw) {
+            return None;
+        }
+    }
+
+    let agg_funcs = ["count(", "sum(", "avg(", "min(", "max("];
+    for func in &agg_funcs {
+        if top_lower.contains(func) {
+            return None;
+        }
+    }
+
+    let from_re = Regex::new(r#"(?i)\bFROM\s+(`[^`]+`|"[^"]+"|[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)?)"#).ok()?;
+    let caps = from_re.captures(sql)?;
+    let table_token = caps.get(1)?.as_str();
+
+    let (schema, table_name) = if let Some(dot_pos) = table_token.rfind('.') {
+        let s = &table_token[..dot_pos];
+        let t = &table_token[dot_pos + 1..];
+        (
+            Some(unquote_identifier(s, kind)),
+            unquote_identifier(t, kind),
+        )
+    } else {
+        (None, unquote_identifier(table_token, kind))
+    };
+
+    if table_name.is_empty() {
+        return None;
+    }
+
+    Some(TableRef {
+        connection_id: connection_id.to_string(),
+        database: schema.as_ref().map(|s| s.to_string()).or_else(|| database.map(|s| s.to_string())),
+        schema,
+        table: table_name,
+        is_view: false,
+    })
+}
+
+/// 去除标识符的引号（反引号、双引号）
+fn unquote_identifier(s: &str, _kind: DatabaseKind) -> String {
+    let s = s.trim();
+    if (s.starts_with('`') && s.ends_with('`'))
+        || (s.starts_with('"') && s.ends_with('"'))
+    {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 fn transform_explain_for_postgres(sql: &str) -> String {
@@ -9411,6 +10522,389 @@ fn commit_current_edit_to_pending(tab: &mut TableTabState) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// 渲染可编辑的查询结果表格（简单单表 SELECT 时使用）
+fn render_editable_result_table(
+    ui: &mut egui::Ui,
+    result: &mut QueryResult,
+    edit: &mut QueryEditContext,
+    sort_state: &mut TableSortState,
+    selected_columns: &mut BTreeSet<usize>,
+    search: &mut TableSearchState,
+    column_order: &mut Vec<String>,
+    column_drag: &mut Option<TableColumnDragState>,
+) -> TabUiAction {
+    let palette = mac_ui_palette(ui.visuals());
+    if result.columns.is_empty() {
+        return TabUiAction::None;
+    }
+
+    // 搜索匹配重算
+    if search.open && search.needs_recompute {
+        search.needs_recompute = false;
+        search.matches = compute_search_matches(&search.committed_keyword, &result.columns, &result.rows);
+        if !search.matches.is_empty() {
+            search.scroll_to_row = Some(search.matches[0].0);
+        }
+    }
+    let current_match_pos = search.matches.get(search.current_index).copied();
+
+    let viewport_width = ui.available_width().max(0.0);
+    let viewport_height = ui.available_height().max(220.0);
+
+    // 列顺序
+    let display_columns: Vec<String> = if column_order.is_empty() {
+        result.columns.clone()
+    } else {
+        let all_set: BTreeSet<&String> = result.columns.iter().collect();
+        let mut ordered: Vec<String> = column_order
+            .iter()
+            .filter(|c| all_set.contains(c))
+            .cloned()
+            .collect();
+        for col in &result.columns {
+            if !column_order.contains(col) {
+                ordered.push(col.clone());
+            }
+        }
+        ordered
+    };
+
+    let mut action = TabUiAction::None;
+    let mut selected_sort = None;
+
+    egui::Frame::new()
+        .fill(palette.card_bg)
+        .stroke(Stroke::new(1.0, palette.soft_border))
+        .show(ui, |ui| {
+            ui.set_width(viewport_width);
+            ui.set_min_height(viewport_height);
+            if search.open {
+                let match_count = search.matches.len();
+                render_table_search_bar(ui, &palette, search, match_count);
+                ui.add_space(2.0);
+            }
+            let scroll_target_row = search.scroll_to_row.take();
+            let ctx = ui.ctx().clone();
+            let modifiers = ctx.input(|input| input.modifiers);
+            let ctrl_held = modifiers.ctrl || modifiers.command;
+            let column_widths = estimate_query_column_widths(&display_columns, &result.rows);
+            let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
+            let mut sort_click_result = None;
+            let mut sa_result = egui::ScrollArea::horizontal()
+                .id_salt(format!(
+                    "editable-result-{}-{}",
+                    result.columns.len(),
+                    result.rows.len()
+                ))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let scroll_clip_rect = ui.clip_rect();
+                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    let mut table = TableBuilder::new(ui)
+                        .vscroll(true)
+                        .striped(true)
+                        .resizable(true)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+                    if let Some(row_idx) = scroll_target_row {
+                        table = table.scroll_to_row(row_idx, Some(egui::Align::Center));
+                    }
+                    // 行号列
+                    table = table.column(
+                        egui_extras::Column::initial(42.0).at_least(42.0).clip(true),
+                    );
+                    for width in &column_widths {
+                        table = table.column(
+                            egui_extras::Column::initial(*width).at_least(72.0).clip(true),
+                        );
+                    }
+                    table
+                        .header(30.0, |mut header| {
+                            header.col(|ui| {
+                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false);
+                            });
+                            for (col_idx, column) in display_columns.iter().enumerate() {
+                                header.col(|ui| {
+                                    let cell_rect = ui.max_rect();
+                                    let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
+                                    let is_selected = selected_columns.contains(&col_idx);
+                                    let (sort_choice, clicked, cell_dragged) = table_header_cell(
+                                        ui,
+                                        &palette,
+                                        column,
+                                        true,
+                                        sort_indicator(sort_state, column),
+                                        is_selected,
+                                        is_dragged,
+                                    );
+                                    if let Some(choice) = sort_choice {
+                                        selected_sort = Some((column.clone(), choice));
+                                    }
+                                    if clicked {
+                                        if ctrl_held {
+                                            if selected_columns.contains(&col_idx) {
+                                                selected_columns.remove(&col_idx);
+                                            } else {
+                                                selected_columns.insert(col_idx);
+                                            }
+                                        } else {
+                                            selected_columns.clear();
+                                            selected_columns.insert(col_idx);
+                                        }
+                                        ui.ctx().request_repaint();
+                                    }
+                                    if cell_dragged && column_drag.is_none() {
+                                        *column_drag = Some(TableColumnDragState::new(col_idx, col_idx, cell_rect.left()));
+                                    }
+                                    header_cell_rects.push(cell_rect);
+                                });
+                            }
+                        })
+                        .body(|body| {
+                            body.rows(28.0, result.rows.len(), |mut row_ui| {
+                                let row_index = row_ui.index();
+                                let fill = if row_index % 2 == 0 {
+                                    palette.card_bg
+                                } else {
+                                    palette.table_alt_bg
+                                };
+                                // 行号
+                                row_ui.col(|ui| {
+                                    let rect = ui.max_rect();
+                                    ui.painter().rect_filled(rect, 0.0, fill);
+                                    paint_table_grid_lines(
+                                        ui,
+                                        rect,
+                                        subtle_grid_color(palette.table_grid, 26),
+                                        subtle_grid_color(palette.table_grid, 40),
+                                    );
+                                    let clipped_rect = table_cell_content_rect(rect);
+                                    let num_text = format!("{}", row_index + 1);
+                                    let label = egui::Label::new(
+                                        egui::RichText::new(num_text)
+                                            .size(12.0)
+                                            .family(FontFamily::Monospace)
+                                            .color(palette.weak_text),
+                                    )
+                                    .truncate();
+                                    let mut child_ui = ui.new_child(
+                                        egui::UiBuilder::new()
+                                            .max_rect(clipped_rect)
+                                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                                    );
+                                    let _ = child_ui.add(label);
+                                });
+                                // 数据单元格
+                                for (col_idx, column) in display_columns.iter().enumerate() {
+                                    row_ui.col(|ui| {
+                                        // 从原始结果获取值，如有待保存变更则覆盖
+                                        let mut cell_value = result
+                                            .rows
+                                            .get(row_index)
+                                            .and_then(|row| row.get(column))
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        if let Some(change) = edit.pending_cell_changes.get(&(row_index, column.clone())) {
+                                            cell_value = if change.new_is_null {
+                                                QueryCellValue::Null
+                                            } else {
+                                                QueryCellValue::Text(change.new_value.clone())
+                                            };
+                                        }
+                                        let is_editing = matches!(
+                                            edit.editing_cell.as_ref(),
+                                            Some(e)
+                                                if e.target == TableEditTarget::ExistingRow(row_index)
+                                                    && e.column == *column
+                                        );
+                                        let column_selected = selected_columns.contains(&col_idx);
+                                        let search_highlight = search.open && search.matches.iter().any(|&(r, c)| r == row_index && c == col_idx);
+                                        let is_current_match = current_match_pos == Some((row_index, col_idx));
+                                        let response = if is_editing {
+                                            let editor = edit.editing_cell.as_mut().expect("edit state");
+                                            render_table_editor_cell(
+                                                ui,
+                                                &palette,
+                                                fill,
+                                                editor,
+                                                false,
+                                                false,
+                                            )
+                                        } else {
+                                            render_table_body_interactive_cell(
+                                                ui,
+                                                &palette,
+                                                fill,
+                                                &cell_value,
+                                                false,
+                                                false,
+                                                column_selected,
+                                                search_highlight,
+                                                is_current_match,
+                                                &search.committed_keyword,
+                                            )
+                                        };
+                                        // 点击进入编辑
+                                        if !is_editing && response.clicked() {
+                                            commit_query_edit_to_pending(edit);
+                                            edit.editing_cell = Some(TableCellEditState {
+                                                target: TableEditTarget::ExistingRow(row_index),
+                                                column: column.clone(),
+                                                value: cell_value.as_text().unwrap_or_default().to_string(),
+                                                is_null: cell_value.is_null(),
+                                                original_value: cell_value.as_text().unwrap_or_default().to_string(),
+                                                original_is_null: cell_value.is_null(),
+                                                focus_requested: true,
+                                            });
+                                            ui.ctx().request_repaint();
+                                        }
+                                        // Enter/失焦提交编辑
+                                        if is_editing {
+                                            let enter_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
+                                            let old_value = cell_value.as_text().unwrap_or_default().to_string();
+                                            let old_is_null = cell_value.is_null();
+                                            if enter_pressed || response.lost_focus() {
+                                                let target = TableEditTarget::ExistingRow(row_index);
+                                                let still_mine = edit.editing_cell.as_ref()
+                                                    .map_or(false, |e| e.target == target && e.column == *column);
+                                                if still_mine || enter_pressed {
+                                                    if let Some(cell) = edit.editing_cell.take() {
+                                                        if enter_pressed {
+                                                            edit.committed_edit_this_frame = true;
+                                                            edit.deferred_save_action = true;
+                                                        }
+                                                        if cell.is_null != old_is_null || cell.value != old_value {
+                                                            edit.pending_cell_changes.insert(
+                                                                (row_index, cell.column.clone()),
+                                                                PendingCellChange {
+                                                                    column: cell.column,
+                                                                    old_value,
+                                                                    old_is_null,
+                                                                    new_value: cell.value,
+                                                                    new_is_null: cell.is_null,
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // 右键菜单
+                                        response.context_menu(|ui| {
+                                            if ui.button(tr!("设置为空白字符串")).clicked() {
+                                                edit.pending_cell_changes.insert(
+                                                    (row_index, column.clone()),
+                                                    PendingCellChange {
+                                                        column: column.clone(),
+                                                        old_value: cell_value.as_text().unwrap_or_default().to_string(),
+                                                        old_is_null: cell_value.is_null(),
+                                                        new_value: String::new(),
+                                                        new_is_null: false,
+                                                    },
+                                                );
+                                                ui.close();
+                                            }
+                                            if ui.button(tr!("设置为 NULL")).clicked() {
+                                                edit.pending_cell_changes.insert(
+                                                    (row_index, column.clone()),
+                                                    PendingCellChange {
+                                                        column: column.clone(),
+                                                        old_value: cell_value.as_text().unwrap_or_default().to_string(),
+                                                        old_is_null: cell_value.is_null(),
+                                                        new_value: String::new(),
+                                                        new_is_null: true,
+                                                    },
+                                                );
+                                                ui.close();
+                                            }
+                                        });
+                                    });
+                                }
+                            });
+                        });
+                    // 列拖拽逻辑（简化版）
+                    let esc_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
+                    if esc_pressed {
+                        *column_drag = None;
+                    }
+                    let column_drag_released = ui.input(|input| {
+                        input.pointer.button_released(egui::PointerButton::Primary)
+                    });
+                    if column_drag_released {
+                        if let Some(drag) = column_drag.take() {
+                            if drag.source_index != drag.target_index {
+                                let col_name = &display_columns[drag.source_index];
+                                let mut new_display = display_columns.clone();
+                                new_display.remove(drag.source_index);
+                                let insert_at = if drag.target_index > drag.source_index {
+                                    (drag.target_index - 1).min(new_display.len())
+                                } else {
+                                    drag.target_index.min(new_display.len())
+                                };
+                                new_display.insert(insert_at, col_name.clone());
+                                *column_order = new_display
+                                    .into_iter()
+                                    .filter(|c| result.columns.contains(c))
+                                    .collect();
+                            }
+                        }
+                    }
+                    if let Some(sort_request) = sort_click_result {
+                        selected_sort = Some(sort_request);
+                    }
+                });
+            // 边缘自动滚动
+            {
+                let scroll_speed = column_drag.as_ref().map_or(0.0, |d| d.scroll_speed_x);
+                if scroll_speed != 0.0 {
+                    let dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
+                    ui.ctx().request_repaint();
+                    sa_result.state.offset[0] += scroll_speed * dt;
+                    sa_result.state.store(ui.ctx(), sa_result.id);
+                }
+            }
+            if let Some((column, choice)) = selected_sort {
+                match choice {
+                    TableHeaderSortChoice::Clear => {
+                        clear_table_sort_state(sort_state);
+                    }
+                    TableHeaderSortChoice::Ascending | TableHeaderSortChoice::Descending => {
+                        apply_table_sort_choice(
+                            result,
+                            sort_state,
+                            &column,
+                            matches!(choice, TableHeaderSortChoice::Descending),
+                        );
+                    }
+                }
+            }
+        });
+    action
+}
+
+/// 将当前编辑中的单元格变更提交到待保存队列（查询页版本）
+fn commit_query_edit_to_pending(edit: &mut QueryEditContext) {
+    let has_change = edit.editing_cell.as_ref().map_or(false, |e| {
+        e.value != e.original_value || e.is_null != e.original_is_null
+    });
+    if !has_change {
+        return;
+    }
+    if let Some(cell) = edit.editing_cell.take() {
+        if let TableEditTarget::ExistingRow(row_index) = cell.target {
+            edit.pending_cell_changes.insert(
+                (row_index, cell.column.clone()),
+                PendingCellChange {
+                    column: cell.column,
+                    old_value: cell.original_value,
+                    old_is_null: cell.original_is_null,
+                    new_value: cell.value,
+                    new_is_null: cell.is_null,
+                },
+            );
         }
     }
 }

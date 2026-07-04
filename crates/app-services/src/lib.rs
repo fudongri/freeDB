@@ -259,6 +259,42 @@ impl AppServices {
         result.map_err(into_anyhow)
     }
 
+    /// 批量执行 SQL 语句，所有语句在同一个连接上按顺序执行
+    pub async fn execute_sql_batch(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        statements: Vec<String>,
+    ) -> Vec<Result<QueryResult>> {
+        let profile = match self.require_connection(connection_id) {
+            Ok(p) => p,
+            Err(e) => return statements.into_iter().map(|_| Err(anyhow::anyhow!("{}", e))).collect(),
+        };
+        let password = match self.require_saved_password(connection_id) {
+            Ok(p) => p,
+            Err(e) => return statements.into_iter().map(|_| Err(anyhow::anyhow!("{}", e))).collect(),
+        };
+        let results = self
+            .session_manager
+            .execute_sql_batch(&profile, &password, connection_id, database, statements.clone())
+            .await;
+        // 记录历史
+        for (stmt, result) in statements.iter().zip(results.iter()) {
+            let (elapsed_ms, success) = match result {
+                Ok(r) => (r.elapsed_ms, true),
+                Err(_) => (0, false),
+            };
+            if let Err(error) = self.history_store.append(connection_id, stmt, elapsed_ms, success) {
+                warn!(
+                    connection_id = connection_id,
+                    error = %error,
+                    "failed to persist query history"
+                );
+            }
+        }
+        results.into_iter().map(|r| r.map_err(into_anyhow)).collect()
+    }
+
     pub async fn apply_table_changes(&self, changes: TableChangeSet) -> Result<QueryResult> {
         let profile = self.require_connection(&changes.table.connection_id)?;
         let password = self.require_saved_password(&changes.table.connection_id)?;

@@ -203,6 +203,52 @@ impl SessionManager {
         with_pool!(self, profile, password, db, h, d => d.execute_sql(h, exec.clone()))
     }
 
+    /// 批量执行 SQL 语句，所有语句在同一个连接上按顺序执行。
+    /// 用于保持 MySQL 用户变量（@var）在语句间的持久性。
+    pub async fn execute_sql_batch(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        connection_id: &str,
+        database: Option<&str>,
+        statements: Vec<String>,
+    ) -> Vec<AppResult<QueryResult>> {
+        let db_owned = database.or(profile.default_database.as_deref());
+        let db: Option<&str> = db_owned;
+        let handle = match self.pool.acquire(profile, password, db).await {
+            Ok(h) => h,
+            Err(e) => {
+                // 所有语句都返回同一个错误
+                return statements.into_iter().map(|_| Err(AppError::Connection(e.to_string()))).collect();
+            }
+        };
+        let mut guard = handle.lock().await;
+        let h: &mut driver_api::ConnectionHandle = &mut *guard;
+        let d: &dyn DatabaseDriver = if matches!(profile.kind, DatabaseKind::Postgres) {
+            &self.pool.postgres
+        } else {
+            &self.pool.mysql
+        };
+        let mut results = Vec::with_capacity(statements.len());
+        for stmt in statements {
+            let exec = QueryExecution {
+                connection_id: connection_id.to_string(),
+                database: db.map(|s| s.to_string()),
+                sql: stmt,
+            };
+            match d.execute_sql(h, exec).await {
+                Ok(r) => results.push(Ok(r)),
+                Err(e) => {
+                    results.push(Err(e));
+                    break; // 出错后停止执行后续语句
+                }
+            }
+        }
+        drop(guard);
+        self.set_connected(connection_id);
+        results
+    }
+
     pub async fn apply_table_changes(
         &self,
         profile: &ConnectionProfile,
