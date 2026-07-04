@@ -135,6 +135,9 @@ fn en(key: &'static str) -> &'static str {
         "删除视图" => "Delete View",
         "删除表" => "Delete Table",
         "删除集合" => "Delete Collection",
+        "清空表" => "Clear Table",
+        "清空集合" => "Clear Collection",
+        "复制名称" => "Copy Name",
         "复制" => "Copy",
         "新建 Schema" => "New Schema",
         "Schema 名称" => "Schema Name",
@@ -356,6 +359,7 @@ fn en(key: &'static str) -> &'static str {
         "已更新 {} 条记录" => "Updated {} record(s)",
         "已创建集合: {}" => "Created collection: {}",
         "查询完成，返回 {} 条记录" => "Query returned {} record(s)",
+        "EXPLAIN 不支持的方法: {}" => "EXPLAIN does not support method: {}",
         "无法解析 MongoDB 命令。支持的语法: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])" => "Cannot parse MongoDB command. Supported syntax: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])",
 
         // ── app-services.rs ──
@@ -556,6 +560,7 @@ fn en(key: &'static str) -> &'static str {
         "确认要删除吗？" => "Confirm delete?",
         "确认要删除「{}」吗？" => "Confirm delete \"{}\"?",
         "确认要删除「{}」吗？此操作不可撤销。" => "Confirm delete \"{}\"? This cannot be undone.",
+        "确认要清空「{}」吗？此操作不可撤销。" => "Confirm clear \"{}\"? This cannot be undone.",
         "确认 (Enter)" => "Confirm (Enter)",
         "确认保存" => "Confirm Save",
         "即将保存 {} 处修改到数据库：" => "About to save {} change(s) to database:",

@@ -683,6 +683,7 @@ enum DdlAction {
     RenameSchema { connection_id: String, database: String, old_name: String },
     DropSchema { connection_id: String, database: String, name: String },
     DropTable { connection_id: String, database: String, schema: Option<String>, name: String, is_view: bool, kind: DatabaseKind },
+    TruncateTable { connection_id: String, database: String, schema: Option<String>, name: String, kind: DatabaseKind },
     RenameTable { connection_id: String, database: String, schema: Option<String>, old_name: String, is_view: bool, kind: DatabaseKind },
 }
 
@@ -705,6 +706,7 @@ struct DdlPendingDelete {
     name: String,
     action: DdlAction,
     confirm_on_enter: bool,
+    is_truncate: bool,
 }
 
 struct TreeRenameState {
@@ -2371,7 +2373,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn execute_explain_query(&mut self, mode: ExecuteMode) {
-        // 获取当前 SQL 并智能拼接 EXPLAIN（不修改编辑器内容）
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         let WorkspaceTab::Query(query_tab) = tab else { return };
 
@@ -2388,14 +2389,29 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return;
         }
 
-        // 智能拼接：如果已经是 EXPLAIN 开头则不重复添加
-        let lower = sql.to_ascii_lowercase();
-        let explain_sql = if lower.starts_with("explain") {
-            sql
+        let is_mongo = query_tab.connection_id.as_deref()
+            .map(|cid| self.database_kind_for_connection(cid) == DatabaseKind::MongoDb)
+            .unwrap_or(false);
+
+        let explain_sql = if is_mongo {
+            // MongoDB: db.coll.find({}).explain()
+            let lower = sql.to_ascii_lowercase();
+            if lower.contains(".explain()") {
+                sql
+            } else {
+                // 在链式调用末尾（如 .limit(100)）之前插入 .explain()
+                // 简单处理：直接在末尾追加 .explain()
+                format!("{}.explain()", sql.trim_end_matches(';').trim_end())
+            }
         } else {
-            format!("EXPLAIN {}", sql)
+            // SQL: EXPLAIN ...
+            let lower = sql.to_ascii_lowercase();
+            if lower.starts_with("explain") {
+                sql
+            } else {
+                format!("EXPLAIN {}", sql)
+            }
         };
-        // 不改写编辑器内容，直接传入执行逻辑
         self.execute_current_query(ExecuteMode::Explicit(explain_sql));
     }
 
@@ -3369,6 +3385,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         name: node.name.clone(),
                                     },
                                     confirm_on_enter: false,
+                                    is_truncate: false,
                                 }));
                                 ui.close();
                             }
@@ -3414,6 +3431,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         name: node.name.clone(),
                                     },
                                     confirm_on_enter: false,
+                                    is_truncate: false,
                                 }));
                                 ui.close();
                             }
@@ -3514,6 +3532,31 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             }
                         });
                         let is_view = matches!(node.node_type, ExplorerNodeType::View);
+                        // 清空表/集合（视图不支持清空）
+                        if !is_view {
+                            let truncate_label = if kind == DatabaseKind::MongoDb {
+                                tr!("清空集合")
+                            } else {
+                                tr!("清空表")
+                            };
+                            if ui.button(truncate_label).clicked() {
+                                let kind = self.database_kind_for_connection(&node.connection_id);
+                                actions.push(SidebarAction::DdlDelete(DdlPendingDelete {
+                                    title: truncate_label.into(),
+                                    name: node.name.clone(),
+                                    action: DdlAction::TruncateTable {
+                                        connection_id: node.connection_id.clone(),
+                                        database: node.database.clone().unwrap_or_default(),
+                                        schema: node.schema.clone(),
+                                        name: node.name.clone(),
+                                        kind,
+                                    },
+                                    confirm_on_enter: false,
+                                    is_truncate: true,
+                                }));
+                                ui.close();
+                            }
+                        }
                         let del_label = if is_view {
                             tr!("删除视图")
                         } else if kind == DatabaseKind::MongoDb {
@@ -3538,6 +3581,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     kind,
                                 },
                                 confirm_on_enter: false,
+                                is_truncate: false,
                             }));
                             ui.close();
                         }
@@ -3552,7 +3596,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ));
                     ui.close();
                 }
-                if ui.button(tr!("复制")).clicked() {
+                if ui.button(tr!("复制名称")).clicked() {
                     let text = Self::sidebar_node_copy_text(node);
                     self.copy_sidebar_text(ui.ctx(), &text);
                     ui.close();
@@ -8434,12 +8478,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             ui.label(RichText::new("⚠").size(18.0).color(Color32::from_rgb(255, 149, 0)));
                             ui.label(RichText::new(&title).size(15.0).color(palette.title).strong());
                         });
-                        ui.label(RichText::new(tr!("确认要删除「{}」吗？此操作不可撤销。", name)).size(13.0).color(palette.text));
+                        if pending.is_truncate {
+                            ui.label(RichText::new(tr!("确认要清空「{}」吗？此操作不可撤销。", name)).size(13.0).color(palette.text));
+                        } else {
+                            ui.label(RichText::new(tr!("确认要删除「{}」吗？此操作不可撤销。", name)).size(13.0).color(palette.text));
+                        }
                         ui.horizontal(|ui| {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
                                 ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
-                                let delete_btn = egui::Button::new(RichText::new(tr!("删除")).size(13.0).color(Color32::WHITE))
+                                let btn_label = if pending.is_truncate { tr!("清空") } else { tr!("删除") };
+                                let delete_btn = egui::Button::new(RichText::new(btn_label).size(13.0).color(Color32::WHITE))
                                     .fill(Color32::from_rgb(220, 53, 69)).corner_radius(6.0);
                                 if ui.add(delete_btn).clicked() { should_confirm = true; should_close = true; }
                                 let cancel_btn = egui::Button::new(RichText::new(tr!("取消")).size(13.0).color(palette.title))
@@ -8472,6 +8521,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             | DdlAction::RenameSchema { connection_id, .. }
             | DdlAction::DropSchema { connection_id, .. }
             | DdlAction::DropTable { connection_id, .. }
+            | DdlAction::TruncateTable { connection_id, .. }
             | DdlAction::RenameTable { connection_id, .. } => connection_id.clone(),
         };
         let services = self.services.clone();
@@ -8509,6 +8559,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         connection_id,
                         database: db,
                         sql: qualified,
+                    }).await.map(|_| ())
+                }
+                DdlAction::TruncateTable { connection_id, database, schema, name, kind } => {
+                    let sql = match kind {
+                        core_domain::DatabaseKind::Postgres => {
+                            match schema {
+                                Some(s) => format!("TRUNCATE TABLE \"{}\".\"{}\"", s.replace('"', "\"\""), name.replace('"', "\"\"")),
+                                None => format!("TRUNCATE TABLE \"{}\"", name.replace('"', "\"\"")),
+                            }
+                        }
+                        core_domain::DatabaseKind::MongoDb => {
+                            format!("db.{}.deleteMany({{}})", name)
+                        }
+                        _ => format!("TRUNCATE TABLE `{}`", name.replace('`', "``")),
+                    };
+                    let db = Some(database);
+                    services.execute_sql(core_domain::QueryExecution {
+                        connection_id,
+                        database: db,
+                        sql,
                     }).await.map(|_| ())
                 }
                 DdlAction::RenameTable { .. } => unreachable!("RenameTable is handled by commit_tree_rename"),
@@ -8577,6 +8647,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.children_by_node.remove(&parent_id);
                 self.children_by_node.remove(&format!("pg-db:{}:{}", connection_id, database));
                 self.reload_node_children(&conn_id, &parent_id);
+            }
+            DdlAction::TruncateTable { .. } => {
+                // 清空不影响表结构，无需刷新侧边栏树
             }
         }
     }
