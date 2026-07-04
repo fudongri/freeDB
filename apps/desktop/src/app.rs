@@ -438,6 +438,7 @@ struct TableSearchState {
     scroll_to_row: Option<usize>,
     request_focus: bool,
     needs_recompute: bool,
+    use_regex: bool,
 }
 
 #[derive(Clone, Default)]
@@ -468,7 +469,7 @@ impl EditorFindState {
         }
 
         if self.use_regex {
-            match Regex::new(&self.find_text) {
+            match regex::RegexBuilder::new(&self.find_text).multi_line(true).build() {
                 Ok(re) => {
                     for m in re.find_iter(sql) {
                         self.matches.push((m.start(), m.end()));
@@ -10731,7 +10732,7 @@ fn render_result_table(
     // Recompute search matches when needed
     if search.open && search.needs_recompute {
         search.needs_recompute = false;
-        search.matches = compute_search_matches(&search.committed_keyword, &result.columns, &result.rows);
+        search.matches = compute_search_matches(&search.committed_keyword, &result.columns, &result.rows, search.use_regex);
         if !search.matches.is_empty() {
             search.scroll_to_row = Some(search.matches[0].0);
         }
@@ -11173,7 +11174,7 @@ fn render_editable_result_table(
     // 搜索匹配重算
     if search.open && search.needs_recompute {
         search.needs_recompute = false;
-        search.matches = compute_search_matches(&search.committed_keyword, &result.columns, &result.rows);
+        search.matches = compute_search_matches(&search.committed_keyword, &result.columns, &result.rows, search.use_regex);
         if !search.matches.is_empty() {
             search.scroll_to_row = Some(search.matches[0].0);
         }
@@ -11679,7 +11680,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
     if tab.search.open && tab.search.needs_recompute {
         tab.search.needs_recompute = false;
         let columns: Vec<String> = preview.columns.clone();
-        tab.search.matches = compute_search_matches(&tab.search.committed_keyword, &columns, &preview.rows);
+        tab.search.matches = compute_search_matches(&tab.search.committed_keyword, &columns, &preview.rows, tab.search.use_regex);
         if !tab.search.matches.is_empty() {
             tab.search.scroll_to_row = Some(tab.search.matches[0].0);
         }
@@ -15227,10 +15228,19 @@ fn compute_search_matches(
     keyword: &str,
     columns: &[String],
     rows: &[BTreeMap<String, QueryCellValue>],
+    use_regex: bool,
 ) -> Vec<(usize, usize)> {
     if keyword.is_empty() {
         return Vec::new();
     }
+    let re = if use_regex {
+        match Regex::new(keyword) {
+            Ok(r) => Some(r),
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        None
+    };
     let lower = keyword.to_lowercase();
     let mut matches = Vec::new();
     for (row_idx, row) in rows.iter().enumerate() {
@@ -15240,7 +15250,12 @@ fn compute_search_matches(
                 Some(QueryCellValue::Null) => "(NULL)".to_string(),
                 None => continue,
             };
-            if text.to_lowercase().contains(&lower) {
+            let matched = if let Some(ref re) = re {
+                re.is_match(&text)
+            } else {
+                text.to_lowercase().contains(&lower)
+            };
+            if matched {
                 matches.push((row_idx, col_idx));
             }
         }
@@ -15252,8 +15267,9 @@ fn compute_search_matches_preview(
     keyword: &str,
     columns: &[String],
     rows: &[BTreeMap<String, QueryCellValue>],
+    use_regex: bool,
 ) -> Vec<(usize, usize)> {
-    compute_search_matches(keyword, columns, rows)
+    compute_search_matches(keyword, columns, rows, use_regex)
 }
 
 /// 将字节范围转换为 egui CCursorRange，用于滚动到查找匹配位置
@@ -15570,6 +15586,16 @@ fn render_table_search_bar(
                             .size(12.0)
                             .color(palette.weak_text),
                     );
+                }
+                let regex_label = if search.use_regex { ".*" } else { ".*" };
+                let regex_btn = egui::Button::new(
+                    egui::RichText::new(regex_label).size(11.0),
+                )
+                .fill(if search.use_regex { palette.selection_bg } else { egui::Color32::TRANSPARENT })
+                .min_size(egui::vec2(24.0, 20.0));
+                if ui.add(regex_btn).clicked() {
+                    search.use_regex = !search.use_regex;
+                    search.needs_recompute = true;
                 }
                 ui.add_space(4.0);
                 // Prev button
