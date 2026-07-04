@@ -10610,23 +10610,32 @@ fn render_result_table(
                             ui.painter().rect_filled(clip, 0.0, palette.selection_bg.gamma_multiply(0.12));
                             // 幽灵列表头名称（放在表头行顶部）
                             let header_text_color = palette.selection_text;
-                            ui.painter().text(
+                            let text_w = (w - 16.0).max(0.0);
+                            paint_text_truncated(
+                                ui,
                                 egui::pos2(left + 8.0, ht + 8.0),
-                                egui::Align2::LEFT_TOP,
                                 &display_columns[drag.source_index],
                                 egui::FontId::proportional(12.5),
                                 header_text_color,
+                                text_w,
                             );
                             // 数据文本
                             let fid = egui::FontId::monospace(12.0);
                             let tc = palette.text;
                             let cn = &display_columns[drag.source_index];
+                            let data_w = (w - 8.0).max(0.0);
                             for (i, row) in result.rows.iter().enumerate() {
                                 let y = hb + row_h * (i as f32) + 8.0;
                                 if y > bb { break; }
                                 if let Some(cell) = row.get(cn) {
-                                    ui.painter().text(egui::pos2(left + 4.0, y), egui::Align2::LEFT_TOP,
-                                        query_cell_display_text(cell, false).text, fid.clone(), tc);
+                                    paint_text_truncated(
+                                        ui,
+                                        egui::pos2(left + 4.0, y),
+                                        &query_cell_display_text(cell, false).text,
+                                        fid.clone(),
+                                        tc,
+                                        data_w,
+                                    );
                                 }
                             }
                         }
@@ -11135,22 +11144,31 @@ fn render_editable_result_table(
                             );
                             ui.painter().rect_filled(clip, 0.0, palette.selection_bg.gamma_multiply(0.12));
                             let header_text_color = palette.selection_text;
-                            ui.painter().text(
+                            let text_w = (w - 16.0).max(0.0);
+                            paint_text_truncated(
+                                ui,
                                 egui::pos2(left + 8.0, ht + 8.0),
-                                egui::Align2::LEFT_TOP,
                                 &display_columns[drag.source_index],
                                 egui::FontId::proportional(12.5),
                                 header_text_color,
+                                text_w,
                             );
                             let fid = egui::FontId::monospace(12.0);
                             let tc = palette.text;
                             let cn = &display_columns[drag.source_index];
+                            let data_w = (w - 8.0).max(0.0);
                             for (i, row) in result.rows.iter().enumerate() {
                                 let y = hb + row_h * (i as f32) + 8.0;
                                 if y > bb { break; }
                                 if let Some(cell) = row.get(cn) {
-                                    ui.painter().text(egui::pos2(left + 4.0, y), egui::Align2::LEFT_TOP,
-                                        query_cell_display_text(cell, false).text, fid.clone(), tc);
+                                    paint_text_truncated(
+                                        ui,
+                                        egui::pos2(left + 4.0, y),
+                                        &query_cell_display_text(cell, false).text,
+                                        fid.clone(),
+                                        tc,
+                                        data_w,
+                                    );
                                 }
                             }
                         }
@@ -12014,24 +12032,33 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             ui.painter().rect_filled(clip, 0.0, palette.selection_bg.gamma_multiply(0.12));
                             // 幽灵列表头名称（放在表头行顶部）
                             let header_text_color = palette.selection_text;
-                            ui.painter().text(
+                            let text_w = (w - 16.0).max(0.0);
+                            paint_text_truncated(
+                                ui,
                                 egui::pos2(left + 8.0, ht + 8.0),
-                                egui::Align2::LEFT_TOP,
                                 &columns[drag.source_index],
                                 egui::FontId::proportional(12.5),
                                 header_text_color,
+                                text_w,
                             );
                             // 数据文本
                             let cn = &columns[drag.source_index];
                             let fid = egui::FontId::monospace(12.0);
                             let tc = palette.text;
+                            let data_w = (w - 8.0).max(0.0);
                             if let Some(preview) = tab.preview.as_ref() {
                                 for (i, row) in preview.rows.iter().enumerate() {
                                     let y = hb + row_h * (i as f32) + 8.0;
                                     if y > bb { break; }
                                     if let Some(cell) = row.get(cn) {
-                                        ui.painter().text(egui::pos2(left + 4.0, y), egui::Align2::LEFT_TOP,
-                                            query_cell_display_text(cell, false).text, fid.clone(), tc);
+                                        paint_text_truncated(
+                                            ui,
+                                            egui::pos2(left + 4.0, y),
+                                            &query_cell_display_text(cell, false).text,
+                                            fid.clone(),
+                                            tc,
+                                            data_w,
+                                        );
                                     }
                                 }
                             }
@@ -17530,6 +17557,28 @@ fn truncate_ui_label_by_width(label: &str, max_width: usize) -> String {
     }
     truncated.push('…');
     truncated
+}
+
+/// 绘制截断文本（超宽时显示省略号），用于幽灵列等需要限制宽度的场景
+fn paint_text_truncated(
+    ui: &egui::Ui,
+    pos: egui::Pos2,
+    text: &str,
+    font_id: egui::FontId,
+    color: egui::Color32,
+    available_width: f32,
+) {
+    if available_width <= 0.0 || text.is_empty() {
+        return;
+    }
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = available_width;
+    job.wrap.max_rows = 1;
+    job.wrap.overflow_character = Some('…');
+    job.first_row_min_height = font_id.size;
+    job.append(text, 0.0, egui::TextFormat { font_id, color, ..Default::default() });
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(pos, galley, color);
 }
 
 fn connection_kind_badge(kind: &DatabaseKind) -> RichText {
