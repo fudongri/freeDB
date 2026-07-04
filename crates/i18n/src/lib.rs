@@ -659,6 +659,7 @@ fn en(key: &'static str) -> &'static str {
         "开始生成" => "Start",
         "行" => "rows",
         "跳过: {} (自增)" => "Skipped: {} (auto-increment)",
+        "表定义未加载" => "Table definition not loaded",
 
         _ => key,
     }

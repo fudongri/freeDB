@@ -2144,6 +2144,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         columns: &[ColumnDefinition],
         database_kind: DatabaseKind,
         row_index: usize,
+        skip_cols: &std::collections::HashSet<String>,
     ) -> (Vec<String>, Vec<String>) {
         let mut col_names = Vec::new();
         let mut values = Vec::new();
@@ -2151,6 +2152,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         for col in columns {
             // 跳过自增列
             if col.auto_increment {
+                continue;
+            }
+            // 跳过本批应使用 DEFAULT 的列
+            if skip_cols.contains(&col.name) {
                 continue;
             }
             // nullable 列，10% 概率设为 NULL
@@ -2162,14 +2167,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
             col_names.push(col.name.clone());
             let dt = col.data_type.to_lowercase();
-            let value = Self::generate_value_by_type(&dt, row_index, &col.name, database_kind);
+            let value = Self::generate_value_by_type(&dt, row_index, &col.name);
             values.push(value);
         }
 
         (col_names, values)
     }
 
-    fn generate_value_by_type(data_type: &str, row_index: usize, col_name: &str, _db_kind: DatabaseKind) -> String {
+    fn generate_value_by_type(data_type: &str, row_index: usize, col_name: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -2193,13 +2198,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         // 日期类型
         if data_type == "date" {
             let days = (seed % 365) as u32;
-            return format!("'2025-{:02}-{:02}'", (days % 12) + 1, (days % 28) + 1);
+            return format!("'2026-{:02}-{:02}'", (days % 12) + 1, (days % 28) + 1);
         }
         // 日期时间类型
         if data_type.contains("datetime") || data_type.contains("timestamp") {
             let days = (seed % 365) as u32;
             let secs = (seed % 86400) as u32;
-            return format!("'2025-{:02}-{:02} {:02}:{:02}:{:02}'",
+            return format!("'2026-{:02}-{:02} {:02}:{:02}:{:02}'",
                 (days % 12) + 1, (days % 28) + 1,
                 secs / 3600, (secs % 3600) / 60, secs % 60);
         }
@@ -2234,11 +2239,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         start_index: usize,
         count: usize,
     ) -> String {
+        // 本批跳过的 default_value 列集合：每列独立 30% 概率，整批一致
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut skip_cols = std::collections::HashSet::new();
+        for col in columns {
+            if col.default_value.is_some() {
+                let mut h = DefaultHasher::new();
+                col.name.hash(&mut h);
+                start_index.hash(&mut h);
+                if h.finish() % 100 < 30 {
+                    skip_cols.insert(col.name.clone());
+                }
+            }
+        }
+
         let mut all_rows = Vec::new();
         let mut common_cols: Option<Vec<String>> = None;
 
         for i in 0..count {
-            let (col_names, values) = Self::generate_test_row(columns, database_kind, start_index + i);
+            let (col_names, values) = Self::generate_test_row(columns, database_kind, start_index + i, &skip_cols);
             if common_cols.is_none() {
                 common_cols = Some(col_names.clone());
             }
@@ -2246,7 +2266,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         let cols = common_cols.unwrap_or_default();
-        let col_list: Vec<String> = cols.iter().map(|c| Self::quote_identifier(c, database_kind)).collect();
+        let col_list: Vec<String> = cols.iter().map(|c| quote_identifier(database_kind, c)).collect();
         let col_list = col_list.join(", ");
         let table_name = Self::format_table_name(table, database_kind);
 
@@ -2258,28 +2278,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         format!("INSERT INTO {} ({}) VALUES {}", table_name, col_list, values_str.join(", "))
     }
 
-    fn quote_identifier(name: &str, db_kind: DatabaseKind) -> String {
-        match db_kind {
-            DatabaseKind::MySql => format!("`{}`", name.replace('`', "``")),
-            DatabaseKind::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
-            DatabaseKind::MongoDb => name.to_string(),
-        }
-    }
-
     fn format_table_name(table: &TableRef, db_kind: DatabaseKind) -> String {
         match db_kind {
             DatabaseKind::MySql => {
                 if let Some(ref db) = table.database {
-                    format!("{}.{}", Self::quote_identifier(db, db_kind), Self::quote_identifier(&table.table, db_kind))
+                    format!("{}.{}", quote_identifier(db_kind, db), quote_identifier(db_kind, &table.table))
                 } else {
-                    Self::quote_identifier(&table.table, db_kind)
+                    quote_identifier(db_kind, &table.table)
                 }
             }
             DatabaseKind::Postgres => {
                 if let Some(ref schema) = table.schema {
-                    format!("{}.{}", Self::quote_identifier(schema, db_kind), Self::quote_identifier(&table.table, db_kind))
+                    format!("{}.{}", quote_identifier(db_kind, schema), quote_identifier(db_kind, &table.table))
                 } else {
-                    Self::quote_identifier(&table.table, db_kind)
+                    quote_identifier(db_kind, &table.table)
                 }
             }
             DatabaseKind::MongoDb => table.table.clone(),
@@ -2291,7 +2303,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         services: &AppServices,
         table: &TableRef,
     ) -> Vec<(String, String)> {
-        let cmd = format!("db.{}.find().limit(5)", table.table);
+        let cmd = format!("db.{}.find().limit(10)", table.table);
         let execution = QueryExecution {
             connection_id: table.connection_id.clone(),
             database: table.database.clone(),
