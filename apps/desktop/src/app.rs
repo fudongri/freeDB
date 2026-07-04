@@ -316,6 +316,9 @@ struct QueryDefinitionLoadResult {
     tab_id: String,
     result_index: usize,
     definition: Result<TableDefinition, String>,
+    table_ref: TableRef,
+    db_kind: DatabaseKind,
+    source_sql: String,
 }
 
 /// 延迟触发查询编辑上下文初始化的参数
@@ -3869,7 +3872,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     table: t_name,
                     is_view: false,
                 };
-                // 创建编辑上下文
+                // 异步加载表定义
+                let tr_clone = table_ref.clone();
+                let sk_clone = source_sql.clone();
+                // 创建编辑上下文（手动启用时立即显示）
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.iter_mut().find(|t| {
                     matches!(t, WorkspaceTab::Query(q) if q.id == tab_id)
                 }) {
@@ -3884,7 +3890,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         deferred_save_action: false,
                     });
                 }
-                // 异步加载表定义
                 let services = self.services.clone();
                 let handle = self.runtime.handle().clone();
                 let (sender, receiver) = mpsc::channel();
@@ -3898,6 +3903,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         tab_id,
                         result_index,
                         definition,
+                        table_ref: tr_clone,
+                        db_kind,
+                        source_sql: sk_clone,
                     });
                 });
             }
@@ -4498,24 +4506,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return;
         };
 
-        // 创建编辑上下文（definition 暂为 None，异步加载中）
-        let edit_ctx = QueryEditContext {
-            table_ref: table_ref.clone(),
-            database_kind: db_kind,
-            definition: None,
-            source_sql,
-            editing_cell: None,
-            pending_cell_changes: BTreeMap::new(),
-            committed_edit_this_frame: false,
-            deferred_save_action: false,
-        };
-        if let Some(WorkspaceTab::Query(tab)) = self
-            .tabs
-            .iter_mut()
-            .find(|t| matches!(t, WorkspaceTab::Query(q) if q.id == trigger.tab_id))
-        {
-            tab.edit_context = Some(edit_ctx);
-        }
+        // 不立即创建 edit_context（等定义加载完成后在 poll_query_definition 中创建）
+        // 这样旧的 edit_context 保持可见，避免工具栏闪烁导致表格跳动
 
         // 异步加载表定义
         let services = self.services.clone();
@@ -4524,6 +4516,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.pending_query_definition = Some(receiver);
         let tab_id = trigger.tab_id;
         let result_index = trigger.result_index;
+        let tr = table_ref.clone();
+        let sk = source_sql.clone();
         handle.spawn(async move {
             let definition = services
                 .load_table_definition(&table_ref)
@@ -4533,6 +4527,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 tab_id,
                 result_index,
                 definition,
+                table_ref: tr,
+                db_kind,
+                source_sql: sk,
             });
         });
     }
@@ -4599,15 +4596,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         matches!(t, WorkspaceTab::Query(q) if q.id == message.tab_id)
                     })
                 {
-                    if let Some(ref mut ctx) = tab.edit_context {
-                        match message.definition {
-                            Ok(def) => {
-                                ctx.definition = Some(def);
-                            }
-                            Err(_) => {
-                                // 表定义加载失败，禁用编辑
-                                tab.edit_context = None;
-                            }
+                    match message.definition {
+                        Ok(def) => {
+                            // 定义加载成功，创建/替换 edit_context
+                            tab.edit_context = Some(QueryEditContext {
+                                table_ref: message.table_ref,
+                                database_kind: message.db_kind,
+                                definition: Some(def),
+                                source_sql: message.source_sql,
+                                editing_cell: None,
+                                pending_cell_changes: BTreeMap::new(),
+                                committed_edit_this_frame: false,
+                                deferred_save_action: false,
+                            });
+                        }
+                        Err(_) => {
+                            // 表定义加载失败，清除编辑上下文
+                            tab.edit_context = None;
                         }
                     }
                 }
@@ -5465,7 +5470,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 let is_selected = index == tab.selected_result_index;
                                                 if segment_button(ui, &label, is_selected).clicked() {
                                                     tab.selected_result_index = index;
-                                                    tab.edit_context = None; // 切换时清除编辑上下文
+                                                    // 不立即清除 edit_context，等新分析完成后再替换，避免布局跳动
                                                     if let Some(mut selected) =
                                                         tab.multi_results.get(index).cloned()
                                                     {
@@ -5480,9 +5485,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 }
                                             }
                                         });
-                                        ui.add_space(8.0);
-                                        ui.separator();
-                                        ui.add_space(8.0);
+                                        ui.add_space(4.0);
                                     }
                                     if let Some(result) = &mut tab.result {
                                         // 编辑工具栏
@@ -5554,7 +5557,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 );
                                             } else {
                                                 let _ = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
-                                                ui.label(RichText::new(tr!("正在加载表结构...")).size(11.0).color(chrome.weak_text));
                                             }
                                         } else {
                                             // 无编辑上下文：显示只读表格
@@ -5609,6 +5611,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 let _ = services.clear_query_history(conn_id);
                                                             }
                                                             tab.history.clear();
+                                                        }
+                                                        if toolbar_button(ui, tr!("刷新"), ToolbarButtonKind::Subtle).clicked() {
+                                                            if let Some(conn_id) = &tab.connection_id {
+                                                                let (history, saved_queries, all_saved_queries) =
+                                                                    load_query_library(&services, conn_id);
+                                                                tab.history = history;
+                                                                tab.saved_queries = saved_queries;
+                                                                tab.all_saved_queries = all_saved_queries;
+                                                            }
                                                         }
                                                     });
                                                 });
