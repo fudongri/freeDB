@@ -3115,16 +3115,29 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ui.add_sized([18.0, 18.0], egui::Label::new(""));
             }
 
-            ui.add_sized(
-                [18.0, 18.0],
-                egui::Label::new(
-                    RichText::new(node_icon_symbol(node.node_type)).size(18.0).color(if selected {
-                        palette.selection_text
-                    } else {
-                        palette.weak_text
-                    }),
-                ),
-            );
+            if node.node_type == ExplorerNodeType::Database {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                let color = if selected {
+                    palette.selection_text
+                } else {
+                    palette.weak_text
+                };
+                draw_database_cylinder(ui.painter(), rect, color);
+            } else {
+                ui.add_sized(
+                    [18.0, 18.0],
+                    egui::Label::new(
+                        RichText::new(node_icon_symbol(node.node_type))
+                            .size(18.0)
+                            .color(if selected {
+                                palette.selection_text
+                            } else {
+                                palette.weak_text
+                            }),
+                    ),
+                );
+            }
             let is_node_loading = self.loading_nodes.contains(&node.id);
             let spinner_width = if is_node_loading { 20.0 } else { 0.0 };
             let is_renaming = self.tree_rename.as_ref().map_or(false, |r| r.node_id == node.id);
@@ -17592,11 +17605,45 @@ fn connection_kind_badge(kind: &DatabaseKind) -> RichText {
 fn node_icon_symbol(node_type: ExplorerNodeType) -> &'static str {
     match node_type {
         ExplorerNodeType::Connection => "◎",
-        ExplorerNodeType::Database => "◫",
+        ExplorerNodeType::Database => "□", // 实际渲染使用 draw_database_cylinder
         ExplorerNodeType::Schema => "◇",
         ExplorerNodeType::Table => "▦",
         ExplorerNodeType::View => "◪",
     }
+}
+
+fn draw_database_cylinder(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let cx = rect.center().x;
+    let rx = rect.width() * 0.22;
+    let ry = rect.height() * 0.08;
+    let top_y = rect.top() + ry + 4.0;
+    let bot_y = rect.bottom() - ry - 4.0;
+
+    let n = 20;
+    let step = std::f32::consts::TAU / n as f32;
+    let stroke = Stroke::new(1.0, color);
+
+    // 顶部完整椭圆
+    let top_arc: Vec<egui::Pos2> = (0..=n)
+        .map(|i| {
+            let a = step * i as f32 - std::f32::consts::FRAC_PI_2;
+            egui::pos2(cx + rx * a.cos(), top_y + ry * a.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(top_arc, stroke));
+
+    // 侧面线
+    painter.line_segment([egui::pos2(cx - rx, top_y), egui::pos2(cx - rx, bot_y)], stroke);
+    painter.line_segment([egui::pos2(cx + rx, top_y), egui::pos2(cx + rx, bot_y)], stroke);
+
+    // 底部半椭圆
+    let bot_arc: Vec<egui::Pos2> = (0..=n)
+        .map(|i| {
+            let a = step * i as f32 + std::f32::consts::FRAC_PI_2;
+            egui::pos2(cx + rx * a.cos(), bot_y + ry * a.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(bot_arc, stroke));
 }
 
 fn tree_row_button(
