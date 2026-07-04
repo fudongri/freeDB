@@ -353,6 +353,8 @@ struct TableColumnDragState {
     ghost_x: f32,
     ghost_x_target: f32,
     just_started: bool,
+    /// 边缘自动滚动速度（正=右，负=左），用于 lerp 平滑
+    scroll_speed_x: f32,
 }
 
 impl TableColumnDragState {
@@ -365,6 +367,7 @@ impl TableColumnDragState {
             ghost_x: 0.0,
             ghost_x_target: 0.0,
             just_started: true,
+            scroll_speed_x: 0.0,
         }
     }
 }
@@ -9021,7 +9024,7 @@ fn render_result_table(
                 ui.add_space(2.0);
             }
             let scroll_target_row = search.scroll_to_row.take();
-            egui::ScrollArea::both()
+            let mut sa_result = egui::ScrollArea::both()
                 .id_salt(format!(
                     "result-grid-{}-{}",
                     result.columns.len(),
@@ -9029,6 +9032,8 @@ fn render_result_table(
                 ))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // 保存 clip_rect 供后续边缘检测使用
+                    let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     let mut selected_sort = None;
                     let ctx = ui.ctx().clone();
@@ -9103,7 +9108,7 @@ fn render_result_table(
                                 });
                             }
                         });
-                    // 拖拽中更新 target_index（不在此处绘制，等 body 完成后绘制）
+                    // 拖拽中更新 target_index + 边缘自动滚动（不在此处绘制，等 body 完成后绘制）
                     if let Some(drag) = column_drag.as_mut() {
                         if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
                             let mut new_target = drag.source_index;
@@ -9137,6 +9142,24 @@ fn render_result_table(
                                 let src_center = header_cell_rects[drag.source_index].center().x;
                                 drag.ghost_x_target = pointer.x - src_center;
                             }
+                        // 边缘自动滚动：指针接近左右边缘时产生滚动速度
+                        let edge_width = 60.0;
+                        let speed_max = 400.0; // px/s
+                        // 使用上一帧的 clip_rect（保存于 scroll_clip_rect，是 ScrollArea 可见区域）
+                        let left_edge = scroll_clip_rect.left() + edge_width;
+                        let right_edge = (scroll_clip_rect.right() - edge_width).max(left_edge);
+                        if pointer.x < left_edge {
+                            let t = ((left_edge - pointer.x) / edge_width).clamp(0.0, 1.0);
+                            drag.scroll_speed_x = -t * speed_max;
+                        } else if pointer.x > right_edge {
+                            let t = ((pointer.x - right_edge) / edge_width).clamp(0.0, 1.0);
+                            drag.scroll_speed_x = t * speed_max;
+                        } else {
+                            drag.scroll_speed_x = 0.0;
+                        }
+                        ctx.request_repaint();
+                        } else {
+                            drag.scroll_speed_x = 0.0;
                         }
                     }
                     table_header
@@ -9303,6 +9326,17 @@ fn render_result_table(
                         sort_click_result = Some(sort_request);
                     }
                 });
+            // 边缘自动滚动：show() 结束后直接修改 ScrollArea 的内存 state
+            // scroll_with_delta 不可用——会被 TableBuilder 内部 ScrollArea::new([false,false]) 吞掉
+            {
+                let scroll_speed = column_drag.as_ref().map_or(0.0, |d| d.scroll_speed_x);
+                if scroll_speed != 0.0 {
+                    let dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
+                    ui.ctx().request_repaint();
+                    sa_result.state.offset[0] += scroll_speed * dt;
+                    sa_result.state.store(ui.ctx(), sa_result.id);
+                }
+            }
         });
     if let Some((column, choice)) = sort_click_result {
         match choice {
@@ -9418,10 +9452,12 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                 scroll_target_row = Some(row_count);
                 tab.scroll_to_insert_row = false;
             }
-            egui::ScrollArea::both()
+            let mut sa_editable = egui::ScrollArea::both()
                 .id_salt(format!("editable-table-grid-{}", tab.title))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // 保存 clip_rect 供后续边缘检测使用
+                    let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     let ctx = ui.ctx().clone();
                     let modifiers = ctx.input(|input| input.modifiers);
@@ -9533,12 +9569,28 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 let src_center = header_cell_rects[drag.source_index].center().x;
                                 drag.ghost_x_target = pointer.x - src_center;
                             }
+                            // 边缘自动滚动：指针接近左右边缘时产生滚动速度
+                            let edge_width = 60.0;
+                            let speed_max = 400.0; // px/s
+                            let left_edge = scroll_clip_rect.left() + edge_width;
+                            let right_edge = (scroll_clip_rect.right() - edge_width).max(left_edge);
+                            if pointer.x < left_edge {
+                                let t = ((left_edge - pointer.x) / edge_width).clamp(0.0, 1.0);
+                                drag.scroll_speed_x = -t * speed_max;
+                            } else if pointer.x > right_edge {
+                                let t = ((pointer.x - right_edge) / edge_width).clamp(0.0, 1.0);
+                                drag.scroll_speed_x = t * speed_max;
+                            } else {
+                                drag.scroll_speed_x = 0.0;
+                            }
+                            ctx.request_repaint();
+                        } else {
+                            drag.scroll_speed_x = 0.0;
                         }
                     }
                     table_header
                         .body(|mut body| {
                                 // Sync PendingInsert editing cell value to pending_row each frame
-                                // (keeps the editor open while updating the backing data)
                                 if let Some(edit) = tab.editing_cell.as_ref() {
                                     if matches!(edit.target, TableEditTarget::PendingInsert) {
                                         if let Some(pending_row) = tab.pending_insert_row.as_mut() {
@@ -10173,6 +10225,16 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                         }
                     }
                 });
+            // 边缘自动滚动：show() 结束后直接修改 ScrollArea 的内存 state
+            {
+                let scroll_speed = tab.column_drag.as_ref().map_or(0.0, |d| d.scroll_speed_x);
+                if scroll_speed != 0.0 {
+                    let dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
+                    ui.ctx().request_repaint();
+                    sa_editable.state.offset[0] += scroll_speed * dt;
+                    sa_editable.state.store(ui.ctx(), sa_editable.id);
+                }
+            }
         });
 
     if let Some((column, choice)) = selected_sort {
