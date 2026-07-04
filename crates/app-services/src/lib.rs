@@ -295,6 +295,46 @@ impl AppServices {
         results.into_iter().map(|r| r.map_err(into_anyhow)).collect()
     }
 
+    /// 逐条执行 SQL，每条完成即通过回调返回结果（用于实时推送消息）
+    pub async fn execute_sql_batch_streaming(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        statements: Vec<String>,
+        mut on_result: impl FnMut(String, Result<QueryResult>) -> bool,
+    ) {
+        let profile = match self.require_connection(connection_id) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = e.to_string();
+                for stmt in statements { if !on_result(stmt, Err(anyhow::anyhow!("{}", msg))) { break; } }
+                return;
+            }
+        };
+        let password = match self.require_saved_password(connection_id) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = e.to_string();
+                for stmt in statements { if !on_result(stmt, Err(anyhow::anyhow!("{}", msg))) { break; } }
+                return;
+            }
+        };
+        let history_store = self.history_store.clone();
+        let conn_id = connection_id.to_string();
+        self.session_manager
+            .execute_sql_batch_streaming(&profile, &password, connection_id, database, statements, move |stmt, result| {
+                let (elapsed_ms, success) = match &result {
+                    Ok(r) => (r.elapsed_ms, true),
+                    Err(_) => (0, false),
+                };
+                if let Err(error) = history_store.append(&conn_id, &stmt, elapsed_ms, success) {
+                    warn!(connection_id = %conn_id, error = %error, "failed to persist query history");
+                }
+                on_result(stmt, result.map_err(into_anyhow))
+            })
+            .await;
+    }
+
     pub async fn apply_table_changes(&self, changes: TableChangeSet) -> Result<QueryResult> {
         let profile = self.require_connection(&changes.table.connection_id)?;
         let password = self.require_saved_password(&changes.table.connection_id)?;

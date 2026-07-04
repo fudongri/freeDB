@@ -1326,15 +1326,19 @@ impl DesktopApp {
                                         }
                                         query_tab.multi_results.push(result.clone());
                                         query_tab.multi_statements.push(message.statement.clone());
-                                        let mut display_result = result;
-                                        apply_saved_table_sort(&mut display_result, &mut query_tab.result_sort);
-                                        query_tab.result = Some(display_result);
-                                        query_tab.selected_result_index = query_tab.multi_results.len() - 1;
-                                        query_tab.active_bottom_tab = QueryBottomTab::Results;
+                                        if query_tab.multi_results.len() == 1 {
+                                            let mut display_result = result;
+                                            apply_saved_table_sort(&mut display_result, &mut query_tab.result_sort);
+                                            query_tab.result = Some(display_result);
+                                            query_tab.selected_result_index = 0;
+                                        }
                                         query_tab.bottom_panel_collapsed = false;
                                     }
                                     if message.is_last {
                                         self.status_message = tr!("SQL 执行完成").into();
+                                        if !query_tab.multi_results.is_empty() {
+                                            query_tab.active_bottom_tab = QueryBottomTab::Results;
+                                        }
                                         query_tab.abort_sender = None;
                                         keep_receiver = false;
                                         // 准备编辑上下文触发器
@@ -2282,39 +2286,44 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         handle.spawn(async move {
             let mut abort_rx = abort_rx;
             let total = statements.len();
-            // 批量执行：所有语句在同一连接上运行，保持用户变量持久性
-            let results = services
-                .execute_sql_batch(&connection_id, database.as_deref(), statements.clone())
+            let mut idx: usize = 0;
+            // 逐条执行：每条完成即推送结果，保持用户变量持久性
+            services
+                .execute_sql_batch_streaming(
+                    &connection_id,
+                    database.as_deref(),
+                    statements.clone(),
+                    |statement, result| {
+                        // 检查是否被取消
+                        if abort_rx.try_recv().is_ok() {
+                            let _ = sender.send(QueryExecutionLoadResult {
+                                tab_id: tab_id.clone(),
+                                connection_id: connection_id.clone(),
+                                sql: statement.clone(),
+                                statement: statement.clone(),
+                                result: Err(tr!("已取消").to_string()),
+                                is_last: true,
+                                is_explain: false,
+                            });
+                            return false;
+                        }
+                        let result = result.map_err(|e| e.to_string());
+                        let is_err = result.is_err();
+                        let is_last = idx == total - 1 || is_err;
+                        let _ = sender.send(QueryExecutionLoadResult {
+                            tab_id: tab_id.clone(),
+                            connection_id: connection_id.clone(),
+                            sql: statement.clone(),
+                            statement: statement.clone(),
+                            result,
+                            is_last,
+                            is_explain: explain_flag,
+                        });
+                        idx += 1;
+                        !is_err
+                    },
+                )
                 .await;
-            for (i, (statement, result)) in statements.iter().zip(results.into_iter()).enumerate() {
-                // 检查是否被取消
-                if abort_rx.try_recv().is_ok() {
-                    let _ = sender.send(QueryExecutionLoadResult {
-                        tab_id: tab_id.clone(),
-                        connection_id: connection_id.clone(),
-                        sql: statement.clone(),
-                        statement: statement.clone(),
-                        result: Err(tr!("已取消").to_string()),
-                        is_last: true,
-                        is_explain: false,
-                    });
-                    break;
-                }
-                let result = result.map_err(|e| e.to_string());
-                let is_err = result.is_err();
-                let _ = sender.send(QueryExecutionLoadResult {
-                    tab_id: tab_id.clone(),
-                    connection_id: connection_id.clone(),
-                    sql: statement.clone(),
-                    statement: statement.clone(),
-                    result,
-                    is_last: i == total - 1 || is_err,
-                    is_explain: explain_flag,
-                });
-                if is_err {
-                    break;
-                }
-            }
         });
     }
 

@@ -249,6 +249,49 @@ impl SessionManager {
         results
     }
 
+    /// 逐条执行 SQL，每条完成即通过回调返回结果（用于实时推送消息）
+    pub async fn execute_sql_batch_streaming(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        connection_id: &str,
+        database: Option<&str>,
+        statements: Vec<String>,
+        mut on_result: impl FnMut(String, AppResult<QueryResult>) -> bool,
+    ) {
+        let db_owned = database.or(profile.default_database.as_deref());
+        let db: Option<&str> = db_owned;
+        let handle = match self.pool.acquire(profile, password, db).await {
+            Ok(h) => h,
+            Err(e) => {
+                for stmt in statements {
+                    if !on_result(stmt, Err(AppError::Connection(e.to_string()))) { break; }
+                }
+                return;
+            }
+        };
+        let mut guard = handle.lock().await;
+        let h: &mut driver_api::ConnectionHandle = &mut *guard;
+        let d: &dyn DatabaseDriver = if matches!(profile.kind, DatabaseKind::Postgres) {
+            &self.pool.postgres
+        } else {
+            &self.pool.mysql
+        };
+        for stmt in statements {
+            let exec = QueryExecution {
+                connection_id: connection_id.to_string(),
+                database: db.map(|s| s.to_string()),
+                sql: stmt.clone(),
+            };
+            let result = d.execute_sql(h, exec).await;
+            let is_err = result.is_err();
+            let cont = on_result(stmt, result);
+            if is_err || !cont { break; }
+        }
+        drop(guard);
+        self.set_connected(connection_id);
+    }
+
     pub async fn apply_table_changes(
         &self,
         profile: &ConnectionProfile,
