@@ -250,7 +250,7 @@ struct QueryTabState {
     active_bottom_tab: QueryBottomTab,
     last_executed_sql: Option<String>,
     result_sort: TableSortState,
-    selected_columns: BTreeSet<String>,
+    selected_columns: BTreeSet<usize>,
     column_order: Vec<String>,
     column_drag: Option<TableColumnDragState>,
     multi_results: Vec<QueryResult>,
@@ -314,7 +314,7 @@ struct TableTabState {
     deferred_save_action: bool,
     pending_insert_row: Option<BTreeMap<String, QueryCellValue>>,
     scroll_to_insert_row: bool,
-    selected_columns: BTreeSet<String>,
+    selected_columns: BTreeSet<usize>,
     // 结构编辑状态
     editing_structure: bool,
     show_structure_sql_preview: bool,
@@ -1532,10 +1532,29 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     return;
                 }
                 let Some(ref result) = query_tab.result else { return };
-                let selected_cols: Vec<&String> = result
-                    .columns
+                // 构建 display_columns（与渲染顺序一致）
+                let display_columns: Vec<String> = if query_tab.column_order.is_empty() {
+                    result.columns.clone()
+                } else {
+                    let all_set: std::collections::BTreeSet<&String> = result.columns.iter().collect();
+                    let mut ordered: Vec<String> = query_tab.column_order
+                        .iter()
+                        .filter(|c| all_set.contains(c))
+                        .cloned()
+                        .collect();
+                    for col in &result.columns {
+                        if !query_tab.column_order.contains(col) {
+                            ordered.push(col.clone());
+                        }
+                    }
+                    ordered
+                };
+                // 用索引获取选中列，避免同名列歧义
+                let mut sorted_indices: Vec<usize> = query_tab.selected_columns.iter().copied().collect();
+                sorted_indices.sort();
+                let selected_cols: Vec<&String> = sorted_indices
                     .iter()
-                    .filter(|c| query_tab.selected_columns.contains(*c))
+                    .filter_map(|&idx| display_columns.get(idx))
                     .collect();
                 if selected_cols.is_empty() {
                     return;
@@ -1564,10 +1583,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     return;
                 }
                 let Some(ref preview) = table_tab.preview else { return };
-                let columns = table_editable_columns(table_tab);
-                let selected_cols: Vec<&String> = columns
+                let columns = table_visible_columns(table_tab);
+                let mut sorted_indices: Vec<usize> = table_tab.selected_columns.iter().copied().collect();
+                sorted_indices.sort();
+                let selected_cols: Vec<&String> = sorted_indices
                     .iter()
-                    .filter(|c| table_tab.selected_columns.contains(*c))
+                    .filter_map(|&idx| columns.get(idx))
                     .collect();
                 if selected_cols.is_empty() {
                     return;
@@ -8968,7 +8989,7 @@ fn render_result_table(
     result: &mut QueryResult,
     sort_state: &mut TableSortState,
     sql_driven_sort: bool,
-    selected_columns: &mut BTreeSet<String>,
+    selected_columns: &mut BTreeSet<usize>,
     search: &mut TableSearchState,
     column_order: &mut Vec<String>,
     column_drag: &mut Option<TableColumnDragState>,
@@ -9073,7 +9094,7 @@ fn render_result_table(
                                 header.col(|ui| {
                                     let cell_rect = ui.max_rect();
                                     let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
-                                    let is_selected = selected_columns.contains(column);
+                                    let is_selected = selected_columns.contains(&col_idx);
                                     let (sort_choice, clicked, cell_dragged) = table_header_cell(
                                         ui,
                                         &palette,
@@ -9088,14 +9109,14 @@ fn render_result_table(
                                     }
                                     if clicked {
                                         if ctrl_held {
-                                            if selected_columns.contains(column) {
-                                                selected_columns.remove(column);
+                                            if selected_columns.contains(&col_idx) {
+                                                selected_columns.remove(&col_idx);
                                             } else {
-                                                selected_columns.insert(column.clone());
+                                                selected_columns.insert(col_idx);
                                             }
                                         } else {
                                             selected_columns.clear();
-                                            selected_columns.insert(column.clone());
+                                            selected_columns.insert(col_idx);
                                         }
                                         ui.ctx().request_repaint();
                                     }
@@ -9200,7 +9221,7 @@ fn render_result_table(
                                 let row = &result.rows[index];
                                 for (col_idx, column) in display_columns.iter().enumerate() {
                                     row_ui.col(|ui| {
-                                        let column_selected = selected_columns.contains(column);
+                                        let column_selected = selected_columns.contains(&col_idx);
                                         let search_highlight = search.open && search.matches.iter().any(|&(r, c)| r == index && c == col_idx);
                                         let is_current_match = current_match_pos == Some((index, col_idx));
                                         table_body_cell(
@@ -9499,7 +9520,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             for (col_idx, column) in columns.iter().enumerate() {
                                 header.col(|ui| {
                                     let cell_rect = ui.max_rect();
-                                    let is_selected = tab.selected_columns.contains(column);
+                                    let is_selected = tab.selected_columns.contains(&col_idx);
                                     let is_dragged = tab.column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let (sort_choice, clicked, cell_dragged) = table_header_cell(
                                         ui,
@@ -9515,14 +9536,14 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     }
                                     if clicked {
                                         if ctrl_held {
-                                            if tab.selected_columns.contains(column) {
-                                                tab.selected_columns.remove(column);
+                                            if tab.selected_columns.contains(&col_idx) {
+                                                tab.selected_columns.remove(&col_idx);
                                             } else {
-                                                tab.selected_columns.insert(column.clone());
+                                                tab.selected_columns.insert(col_idx);
                                             }
                                         } else {
                                             tab.selected_columns.clear();
-                                            tab.selected_columns.insert(column.clone());
+                                            tab.selected_columns.insert(col_idx);
                                         }
                                         ctx.request_repaint();
                                     }
@@ -9747,7 +9768,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     if edit.target == TableEditTarget::ExistingRow(row_index)
                                                         && edit.column == *column
                                             );
-                                            let column_selected = tab.selected_columns.contains(column);
+                                            let column_selected = tab.selected_columns.contains(&col_idx);
                                             let search_highlight = tab.search.open && tab.search.matches.iter().any(|&(r, c)| r == row_index && c == col_idx);
                                             let is_current_match = current_match_pos == Some((row_index, col_idx));
                                             let response = if is_editing {
