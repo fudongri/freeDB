@@ -42,6 +42,7 @@ raw-window-handle = "0.6"
 postgres-native-tls = "0.5"
 native-tls = "0.2"
 regex = "1"
+regex-syntax = "0.8"
 rfd = "0.15"
 rust_xlsxwriter = "0.84"
 rusqlite = { version = "0.37", features = ["bundled", "chrono"] }

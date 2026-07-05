@@ -237,6 +237,7 @@ pub struct ColumnDefinition {
     pub data_type: String,
     pub nullable: bool,
     pub primary_key: bool,
+    pub unique: bool,
     pub auto_increment: bool,
     pub default_value: Option<String>,
     pub comment: Option<String>,

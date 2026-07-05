@@ -158,6 +158,10 @@ impl DatabaseDriver for MySqlDriver {
                         .get::<String, _>(3)
                         .map(|v| v.eq_ignore_ascii_case("PRI"))
                         .unwrap_or(false),
+                    unique: row
+                        .get::<String, _>(3)
+                        .map(|v| v.eq_ignore_ascii_case("UNI"))
+                        .unwrap_or(false),
                     auto_increment: extra.to_ascii_lowercase().contains("auto_increment"),
                     default_value: row
                         .get::<Option<String>, _>(4)

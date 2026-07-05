@@ -168,6 +168,7 @@ impl DatabaseDriver for MongoDbDriver {
                         data_type: bson_type_name(value),
                         nullable: true,
                         primary_key: key == "_id",
+                        unique: key == "_id",
                         auto_increment: false,
                         default_value: None,
                         comment: None,

@@ -1267,6 +1267,7 @@ dependencies = [
  "open",
  "raw-window-handle",
  "regex",
+ "regex-syntax",
  "reqwest",
  "rfd",
  "semver",

@@ -1361,6 +1361,7 @@ mod tests {
                             data_type: "text".into(),
                             nullable: true,
                             primary_key: false,
+                            unique: false,
                             default_value: None,
                             comment: None,
                         })
@@ -1470,7 +1471,7 @@ mod tests {
         let mut cache = SchemaCache::new();
         cache.add_table("users".into(), false);
         cache.add_columns("users".into(), vec![
-            ColumnDefinition { name: "id".into(), data_type: "int".into(), nullable: false, primary_key: true, default_value: None, comment: None },
+            ColumnDefinition { name: "id".into(), data_type: "int".into(), nullable: false, primary_key: true, unique: true, default_value: None, comment: None },
         ]);
         assert!(cache.table_names().contains(&"users"));
         assert_eq!(cache.columns_for_table("users").unwrap().len(), 1);

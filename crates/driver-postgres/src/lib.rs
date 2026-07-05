@@ -190,6 +190,7 @@ impl DatabaseDriver for PostgresDriver {
             .query(
                 "SELECT c.column_name, c.data_type, c.is_nullable,
                         EXISTS (SELECT 1 FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema WHERE tc.table_schema = c.table_schema AND tc.table_name = c.table_name AND tc.constraint_type = 'PRIMARY KEY' AND kcu.column_name = c.column_name) AS is_primary,
+                        EXISTS (SELECT 1 FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema WHERE tc.table_schema = c.table_schema AND tc.table_name = c.table_name AND tc.constraint_type = 'UNIQUE' AND kcu.column_name = c.column_name) AS is_unique,
                         c.column_default,
                         col_description((c.table_schema||'.'||c.table_name)::regclass::oid, c.ordinal_position::int) AS col_comment
                  FROM information_schema.columns c WHERE c.table_schema = $1 AND c.table_name = $2 ORDER BY c.ordinal_position",
@@ -201,7 +202,7 @@ impl DatabaseDriver for PostgresDriver {
             .into_iter()
             .map(|row| {
                 let default_val: Option<String> =
-                    row.try_get::<_, String>(4).ok().filter(|v| !v.is_empty());
+                    row.try_get::<_, String>(5).ok().filter(|v| !v.is_empty());
                 let is_auto = default_val
                     .as_deref()
                     .map(|d| d.starts_with("nextval("))
@@ -211,9 +212,10 @@ impl DatabaseDriver for PostgresDriver {
                     data_type: row.get(1),
                     nullable: row.get::<_, String>(2).eq_ignore_ascii_case("YES"),
                     primary_key: row.get(3),
+                    unique: row.get(4),
                     auto_increment: is_auto,
                     default_value: default_val,
-                    comment: row.try_get::<_, String>(5).ok().filter(|v| !v.is_empty()),
+                    comment: row.try_get::<_, String>(6).ok().filter(|v| !v.is_empty()),
                 }
             })
             .collect::<Vec<_>>();

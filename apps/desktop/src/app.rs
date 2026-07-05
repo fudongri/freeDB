@@ -363,6 +363,35 @@ enum GenerateDataEvent {
     Done(Result<usize, String>),
 }
 
+#[derive(Clone, Debug)]
+enum ColumnConstraint {
+    Range { min: String, max: String },
+    Enum(Vec<String>),
+    Regex(String),
+}
+
+/// 列约束的临时编辑状态（未应用前不修改实际约束）
+#[derive(Clone, Debug)]
+struct ConstraintEditState {
+    kind: u8, // 0=Range, 1=Enum, 2=Regex
+    range_min: String,
+    range_max: String,
+    enum_text: String,
+    regex_pattern: String,
+}
+
+impl Default for ConstraintEditState {
+    fn default() -> Self {
+        Self {
+            kind: 1,
+            range_min: "0".into(),
+            range_max: "100".into(),
+            enum_text: String::new(),
+            regex_pattern: String::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct TableTabState {
     id: String,
@@ -418,7 +447,12 @@ struct TableTabState {
     generate_data_count: String,
     generate_data_running: bool,
     generate_data_progress: Option<GenerateDataProgress>,
-    generate_data_allow_null: bool,
+    generate_data_null_columns: std::collections::HashSet<String>,
+    generate_data_default_columns: std::collections::HashSet<String>,
+    generate_data_constraints: std::collections::HashMap<String, ColumnConstraint>,
+    generate_data_expanded_col: Option<String>,
+    generate_data_regex_tests: std::collections::HashMap<String, Vec<String>>,
+    generate_data_edit_state: Option<(String, ConstraintEditState)>,
 }
 
 impl Default for TableSortState {
@@ -858,6 +892,99 @@ impl Default for ConnectionFormState {
             ssh_port: 22,
             ssh_username: String::new(),
             direct_connection: false,
+        }
+    }
+}
+
+struct RegexGenCtx {
+    seed: u64,
+    pos: usize,
+}
+
+impl RegexGenCtx {
+    fn next_seed(&mut self) -> u64 {
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.seed
+    }
+}
+
+fn collect_unicode_class_chars(class: &regex_syntax::hir::ClassUnicode) -> Vec<char> {
+    let mut chars = Vec::new();
+    // 优先取 ASCII 范围（\d \w \s 等会包含 ASCII 子范围）
+    for r in class.ranges() {
+        let start = r.start() as u32;
+        let end = r.end() as u32;
+        if start < 128 {
+            for c in start..=end.min(127) {
+                if let Some(ch) = char::from_u32(c) {
+                    chars.push(ch);
+                }
+            }
+        }
+    }
+    // 没有 ASCII 范围（如 [一-龥]），取前 100 个 Unicode 字符
+    if chars.is_empty() {
+        for r in class.ranges() {
+            let start = r.start() as u32;
+            let end = r.end() as u32;
+            for c in start..=end.min(start + 100) {
+                if let Some(ch) = char::from_u32(c) {
+                    chars.push(ch);
+                }
+            }
+        }
+    }
+    if chars.is_empty() { vec!['x'] } else { chars }
+}
+
+fn gen_from_hir(hir: &regex_syntax::hir::Hir, ctx: &mut RegexGenCtx) -> Option<String> {
+    use regex_syntax::hir::HirKind;
+    match hir.kind() {
+        HirKind::Empty => Some(String::new()),
+        HirKind::Literal(lit) => {
+            let s = String::from_utf8_lossy(&lit.0);
+            Some(s.to_string())
+        }
+        HirKind::Class(class) => {
+            let chars = match class {
+                regex_syntax::hir::Class::Unicode(u) => collect_unicode_class_chars(u),
+                regex_syntax::hir::Class::Bytes(b) => {
+                    b.ranges().iter().flat_map(|r| {
+                        (r.start()..=r.end()).map(|b| b as char)
+                    }).collect()
+                }
+            };
+            if chars.is_empty() { return Some("x".to_string()); }
+            let idx = ctx.next_seed() as usize % chars.len();
+            Some(chars[idx].to_string())
+        }
+        HirKind::Look(_) => Some(String::new()),
+        HirKind::Repetition(rep) => {
+            let min = rep.min as usize;
+            let max = rep.max.map(|m| m as usize).unwrap_or(min + 5).min(20);
+            let count = if max > min {
+                min + ctx.next_seed() as usize % (max - min + 1)
+            } else {
+                min
+            };
+            let mut result = String::new();
+            for _ in 0..count {
+                result.push_str(&gen_from_hir(&rep.sub, ctx)?);
+            }
+            Some(result)
+        }
+        HirKind::Capture(cap) => gen_from_hir(&cap.sub, ctx),
+        HirKind::Concat(exprs) => {
+            let mut result = String::new();
+            for expr in exprs {
+                result.push_str(&gen_from_hir(expr, ctx)?);
+            }
+            Some(result)
+        }
+        HirKind::Alternation(alts) => {
+            if alts.is_empty() { return Some(String::new()); }
+            let idx = ctx.next_seed() as usize % alts.len();
+            gen_from_hir(&alts[idx], ctx)
         }
     }
 }
@@ -1553,6 +1680,12 @@ impl DesktopApp {
                         match message.definition {
                             Some(Ok(ref def)) => {
                                 tab.definition = Some(def.clone());
+                                // 自增列默认勾选"使用默认值"
+                                for col in &def.columns {
+                                    if col.auto_increment {
+                                        tab.generate_data_default_columns.insert(col.name.clone());
+                                    }
+                                }
                                 if tab.error.is_some() {
                                     tab.error = None;
                                 }
@@ -2102,7 +2235,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             generate_data_count: "100".to_string(),
             generate_data_running: false,
             generate_data_progress: None,
-            generate_data_allow_null: false,
+            generate_data_null_columns: std::collections::HashSet::new(),
+            generate_data_default_columns: std::collections::HashSet::new(),
+            generate_data_constraints: std::collections::HashMap::new(),
+            generate_data_expanded_col: None,
+            generate_data_regex_tests: std::collections::HashMap::new(),
+            generate_data_edit_state: None,
         };
         self.tabs.push(WorkspaceTab::Table(table_tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
@@ -2160,22 +2298,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         database_kind: DatabaseKind,
         row_index: usize,
         skip_cols: &std::collections::HashSet<String>,
-        allow_null: bool,
+        null_columns: &std::collections::HashSet<String>,
+        constraints: &std::collections::HashMap<String, ColumnConstraint>,
+        id_offsets: &std::collections::HashMap<String, i64>,
     ) -> (Vec<String>, Vec<String>) {
         let mut col_names = Vec::new();
         let mut values = Vec::new();
 
         for col in columns {
-            // 跳过自增列
-            if col.auto_increment {
-                continue;
-            }
-            // 跳过本批应使用 DEFAULT 的列
+            // 跳过使用默认值的列（含自增列）
             if skip_cols.contains(&col.name) {
                 continue;
             }
-            // nullable 列，仅在 allow_null 时 10% 概率设为 NULL
-            if allow_null && col.nullable && (row_index * 41 + col.name.len() * 7) % 100 < 10 {
+            // 用户允许 NULL 且列 nullable，10% 概率设为 NULL
+            if null_columns.contains(&col.name) && col.nullable && (row_index * 41 + col.name.len() * 7) % 100 < 10 {
                 col_names.push(col.name.clone());
                 values.push("NULL".to_string());
                 continue;
@@ -2183,7 +2319,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
             col_names.push(col.name.clone());
             let dt = col.data_type.to_lowercase();
-            let value = Self::generate_value_by_type(&dt, row_index, &col.name);
+            let value = if let Some(constraint) = constraints.get(&col.name) {
+                Self::generate_constrained_value(constraint, &dt, row_index, &col.name, false)
+            } else {
+                Self::generate_value_by_type(&dt, row_index, &col.name)
+            };
+            // 自增列加上偏移量避免与已有数据冲突
+            let value = if let Some(&offset) = id_offsets.get(&col.name) {
+                if let Ok(n) = value.parse::<i64>() {
+                    (n + offset + 1).to_string()
+                } else {
+                    value
+                }
+            } else {
+                value
+            };
             values.push(value);
         }
 
@@ -2199,7 +2349,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         col_name.hash(&mut hasher);
         let seed = hasher.finish();
 
-        // 整数类型
+        // 整数类型 - 按范围细分
+        if data_type.contains("tinyint") {
+            return (seed % 128).to_string();
+        }
+        if data_type.contains("smallint") {
+            return (seed % 32768).to_string();
+        }
+        if data_type.contains("mediumint") {
+            return (seed % 8388608).to_string();
+        }
         if data_type.contains("int") || data_type.contains("serial") {
             let val = (seed % 100_000) as i64;
             return val.to_string();
@@ -2242,9 +2401,147 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if data_type.contains("objectid") {
             return format!("{:024x}", seed);
         }
-        // 默认：字符串，带 test_ 前缀
+        // 默认：字符串，带 test_ 前缀，检查长度限制
         let safe_col_name = col_name.replace('\'', "");
-        format!("'test_{}_{}'", safe_col_name, seed % 100000)
+        let value = format!("test_{}_{}", safe_col_name, seed % 100000);
+        // 解析 varchar(n) / char(n) 的长度限制
+        if let Some(max_len) = Self::parse_char_length(data_type) {
+            let truncated = if value.len() > max_len { &value[..max_len] } else { &value };
+            return format!("'{}'", truncated);
+        }
+        format!("'{}'", value)
+    }
+
+    /// 从 varchar(255) / char(10) 等类型字符串中解析长度限制
+    fn parse_char_length(data_type: &str) -> Option<usize> {
+        let s = data_type.trim();
+        if !(s.starts_with("varchar") || s.starts_with("char") || s.starts_with("varbinary") || s.starts_with("binary")) {
+            return None;
+        }
+        let start = s.find('(')?;
+        let end = s[start + 1..].find(')')? + start + 1;
+        s[start + 1..end].parse::<usize>().ok()
+    }
+
+    fn make_seed(row_index: usize, col_name: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        row_index.hash(&mut hasher);
+        col_name.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn generate_constrained_value(
+        constraint: &ColumnConstraint,
+        data_type: &str,
+        row_index: usize,
+        col_name: &str,
+        is_mongo: bool,
+    ) -> String {
+        let seed = Self::make_seed(row_index, col_name);
+        match constraint {
+            ColumnConstraint::Range { min, max } => {
+                Self::generate_range_value(min, max, data_type, seed, is_mongo)
+            }
+            ColumnConstraint::Enum(values) => {
+                if values.is_empty() {
+                    return Self::generate_value_by_type(data_type, row_index, col_name);
+                }
+                let idx = seed as usize % values.len();
+                let v = &values[idx];
+                if is_mongo {
+                    // MongoDB: 尝试转为数值，否则用字符串
+                    if let Ok(n) = v.parse::<i64>() {
+                        return n.to_string();
+                    }
+                    if let Ok(f) = v.parse::<f64>() {
+                        return f.to_string();
+                    }
+                    format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+                } else {
+                    // SQL: 整数/浮点不加引号，其他加引号
+                    if v.parse::<i64>().is_ok() || v.parse::<f64>().is_ok() {
+                        v.clone()
+                    } else {
+                        format!("'{}'", v.replace('\'', "''"))
+                    }
+                }
+            }
+            ColumnConstraint::Regex(pattern) => {
+                if let Some(generated) = Self::generate_from_regex(pattern, seed) {
+                    // 检查 varchar/char 长度限制
+                    let final_str = if let Some(max_len) = Self::parse_char_length(data_type) {
+                        if generated.len() > max_len { &generated[..max_len] } else { &generated }
+                    } else {
+                        &generated
+                    };
+                    if is_mongo {
+                        format!("\"{}\"", final_str.replace('\\', "\\\\").replace('"', "\\\""))
+                    } else {
+                        format!("'{}'", final_str.replace('\'', "''"))
+                    }
+                } else {
+                    Self::generate_value_by_type(data_type, row_index, col_name)
+                }
+            }
+        }
+    }
+
+    fn generate_range_value(min: &str, max: &str, data_type: &str, seed: u64, is_mongo: bool) -> String {
+        let dt = data_type.to_lowercase();
+        // 整数范围
+        if dt.contains("int") || dt.contains("serial") {
+            if let (Ok(lo), Ok(hi)) = (min.parse::<i64>(), max.parse::<i64>()) {
+                if hi > lo {
+                    let val = lo + (seed as i64).rem_euclid(hi - lo + 1);
+                    return val.to_string();
+                }
+            }
+        }
+        // 浮点范围
+        if dt.contains("float") || dt.contains("double")
+            || dt.contains("decimal") || dt.contains("numeric")
+            || dt.contains("real") {
+            if let (Ok(lo), Ok(hi)) = (min.parse::<f64>(), max.parse::<f64>()) {
+                if hi > lo {
+                    let frac = (seed % 10000) as f64 / 10000.0;
+                    let val = lo + frac * (hi - lo);
+                    return format!("{:.2}", val);
+                }
+            }
+        }
+        // 非数值类型：回退到默认
+        if is_mongo {
+            format!("\"test_{}\"", seed % 100000)
+        } else {
+            format!("'test_{}'", seed % 100000)
+        }
+    }
+
+    /// 从正则表达式生成匹配的字符串
+    fn generate_from_regex(pattern: &str, seed: u64) -> Option<String> {
+        let hir = regex_syntax::Parser::new().parse(pattern).ok()?;
+        let mut ctx = RegexGenCtx { seed, pos: 0 };
+        gen_from_hir(&hir, &mut ctx)
+    }
+
+    fn constraint_summary(c: &ColumnConstraint) -> String {
+        match c {
+            ColumnConstraint::Range { min, max } => {
+                tr!("范围: {} ~ {}", min, max).to_string()
+            }
+            ColumnConstraint::Enum(values) => {
+                if values.len() <= 3 {
+                    tr!("枚举: {}", values.join(", ")).to_string()
+                } else {
+                    tr!("枚举: {}...", values[..3].join(", ")).to_string()
+                }
+            }
+            ColumnConstraint::Regex(pattern) => {
+                tr!("正则: {}", pattern).to_string()
+            }
+        }
     }
 
     /// 构建多行 INSERT 语句（MySQL/PostgreSQL）
@@ -2254,14 +2551,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         database_kind: DatabaseKind,
         start_index: usize,
         count: usize,
-        allow_null: bool,
+        null_columns: &std::collections::HashSet<String>,
+        default_columns: &std::collections::HashSet<String>,
+        constraints: &std::collections::HashMap<String, ColumnConstraint>,
+        id_offsets: &std::collections::HashMap<String, i64>,
     ) -> String {
-        // 本批跳过的 default_value 列集合：每列独立 30% 概率，整批一致
+        // 本批跳过的 default_value 列集合：用户指定 + 有默认值的列 30% 概率随机跳过
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        let mut skip_cols = std::collections::HashSet::new();
+        let mut skip_cols = default_columns.clone();
         for col in columns {
-            if col.default_value.is_some() {
+            if col.default_value.is_some() && !skip_cols.contains(&col.name) {
                 let mut h = DefaultHasher::new();
                 col.name.hash(&mut h);
                 start_index.hash(&mut h);
@@ -2275,7 +2575,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut common_cols: Option<Vec<String>> = None;
 
         for i in 0..count {
-            let (col_names, values) = Self::generate_test_row(columns, database_kind, start_index + i, &skip_cols, allow_null);
+            let (col_names, values) = Self::generate_test_row(columns, database_kind, start_index + i, &skip_cols, null_columns, constraints, id_offsets);
             if common_cols.is_none() {
                 common_cols = Some(col_names.clone());
             }
@@ -2385,6 +2685,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         fields: &[(String, String)],
         start_index: usize,
         count: usize,
+        constraints: &std::collections::HashMap<String, ColumnConstraint>,
     ) -> String {
         let mut docs = Vec::new();
         for i in 0..count {
@@ -2393,7 +2694,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 if field_name == "_id" {
                     continue;
                 }
-                let value = Self::generate_mongo_value(field_type, start_index + i, field_name);
+                let value = if let Some(constraint) = constraints.get(field_name) {
+                    Self::generate_constrained_value(constraint, field_type, start_index + i, field_name, true)
+                } else {
+                    Self::generate_mongo_value(field_type, start_index + i, field_name)
+                };
                 doc_fields.push(format!("\"{}\": {}", field_name, value));
             }
             docs.push(format!("{{{}}}", doc_fields.join(", ")));
@@ -7579,7 +7884,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             .corner_radius(6.0)
                                                             .inner_margin(egui::Margin::same(8))
                                                             .show(ui, |ui| {
-                                                                ui.set_min_width(220.0);
+                                                                ui.set_min_width(320.0);
                                                                 if tab.generate_data_running {
                                                                     // 进度状态
                                                                     ui.label(RichText::new(tr!("正在生成测试数据...")).strong());
@@ -7647,23 +7952,262 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                         }
                                                                         ui.label(tr!("行"));
                                                                     });
-                                                                    // 显示跳过的列
+                                                                    // 列约束配置
                                                                     if let Some(ref def) = tab.definition {
-                                                                        let skipped: Vec<&str> = def.columns.iter()
-                                                                            .filter(|c| c.auto_increment)
-                                                                            .map(|c| c.name.as_str())
-                                                                            .collect();
-                                                                        if !skipped.is_empty() {
+                                                                        let constrainable: Vec<_> = def.columns.iter().collect();
+                                                                        if !constrainable.is_empty() {
+                                                                            ui.add_space(8.0);
+                                                                            ui.horizontal(|ui| {
+                                                                                ui.label(RichText::new(tr!("列约束")).strong());
+                                                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                                    if mini_button(ui, tr!("清除全部"), MiniButtonKind::Subtle).clicked() {
+                                                                                        tab.generate_data_constraints.clear();
+                                                                                        tab.generate_data_default_columns.clear();
+                                                                                        tab.generate_data_expanded_col = None;
+                                                                                        tab.generate_data_edit_state = None;
+                                                                                    }
+                                                                                });
+                                                                            });
                                                                             ui.add_space(4.0);
-                                                                            ui.label(
-                                                                                RichText::new(tr!("跳过: {} (自增)", skipped.join(", ")))
-                                                                                    .small()
-                                                                                    .color(palette.weak_text),
-                                                                            );
+                                                                            egui::ScrollArea::vertical()
+                                                                                .id_salt("gen_constraints_scroll")
+                                                                                .max_height(200.0)
+                                                                                .show(ui, |ui| {
+                                                                                    for col in &constrainable {
+                                                                                        let col_name = &col.name;
+                                                                                        let has_constraint = tab.generate_data_constraints.contains_key(col_name);
+                                                                                        let is_expanded = tab.generate_data_expanded_col.as_deref() == Some(col_name.as_str());
+                                                                                        ui.horizontal(|ui| {
+                                                                                            ui.label(RichText::new(col_name).strong());
+                                                                                            ui.label(RichText::new(&col.data_type).small().color(palette.weak_text));
+                                                                                            // NULL 开关（仅 nullable 列可操作）
+                                                                                            if col.nullable {
+                                                                                                let mut allow_null = tab.generate_data_null_columns.contains(col_name);
+                                                                                                let resp = ui.checkbox(&mut allow_null, "允许NULL值");
+                                                                                                if resp.changed() {
+                                                                                                    if allow_null {
+                                                                                                        tab.generate_data_null_columns.insert(col_name.clone());
+                                                                                                    } else {
+                                                                                                        tab.generate_data_null_columns.remove(col_name);
+                                                                                                    }
+                                                                                                }
+                                                                                            } else {
+                                                                                                ui.add_enabled(false, egui::Checkbox::new(&mut false, "允许NULL值"));
+                                                                                            }
+                                                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                                                let is_default = tab.generate_data_default_columns.contains(col_name);
+                                                                                                if has_constraint || is_default {
+                                                                                                    if mini_button(ui, "×", MiniButtonKind::Danger).clicked() {
+                                                                                                        tab.generate_data_constraints.remove(col_name);
+                                                                                                        tab.generate_data_default_columns.remove(col_name);
+                                                                                                        tab.generate_data_edit_state = None;
+                                                                                                        if is_expanded {
+                                                                                                            tab.generate_data_expanded_col = None;
+                                                                                                        }
+                                                                                                    }
+                                                                                                    if has_constraint {
+                                                                                                        let summary = tab.generate_data_constraints.get(col_name)
+                                                                                                            .map(|c| Self::constraint_summary(c))
+                                                                                                            .unwrap_or_default();
+                                                                                                        ui.label(RichText::new(summary).small().color(palette.weak_text));
+                                                                                                    } else if is_default {
+                                                                                                        ui.label(RichText::new(tr!("使用默认值")).small().color(palette.weak_text));
+                                                                                                    }
+                                                                                                } else if !is_expanded {
+                                                                                                    if mini_button(ui, tr!("设置"), MiniButtonKind::Accent).clicked() {
+                                                                                                        tab.generate_data_expanded_col = Some(col_name.clone());
+                                                                                                        let dt = col.data_type.to_lowercase();
+                                                                                                        let is_num = dt.contains("int") || dt.contains("serial")
+                                                                                                            || dt.contains("float") || dt.contains("double")
+                                                                                                            || dt.contains("decimal") || dt.contains("numeric")
+                                                                                                            || dt.contains("real");
+                                                                                                        let mut state = ConstraintEditState::default();
+                                                                                                        if tab.generate_data_default_columns.contains(col_name) {
+                                                                                                            state.kind = 3;
+                                                                                                        } else if !is_num { state.kind = 1; }
+                                                                                                        tab.generate_data_edit_state = Some((col_name.clone(), state));
+                                                                                                    }
+                                                                                                } else {
+                                                                                                    if mini_button(ui, tr!("收起"), MiniButtonKind::Subtle).clicked() {
+                                                                                                        tab.generate_data_expanded_col = None;
+                                                                                                        tab.generate_data_edit_state = None;
+                                                                                                    }
+                                                                                                }
+                                                                                            });
+                                                                                        });
+                                                                                        // 展开的约束编辑面板
+                                                                                        if is_expanded {
+                                                                                            let dt = col.data_type.to_lowercase();
+                                                                                            let is_numeric = dt.contains("int") || dt.contains("serial")
+                                                                                                || dt.contains("float") || dt.contains("double")
+                                                                                                || dt.contains("decimal") || dt.contains("numeric")
+                                                                                                || dt.contains("real");
+                                                                                            // 取出编辑状态到局部变量，避免借用冲突
+                                                                                            let mut edit_state = if let Some((ref name, _)) = tab.generate_data_edit_state {
+                                                                                                if name == col_name {
+                                                                                                    tab.generate_data_edit_state.take().map(|(_, s)| s)
+                                                                                                } else {
+                                                                                                    None
+                                                                                                }
+                                                                                            } else {
+                                                                                                None
+                                                                                            };
+                                                                                            let mut apply_clicked = false;
+                                                                                            if let Some(ref mut es) = edit_state {
+                                                                                                let mut kinds: Vec<(u8, &str)> = Vec::new();
+                                                                                                kinds.push((3, tr!("使用默认值")));
+                                                                                                if is_numeric {
+                                                                                                    kinds.push((0, tr!("范围")));
+                                                                                                }
+                                                                                                kinds.push((1, tr!("枚举")));
+                                                                                                kinds.push((2, tr!("正则")));
+                                                                                                // 约束类型选择行
+                                                                                                ui.horizontal(|ui| {
+                                                                                                    for (kind_id, label) in &kinds {
+                                                                                                        let is_selected = es.kind == *kind_id;
+                                                                                                        let btn = egui::SelectableLabel::new(is_selected, *label);
+                                                                                                        if ui.add(btn).clicked() && !is_selected {
+                                                                                                            es.kind = *kind_id;
+                                                                                                        }
+                                                                                                    }
+                                                                                                });
+                                                                                                // 根据选中类型显示编辑区域
+                                                                                                match es.kind {
+                                                                                                    0 if is_numeric => {
+                                                                                                        let orig_stroke = ui.visuals().widgets.inactive.bg_stroke;
+                                                                                                        ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        ui.visuals_mut().widgets.active.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        ui.horizontal(|ui| {
+                                                                                                            ui.label(tr!("最小值"));
+                                                                                                            let min_filtered: String = es.range_min.chars().filter(|c| c.is_ascii_digit() || *c == '-' || *c == '.').collect();
+                                                                                                            if es.range_min != min_filtered { es.range_min = min_filtered; }
+                                                                                                            ui.add(egui::TextEdit::singleline(&mut es.range_min).desired_width(60.0));
+                                                                                                            ui.label(tr!("最大值"));
+                                                                                                            let max_filtered: String = es.range_max.chars().filter(|c| c.is_ascii_digit() || *c == '-' || *c == '.').collect();
+                                                                                                            if es.range_max != max_filtered { es.range_max = max_filtered; }
+                                                                                                            ui.add(egui::TextEdit::singleline(&mut es.range_max).desired_width(60.0));
+                                                                                                        });
+                                                                                                        ui.visuals_mut().widgets.inactive.bg_stroke = orig_stroke;
+                                                                                                        ui.visuals_mut().widgets.hovered.bg_stroke = orig_stroke;
+                                                                                                        ui.visuals_mut().widgets.active.bg_stroke = orig_stroke;
+                                                                                                    }
+                                                                                                    1 => {
+                                                                                                        let orig_stroke = ui.visuals().widgets.inactive.bg_stroke;
+                                                                                                        ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        ui.visuals_mut().widgets.active.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        ui.add(
+                                                                                                            egui::TextEdit::multiline(&mut es.enum_text)
+                                                                                                                .desired_rows(2)
+                                                                                                                .desired_width(280.0)
+                                                                                                                .hint_text(tr!("值列表（逗号分隔）")),
+                                                                                                        );
+                                                                                                        ui.visuals_mut().widgets.inactive.bg_stroke = orig_stroke;
+                                                                                                        ui.visuals_mut().widgets.hovered.bg_stroke = orig_stroke;
+                                                                                                        ui.visuals_mut().widgets.active.bg_stroke = orig_stroke;
+                                                                                                    }
+                                                                                                    2 => {
+                                                                                                        let orig_stroke = ui.visuals().widgets.inactive.bg_stroke;
+                                                                                                        ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        ui.visuals_mut().widgets.active.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                                                        let mut test_clicked = false;
+                                                                                                        ui.horizontal(|ui| {
+                                                                                                            ui.add(
+                                                                                                                egui::TextEdit::singleline(&mut es.regex_pattern)
+                                                                                                                    .desired_width(200.0)
+                                                                                                                    .hint_text(tr!("正则表达式")),
+                                                                                                            );
+                                                                                                            test_clicked = mini_button(ui, tr!("测试"), MiniButtonKind::Accent).clicked();
+                                                                                                        });
+                                                                                                        ui.visuals_mut().widgets.inactive.bg_stroke = orig_stroke;
+                                                                                                        ui.visuals_mut().widgets.hovered.bg_stroke = orig_stroke;
+                                                                                                        ui.visuals_mut().widgets.active.bg_stroke = orig_stroke;
+                                                                                                        // 点击测试按钮时生成并存储示例
+                                                                                                        if test_clicked && !es.regex_pattern.is_empty() {
+                                                                                                            let seed = Self::make_seed(0, col_name);
+                                                                                                            let mut examples = Vec::new();
+                                                                                                            for i in 0..3u64 {
+                                                                                                                if let Some(s) = Self::generate_from_regex(&es.regex_pattern, seed.wrapping_add(i * 9973)) {
+                                                                                                                    examples.push(s);
+                                                                                                                }
+                                                                                                            }
+                                                                                                            tab.generate_data_regex_tests.insert(col_name.clone(), examples);
+                                                                                                        }
+                                                                                                        // 持久显示已存储的示例
+                                                                                                        if let Some(examples) = tab.generate_data_regex_tests.get(col_name) {
+                                                                                                            if !examples.is_empty() {
+                                                                                                                ui.label(
+                                                                                                                    RichText::new(tr!("示例: {}", examples.join(", ")))
+                                                                                                                        .small()
+                                                                                                                        .color(palette.weak_text),
+                                                                                                                );
+                                                                                                            }
+                                                                                                        }
+                                                                                                    }
+                                                                                                    _ => {}
+                                                                                                }
+                                                                                                // 应用按钮
+                                                                                                ui.horizontal(|ui| {
+                                                                                                    if mini_button(ui, tr!("应用"), MiniButtonKind::Accent).clicked() {
+                                                                                                        apply_clicked = true;
+                                                                                                    }
+                                                                                                });
+                                                                                            }
+                                                                                            // 处理应用点击
+                                                                                            if apply_clicked {
+                                                                                                if let Some(mut es) = edit_state.take() {
+                                                                                                    if es.kind == 3 {
+                                                                                                        // 使用默认值：设置 use_default，移除已有约束
+                                                                                                        tab.generate_data_default_columns.insert(col_name.clone());
+                                                                                                        tab.generate_data_constraints.remove(col_name);
+                                                                                                        tab.generate_data_expanded_col = None;
+                                                                                                    } else {
+                                                                                                        // 选择约束类型时，取消使用默认值
+                                                                                                        tab.generate_data_default_columns.remove(col_name);
+                                                                                                        let constraint = match es.kind {
+                                                                                                            0 if is_numeric => {
+                                                                                                                let min_val = es.range_min.parse::<f64>().unwrap_or(0.0);
+                                                                                                                let max_val = es.range_max.parse::<f64>().unwrap_or(0.0);
+                                                                                                                if min_val > max_val {
+                                                                                                                    tab.generate_data_edit_state = Some((col_name.clone(), es));
+                                                                                                                    None
+                                                                                                                } else {
+                                                                                                                    Some(ColumnConstraint::Range {
+                                                                                                                        min: es.range_min,
+                                                                                                                        max: es.range_max,
+                                                                                                                    })
+                                                                                                                }
+                                                                                                            },
+                                                                                                            1 => {
+                                                                                                                let vals: Vec<String> = es.enum_text.split(',')
+                                                                                                                    .map(|s| s.trim().to_string())
+                                                                                                                    .filter(|s| !s.is_empty())
+                                                                                                                    .collect();
+                                                                                                                if vals.is_empty() { None } else { Some(ColumnConstraint::Enum(vals)) }
+                                                                                                            }
+                                                                                                            2 => {
+                                                                                                                if es.regex_pattern.is_empty() { None }
+                                                                                                                else { Some(ColumnConstraint::Regex(es.regex_pattern)) }
+                                                                                                            }
+                                                                                                            _ => None,
+                                                                                                        };
+                                                                                                        if let Some(c) = constraint {
+                                                                                                            tab.generate_data_constraints.insert(col_name.clone(), c);
+                                                                                                            tab.generate_data_expanded_col = None;
+                                                                                                        }
+                                                                                                    }
+                                                                                                }
+                                                                                            } else if let Some(state) = edit_state {
+                                                                                                tab.generate_data_edit_state = Some((col_name.clone(), state));
+                                                                                            }
+                                                                                            ui.add_space(4.0);
+                                                                                        }
+                                                                                    }
+                                                                                });
                                                                         }
                                                                     }
-                                                                    ui.add_space(8.0);
-                                                                    ui.checkbox(&mut tab.generate_data_allow_null, tr!("允许 NULL"));
                                                                     ui.add_space(8.0);
                                                                     let count_valid = tab.generate_data_count.parse::<usize>().map_or(false, |n| n > 0);
                                                                     let btn_kind = if count_valid { ToolbarButtonKind::Primary } else { ToolbarButtonKind::Subtle };
@@ -9916,7 +10460,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let definition = tab.definition.clone();
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
-        let allow_null = tab.generate_data_allow_null;
+        let null_columns = tab.generate_data_null_columns.clone();
+        let default_columns = tab.generate_data_default_columns.clone();
+        let constraints = tab.generate_data_constraints.clone();
 
         let cancel = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::channel();
@@ -9938,7 +10484,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         return;
                     }
                     let count = batch_size.min(total - completed);
-                    let cmd = DesktopApp::build_mongo_insert_command(&table, &fields, completed, count);
+                    let cmd = DesktopApp::build_mongo_insert_command(&table, &fields, completed, count, &constraints);
                     let execution = QueryExecution {
                         connection_id: table.connection_id.clone(),
                         database: table.database.clone(),
@@ -9961,14 +10507,40 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let _ = sender.send(GenerateDataEvent::Done(Err(tr!("表定义未加载").to_string())));
                     return;
                 };
+                // 查询自增列当前最大值（未使用默认值的）
+                let mut id_offsets: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+                for col in &def.columns {
+                    if col.auto_increment && !default_columns.contains(&col.name) {
+                        let q = format!("SELECT COALESCE(MAX({}), 0) AS max_val FROM {}",
+                            quote_identifier(database_kind, &col.name),
+                            DesktopApp::format_table_name(&table, database_kind));
+                        let exec = QueryExecution {
+                            connection_id: table.connection_id.clone(),
+                            database: table.database.clone(),
+                            sql: q,
+                        };
+                        if let Ok(result) = services.execute_sql(exec).await {
+                            if let Some(row) = result.rows.first() {
+                                if let Some(cell) = row.get("max_val") {
+                                    let val = cell.display_text();
+                                    if let Ok(n) = val.parse::<i64>() {
+                                        id_offsets.insert(col.name.clone(), n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let mut completed = 0usize;
+                let mut retry_count = 0usize;
+                let max_retries = 5usize;
                 while completed < total {
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                         let _ = sender.send(GenerateDataEvent::Done(Ok(completed)));
                         return;
                     }
                     let count = batch_size.min(total - completed);
-                    let sql = DesktopApp::build_batch_insert_sql(&table, &def.columns, database_kind, completed, count, allow_null);
+                    let sql = DesktopApp::build_batch_insert_sql(&table, &def.columns, database_kind, completed, count, &null_columns, &default_columns, &constraints, &id_offsets);
                     let execution = QueryExecution {
                         connection_id: table.connection_id.clone(),
                         database: table.database.clone(),
@@ -9977,9 +10549,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     match services.execute_sql(execution).await {
                         Ok(_) => {
                             completed += count;
+                            retry_count = 0;
                             let _ = sender.send(GenerateDataEvent::Progress { completed, total });
                         }
                         Err(e) => {
+                            let err_msg = e.to_string().to_lowercase();
+                            // 唯一约束冲突时重试
+                            if retry_count < max_retries && (err_msg.contains("duplicate") || err_msg.contains("unique")) {
+                                retry_count += 1;
+                                // 增加偏移量后重试
+                                for val in id_offsets.values_mut() {
+                                    *val += 10000;
+                                }
+                                continue;
+                            }
                             let _ = sender.send(GenerateDataEvent::Done(Err(e.to_string())));
                             return;
                         }
@@ -10163,12 +10746,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .show(ctx, |ui| {
                 // 工具栏按钮
                 ui.horizontal(|ui| {
-                    if ui.button(tr!("清空")).clicked() {
+                    if toolbar_button(ui, tr!("清空"), ToolbarButtonKind::Danger).clicked() {
                         if let Ok(mut buf) = self.log_buffer.lock() {
                             buf.clear();
                         }
                     }
-                    if ui.button(tr!("复制全部")).clicked() {
+                    if toolbar_button(ui, tr!("复制全部"), ToolbarButtonKind::Subtle).clicked() {
                         let text = if let Ok(buf) = self.log_buffer.lock() {
                             buf.join("\n")
                         } else {
@@ -10241,7 +10824,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                             });
                         });
-                        if ui.button(tr!("关闭")).clicked() {
+                        if toolbar_button(ui, tr!("关闭"), ToolbarButtonKind::Subtle).clicked() {
                             open = false;
                         }
                     });
