@@ -414,6 +414,7 @@ struct TableTabState {
     mongo_page_cursors: Vec<String>,
     // 生成测试数据
     show_generate_data_popup: bool,
+    generate_data_needs_focus: bool,
     generate_data_count: String,
     generate_data_running: bool,
     generate_data_progress: Option<GenerateDataProgress>,
@@ -2097,6 +2098,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             search: TableSearchState::default(),
             mongo_page_cursors: Vec::new(),
             show_generate_data_popup: false,
+            generate_data_needs_focus: false,
             generate_data_count: "100".to_string(),
             generate_data_running: false,
             generate_data_progress: None,
@@ -7370,6 +7372,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             gen_data_btn_rect = Some(gen_data_btn_response.rect);
                                             if gen_data_btn_response.clicked() {
                                                 tab.show_generate_data_popup = !tab.show_generate_data_popup;
+                                                if tab.show_generate_data_popup {
+                                                    tab.generate_data_needs_focus = true;
+                                                    tab.generate_data_count.clear();
+                                                    tab.generate_data_progress = None;
+                                                }
                                             }
                                             let current_edit_changed = tab.editing_cell.as_ref().map_or(false, |edit| {
                                                 matches!(edit.target, TableEditTarget::ExistingRow(_))
@@ -7587,7 +7594,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                         ui.label(format!("{}/{}", progress.completed, progress.total));
                                                                     }
                                                                     ui.add_space(8.0);
-                                                                    if ui.button(tr!("停止")).clicked() {
+                                                                    if toolbar_button(ui, tr!("停止"), ToolbarButtonKind::Subtle).clicked() {
                                                                         action = TabUiAction::GenerateData;
                                                                     }
                                                                 } else if let Some(ref progress) = tab.generate_data_progress {
@@ -7598,7 +7605,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     ui.add_space(4.0);
                                                                     ui.label(RichText::new(tr!("数据为随机测试数据")).small().color(palette.weak_text));
                                                                     ui.add_space(8.0);
-                                                                    if ui.button(tr!("再次生成")).clicked() {
+                                                                    if toolbar_button(ui, tr!("再次生成"), ToolbarButtonKind::Primary).clicked() {
                                                                         tab.generate_data_progress = None;
                                                                     }
                                                                     // 点击外部关闭
@@ -7618,10 +7625,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     ui.add_space(8.0);
                                                                     ui.horizontal(|ui| {
                                                                         ui.label(tr!("生成数量"));
-                                                                        ui.add(
-                                                                            egui::TextEdit::singleline(&mut tab.generate_data_count)
-                                                                                .desired_width(80.0),
-                                                                        );
+                                                                        // 仅过滤非数字字符，保留用户输入
+                                                                        let filtered: String = tab.generate_data_count.chars().filter(|c| c.is_ascii_digit()).collect();
+                                                                        if filtered != tab.generate_data_count {
+                                                                            tab.generate_data_count = filtered;
+                                                                        }
+                                                                        // 临时修改样式，让输入框在浅色模式下有明显边框
+                                                                        let orig_stroke = ui.visuals().widgets.inactive.bg_stroke;
+                                                                        ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                        ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                        ui.visuals_mut().widgets.active.bg_stroke = Stroke::new(1.0, palette.border);
+                                                                        let text_edit = egui::TextEdit::singleline(&mut tab.generate_data_count)
+                                                                            .desired_width(80.0);
+                                                                        let response = ui.add(text_edit);
+                                                                        ui.visuals_mut().widgets.inactive.bg_stroke = orig_stroke;
+                                                                        ui.visuals_mut().widgets.hovered.bg_stroke = orig_stroke;
+                                                                        ui.visuals_mut().widgets.active.bg_stroke = orig_stroke;
+                                                                        if tab.generate_data_needs_focus {
+                                                                            response.request_focus();
+                                                                            tab.generate_data_needs_focus = false;
+                                                                        }
                                                                         ui.label(tr!("行"));
                                                                     });
                                                                     // 显示跳过的列
@@ -7642,7 +7665,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     ui.add_space(8.0);
                                                                     ui.checkbox(&mut tab.generate_data_allow_null, tr!("允许 NULL"));
                                                                     ui.add_space(8.0);
-                                                                    if ui.button(tr!("开始生成")).clicked() {
+                                                                    let count_valid = tab.generate_data_count.parse::<usize>().map_or(false, |n| n > 0);
+                                                                    let btn_kind = if count_valid { ToolbarButtonKind::Primary } else { ToolbarButtonKind::Subtle };
+                                                                    if toolbar_button(ui, tr!("开始生成"), btn_kind).clicked() && count_valid {
                                                                         action = TabUiAction::GenerateData;
                                                                     }
                                                                     // 点击外部关闭
