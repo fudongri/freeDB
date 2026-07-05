@@ -73,6 +73,7 @@ pub struct DesktopApp {
     tab_drag_target: Option<usize>,
     scroll_tabs_to_end: bool,
     is_scrolling_tabs: bool, // 跟踪是否正在拖动滚动条
+    tab_scroll_offset: f32, // 标签栏滚动偏移量
     database_cache: HashMap<String, Vec<String>>,
     pending_database_list: Option<Receiver<DatabaseListResult>>,
     pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
@@ -959,6 +960,7 @@ impl DesktopApp {
             tab_drag_target: None,
             scroll_tabs_to_end: false,
             is_scrolling_tabs: false,
+            tab_scroll_offset: 0.0,
             database_cache: HashMap::new(),
             pending_table_preview: None,
             generate_data_receiver: None,
@@ -4092,100 +4094,128 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         // 滚动条显示条件：鼠标在标签栏区域内，或者正在拖动滚动条
         let show_scroll_bar = is_tabs_hovered || self.is_scrolling_tabs;
 
+        // 新建标签页时自动滚动到最右边
+        if self.scroll_tabs_to_end {
+            self.tab_scroll_offset = 100000.0; // 足够大的值确保滚动到最右边
+            self.scroll_tabs_to_end = false;
+        }
+
+        let frame_height = 6.0 + 26.0 + 6.0; // 上下边距 + 标签高度
+
         egui::Frame::new()
             .fill(palette.toolbar_bg)
             .stroke(Stroke::new(1.0, palette.border))
-            .inner_margin(egui::Margin::symmetric(8, 6))
+            .inner_margin(egui::Margin::symmetric(0, 0))
             .show(ui, |ui| {
-                let mut scroll_area = egui::ScrollArea::horizontal()
-                    .id_salt("workspace-tabs-scroll")
-                    .auto_shrink([false, true])
-                    .max_height(30.0) // 固定滚动区域高度
-                    .scroll_bar_visibility(if show_scroll_bar {
-                        egui::containers::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
-                    } else {
-                        egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden
-                    });
+                ui.horizontal(|ui| {
+                    // 向左滚动按钮
+                    let left_btn = ui.add_sized(
+                        [20.0, frame_height],
+                        egui::Button::new("◀")
+                            .rounding(0.0)
+                            .fill(palette.tab_idle_bg)
+                            .stroke(Stroke::new(1.0, palette.soft_border))
+                    );
+                    // 点击或按住时滚动
+                    if left_btn.clicked() || left_btn.is_pointer_button_down_on() {
+                        self.tab_scroll_offset = (self.tab_scroll_offset - 200.0).max(0.0);
+                    }
 
-                let scroll_output = scroll_area.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (index, tab) in self.tabs.iter().enumerate() {
-                            let (title, icon) = match tab {
-                                WorkspaceTab::Query(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
-                                WorkspaceTab::Table(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
-                                WorkspaceTab::CreateTable(state) => {
-                                    let title = if state.database_kind == DatabaseKind::MongoDb {
-                                        tr!("新建集合")
-                                    } else {
-                                        tr!("新建表")
-                                    };
-                                    (title, "△")
-                                },
-                                WorkspaceTab::Dashboard => ("Dashboard", "◉"),
-                            };
-                            let interaction = tab_button(
-                                ui, index, icon, title, self.active_tab == index,
-                            );
-                            // 保存标签的响应区域，用于拖拽目标检测
-                            let tab_rect = interaction.tab_response.rect;
-                            // Drag-and-drop reordering
-                            if interaction.tab_response.dragged() {
-                                drag_source = Some(index);
-                            }
-                            // 拖拽开始时自动激活标签页
-                            if interaction.tab_response.drag_started() {
-                                pending_active_tab = Some(index);
-                            }
-                            // 使用鼠标位置检测拖拽目标
-                            if drag_source.is_some() && drag_source != Some(index) {
-                                if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
-                                    if tab_rect.contains(pointer_pos) {
-                                        drag_target = Some(index);
-                                        drag_target_rect = Some(tab_rect);
-                                    }
-                                }
-                            }
-                            // Right-click context menu on tabs
-                            interaction.tab_response.context_menu(|ui| {
-                                if menu_button_with_shortcut(ui, tr!("关闭"), &format!("{}+W", MOD_KEY)) {
-                                    pending_close_tab = Some(index);
-                                    ui.close();
-                                }
-                                if ui.button(tr!("关闭其他")).clicked() {
-                                    pending_close_tab = Some(usize::MAX - 1);
-                                    pending_active_tab = Some(index);
-                                    ui.close();
-                                }
-                                if ui.button(tr!("关闭右侧标签")).clicked() {
-                                    pending_close_tab = Some(index);
-                                    pending_active_tab = Some(index);
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button(tr!("关闭全部")).clicked() {
-                                    pending_close_tab = Some(usize::MAX);
-                                    pending_active_tab = Some(usize::MAX);
-                                    ui.close();
-                                }
+                    // 标签栏区域
+                    let remaining_width = ui.available_width() - 20.0;
+                    ui.allocate_ui(egui::vec2(remaining_width, frame_height), |ui| {
+                        egui::Frame::new()
+                            .fill(palette.toolbar_bg)
+                            .inner_margin(egui::Margin { left: 2, right: 8, top: 6, bottom: 6 })
+                            .show(ui, |ui| {
+                                let scroll_output = egui::ScrollArea::horizontal()
+                                    .id_salt("workspace-tabs-scroll")
+                                    .auto_shrink([false, true])
+                                    .scroll_bar_visibility(egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                                    .horizontal_scroll_offset(self.tab_scroll_offset)
+                                    .show(ui, |ui| {
+                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                            for (index, tab) in self.tabs.iter().enumerate() {
+                                                let (title, icon) = match tab {
+                                                    WorkspaceTab::Query(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
+                                                    WorkspaceTab::Table(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
+                                                    WorkspaceTab::CreateTable(state) => {
+                                                        let title = if state.database_kind == DatabaseKind::MongoDb {
+                                                            tr!("新建集合")
+                                                        } else {
+                                                            tr!("新建表")
+                                                        };
+                                                        (title, "△")
+                                                    },
+                                                    WorkspaceTab::Dashboard => ("Dashboard", "◉"),
+                                                };
+                                                let interaction = tab_button(
+                                                    ui, index, icon, title, self.active_tab == index,
+                                                );
+                                                let tab_rect = interaction.tab_response.rect;
+                                                if interaction.tab_response.dragged() {
+                                                    drag_source = Some(index);
+                                                }
+                                                if interaction.tab_response.drag_started() {
+                                                    pending_active_tab = Some(index);
+                                                }
+                                                if drag_source.is_some() && drag_source != Some(index) {
+                                                    if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                                        if tab_rect.contains(pointer_pos) {
+                                                            drag_target = Some(index);
+                                                            drag_target_rect = Some(tab_rect);
+                                                        }
+                                                    }
+                                                }
+                                                interaction.tab_response.context_menu(|ui| {
+                                                    if menu_button_with_shortcut(ui, tr!("关闭"), &format!("{}+W", MOD_KEY)) {
+                                                        pending_close_tab = Some(index);
+                                                        ui.close();
+                                                    }
+                                                    if ui.button(tr!("关闭其他")).clicked() {
+                                                        pending_close_tab = Some(usize::MAX - 1);
+                                                        pending_active_tab = Some(index);
+                                                        ui.close();
+                                                    }
+                                                    if ui.button(tr!("关闭右侧标签")).clicked() {
+                                                        pending_close_tab = Some(index);
+                                                        pending_active_tab = Some(index);
+                                                        ui.close();
+                                                    }
+                                                    ui.separator();
+                                                    if ui.button(tr!("关闭全部")).clicked() {
+                                                        pending_close_tab = Some(usize::MAX);
+                                                        pending_active_tab = Some(usize::MAX);
+                                                        ui.close();
+                                                    }
+                                                });
+                                                if interaction.close_clicked {
+                                                    pending_close_tab = Some(index);
+                                                } else if interaction.tab_clicked {
+                                                    pending_active_tab = Some(index);
+                                                }
+                                            }
+                                            ui.add_space(8.0);
+                                        });
+                                    });
+                                // 同步滚动位置（鼠标滚轮或按钮）
+                                self.tab_scroll_offset = scroll_output.state.offset.x;
                             });
-                            if interaction.close_clicked {
-                                pending_close_tab = Some(index);
-                            } else if interaction.tab_clicked {
-                                pending_active_tab = Some(index);
-                            }
-                            // 如果需要滚动到最右边，在最后一个标签处滚动
-                            if self.scroll_tabs_to_end && index == self.tabs.len() - 1 {
-                                ui.scroll_to_rect(tab_rect, Some(egui::Align::Max));
-                            }
-                        }
-                        ui.add_space(4.0);
                     });
-                });
 
-                // 重置滚动标志
-                if self.scroll_tabs_to_end {
-                    self.scroll_tabs_to_end = false;
-                }
+                    // 向右滚动按钮
+                    let right_btn = ui.add_sized(
+                        [20.0, frame_height],
+                        egui::Button::new("▶")
+                            .rounding(0.0)
+                            .fill(palette.tab_idle_bg)
+                            .stroke(Stroke::new(1.0, palette.soft_border))
+                    );
+                    // 点击或按住时滚动
+                    if right_btn.clicked() || right_btn.is_pointer_button_down_on() {
+                        self.tab_scroll_offset += 200.0;
+                    }
+                });
             });
         // Apply drag reorder on drop
         let drag_finished = ui.input(|input| {
