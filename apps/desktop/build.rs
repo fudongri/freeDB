@@ -1,5 +1,7 @@
 fn main() {
-    if cfg!(target_os = "windows") {
+    // build.rs 在主机运行，cfg!() 反映的是主机系统而非目标系统
+    // 必须通过 CARGO_CFG_TARGET_OS 环境变量判断目标平台
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
         let mut res = winres::WindowsResource::new();
         res.set_icon("assets/freedb-icon.ico");
         res.set_manifest(
