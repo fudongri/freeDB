@@ -71,6 +71,7 @@ pub struct DesktopApp {
     batch_save_error: Option<String>,
     tab_drag_source: Option<usize>,
     tab_drag_target: Option<usize>,
+    scroll_tabs_to_end: bool,
     database_cache: HashMap<String, Vec<String>>,
     pending_database_list: Option<Receiver<DatabaseListResult>>,
     pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
@@ -955,6 +956,7 @@ impl DesktopApp {
             batch_save_error: None,
             tab_drag_source: None,
             tab_drag_target: None,
+            scroll_tabs_to_end: false,
             database_cache: HashMap::new(),
             pending_table_preview: None,
             generate_data_receiver: None,
@@ -2098,6 +2100,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         };
         self.tabs.push(WorkspaceTab::Table(table_tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
+        self.scroll_tabs_to_end = true;
 
         // Spawn async background task to load definition and preview data
         let services = self.services.clone();
@@ -2521,6 +2524,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
         self.tabs.push(WorkspaceTab::Query(tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
+        self.scroll_tabs_to_end = true;
     }
 
     fn close_workspace_tab(&mut self, index: usize) {
@@ -2533,6 +2537,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if self.tabs.is_empty() {
             self.tabs.push(WorkspaceTab::Dashboard);
             self.active_tab = 0;
+            self.scroll_tabs_to_end = true;
             return;
         }
 
@@ -3445,6 +3450,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     };
                     self.tabs.push(WorkspaceTab::CreateTable(state));
                     self.active_tab = self.tabs.len().saturating_sub(1);
+                    self.scroll_tabs_to_end = true;
                 }
                 SidebarAction::CommitTreeRename => {
                     self.commit_tree_rename();
@@ -4055,89 +4061,113 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut pending_close_tab = None;
         let mut drag_source = self.tab_drag_source;
         let mut drag_target = self.tab_drag_target;
+        let mut drag_target_rect = None; // 保存拖拽目标的响应区域
+        // 计算标签栏的高度（padding + 标签高度 + padding）
+        let tabs_height = 2.0 + 26.0 + 2.0; // inner_margin top + max tab height + inner_margin bottom
+        let tabs_min_y = ui.cursor().top();
+        let tabs_max_y = tabs_min_y + tabs_height;
+        // 获取标签栏的X范围
+        let tabs_min_x = ui.cursor().left();
+        let tabs_max_x = tabs_min_x + ui.available_width();
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or_default();
+        let is_tabs_hovered = pointer_pos.y >= tabs_min_y
+            && pointer_pos.y <= tabs_max_y
+            && pointer_pos.x >= tabs_min_x
+            && pointer_pos.x <= tabs_max_x;
+
         egui::Frame::new()
             .fill(palette.toolbar_bg)
             .stroke(Stroke::new(1.0, palette.border))
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
-                // 检测鼠标是否悬停在标签栏上
-                let tabs_rect = ui.max_rect();
-                let is_tabs_hovered = tabs_rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or_default());
-
-                egui::ScrollArea::horizontal()
+                let mut scroll_area = egui::ScrollArea::horizontal()
                     .id_salt("workspace-tabs-scroll")
                     .auto_shrink([false, true])
                     .scroll_bar_visibility(if is_tabs_hovered {
                         egui::containers::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
                     } else {
                         egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden
-                    })
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for (index, tab) in self.tabs.iter().enumerate() {
-                                let (title, icon) = match tab {
-                                    WorkspaceTab::Query(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
-                                    WorkspaceTab::Table(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
-                                    WorkspaceTab::CreateTable(state) => {
-                                        let title = if state.database_kind == DatabaseKind::MongoDb {
-                                            tr!("新建集合")
-                                        } else {
-                                            tr!("新建表")
-                                        };
-                                        (title, "△")
-                                    },
-                                    WorkspaceTab::Dashboard => ("Dashboard", "◉"),
-                                };
-                                let interaction = tab_button(
-                                    ui, index, icon, title, self.active_tab == index,
-                                );
-                                // Drag-and-drop reordering
-                                if interaction.tab_response.dragged() {
-                                    drag_source = Some(index);
-                                    drag_target = None;
-                                }
-                                // 拖拽开始时自动激活标签页
-                                if interaction.tab_response.drag_started() {
-                                    pending_active_tab = Some(index);
-                                }
-                                if interaction.tab_response.hovered()
-                                    && drag_source.is_some()
-                                    && drag_source != Some(index)
-                                {
-                                    drag_target = Some(index);
-                                }
-                                // Right-click context menu on tabs
-                                interaction.tab_response.context_menu(|ui| {
-                                    if menu_button_with_shortcut(ui, tr!("关闭"), &format!("{}+W", MOD_KEY)) {
-                                        pending_close_tab = Some(index);
-                                        ui.close();
+                    });
+
+                let scroll_output = scroll_area.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (index, tab) in self.tabs.iter().enumerate() {
+                            let (title, icon) = match tab {
+                                WorkspaceTab::Query(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
+                                WorkspaceTab::Table(tab) => (tab.title.as_str(), tab_icon_symbol(tab)),
+                                WorkspaceTab::CreateTable(state) => {
+                                    let title = if state.database_kind == DatabaseKind::MongoDb {
+                                        tr!("新建集合")
+                                    } else {
+                                        tr!("新建表")
+                                    };
+                                    (title, "△")
+                                },
+                                WorkspaceTab::Dashboard => ("Dashboard", "◉"),
+                            };
+                            let interaction = tab_button(
+                                ui, index, icon, title, self.active_tab == index,
+                            );
+                            // 保存标签的响应区域，用于拖拽目标检测
+                            let tab_rect = interaction.tab_response.rect;
+                            // Drag-and-drop reordering
+                            if interaction.tab_response.dragged() {
+                                drag_source = Some(index);
+                            }
+                            // 拖拽开始时自动激活标签页
+                            if interaction.tab_response.drag_started() {
+                                pending_active_tab = Some(index);
+                            }
+                            // 使用鼠标位置检测拖拽目标
+                            if drag_source.is_some() && drag_source != Some(index) {
+                                if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                    if tab_rect.contains(pointer_pos) {
+                                        drag_target = Some(index);
+                                        drag_target_rect = Some(tab_rect);
                                     }
-                                    if ui.button(tr!("关闭其他")).clicked() {
-                                        pending_close_tab = Some(usize::MAX - 1);
-                                        pending_active_tab = Some(index);
-                                        ui.close();
-                                    }
-                                    if ui.button(tr!("关闭右侧标签")).clicked() {
-                                        pending_close_tab = Some(index);
-                                        pending_active_tab = Some(index);
-                                        ui.close();
-                                    }
-                                    ui.separator();
-                                    if ui.button(tr!("关闭全部")).clicked() {
-                                        pending_close_tab = Some(usize::MAX);
-                                        pending_active_tab = Some(usize::MAX);
-                                        ui.close();
-                                    }
-                                });
-                                if interaction.close_clicked {
-                                    pending_close_tab = Some(index);
-                                } else if interaction.tab_clicked {
-                                    pending_active_tab = Some(index);
                                 }
                             }
-                            ui.add_space(4.0);
-                        });
+                            // Right-click context menu on tabs
+                            interaction.tab_response.context_menu(|ui| {
+                                if menu_button_with_shortcut(ui, tr!("关闭"), &format!("{}+W", MOD_KEY)) {
+                                    pending_close_tab = Some(index);
+                                    ui.close();
+                                }
+                                if ui.button(tr!("关闭其他")).clicked() {
+                                    pending_close_tab = Some(usize::MAX - 1);
+                                    pending_active_tab = Some(index);
+                                    ui.close();
+                                }
+                                if ui.button(tr!("关闭右侧标签")).clicked() {
+                                    pending_close_tab = Some(index);
+                                    pending_active_tab = Some(index);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button(tr!("关闭全部")).clicked() {
+                                    pending_close_tab = Some(usize::MAX);
+                                    pending_active_tab = Some(usize::MAX);
+                                    ui.close();
+                                }
+                            });
+                            if interaction.close_clicked {
+                                pending_close_tab = Some(index);
+                            } else if interaction.tab_clicked {
+                                pending_active_tab = Some(index);
+                            }
+                            // 如果需要滚动到最右边，在最后一个标签处滚动
+                            if self.scroll_tabs_to_end && index == self.tabs.len() - 1 {
+                                ui.scroll_to_rect(tab_rect, Some(egui::Align::Max));
+                            }
+                        }
+                        ui.add_space(4.0);
                     });
+                });
+
+                // 重置滚动标志
+                if self.scroll_tabs_to_end {
+                    self.scroll_tabs_to_end = false;
+                }
             });
         // Apply drag reorder on drop
         let drag_finished = ui.input(|input| {
@@ -4147,7 +4177,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if let (Some(src), Some(tgt)) = (drag_source, drag_target) {
                 if src != tgt {
                     let tab = self.tabs.remove(src);
-                    let insert_at = if tgt > src { tgt } else { tgt.max(0) };
+                    // 当 src < tgt 时，移除 src 后 tgt 位置会前移一位
+                    let insert_at = if tgt > src { tgt - 1 } else { tgt };
                     self.tabs.insert(insert_at, tab);
                     // Update active_tab to follow the moved tab
                     if self.active_tab == src {
@@ -4177,9 +4208,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     } else {
                         tr!("新建表")
                     };
-                    (title, "△".to_string())
+                    (title.to_string(), "△")
                 },
-                WorkspaceTab::Dashboard => ("Dashboard".to_string(), "◉".to_string()),
+                WorkspaceTab::Dashboard => ("Dashboard".to_string(), "◉"),
             };
 
             // 使用egui::Area绘制幽灵标题
@@ -4195,11 +4226,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .inner_margin(egui::Margin::symmetric(8, 4))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(&icon);
-                                ui.label(&title);
+                                ui.label(icon);
+                                ui.label(title);
                             });
                         });
                 });
+
+            // 绘制目标位置指示器（竖线）
+            if let Some(target_rect) = drag_target_rect {
+                let indicator_x = target_rect.left();
+                let indicator_rect = egui::Rect::from_min_max(
+                    egui::pos2(indicator_x - 1.0, target_rect.top() + 2.0),
+                    egui::pos2(indicator_x + 1.0, target_rect.bottom() - 2.0),
+                );
+                ui.painter().rect_filled(
+                    indicator_rect,
+                    1.0,
+                    palette.selection_stroke,
+                );
+            }
         }
         self.tab_drag_source = drag_source;
         self.tab_drag_target = drag_target;
@@ -4208,6 +4253,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 // 关闭全部 → 回到 Dashboard
                 self.tabs.clear();
                 self.tabs.push(WorkspaceTab::Dashboard);
+                self.scroll_tabs_to_end = true;
                 self.active_tab = 0;
             }
             (Some(val), Some(keep_index)) if val == usize::MAX - 1 => {
@@ -19772,7 +19818,7 @@ fn tab_button(
     let display_label = truncate_ui_label(label, 16);
     let is_truncated = display_label != label;
     let desired_width = (display_label.chars().count() as f32 * 7.0 + 62.0).clamp(96.0, 170.0);
-    let desired_size = Vec2::new(desired_width, if selected { 30.0 } else { 28.0 });
+    let desired_size = Vec2::new(desired_width, if selected { 26.0 } else { 24.0 });
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     response
         .clone()
