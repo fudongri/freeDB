@@ -10877,11 +10877,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn start_update_download(&mut self, info: &UpdateInfo) {
         let Some(asset) = select_update_asset(info) else {
+            tracing::warn!("未找到适合当前平台的更新资源，回退到浏览器下载");
             let url = info.url.clone();
             let _ = open::that(&url);
             self.update_dismissed = true;
             return;
         };
+        tracing::info!("选择更新资源: {} -> {}", asset.name, asset.download_url);
         let file_path = update_download_path();
         let url = asset.download_url.clone();
         let total_size = asset.size;
@@ -10922,20 +10924,34 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 }
 
 async fn check_for_update() -> Option<UpdateInfo> {
+    let local = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+    tracing::info!("检查更新: 当前版本 {}", local);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?;
-    let resp = client
+    let resp = match client
         .get("https://api.github.com/repos/fudongri/freedb/releases/latest")
         .header("User-Agent", "freedb")
         .send()
         .await
-        .ok()?;
-    let json: serde_json::Value = resp.json().await.ok()?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("检查更新失败: {}", e);
+            return None;
+        }
+    };
+    let json: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::error!("解析更新信息失败: {}", e);
+            return None;
+        }
+    };
     let tag = json["tag_name"].as_str()?;
     let remote = semver::Version::parse(tag).ok()?;
-    let local = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+    tracing::info!("远程版本: {}", remote);
     if remote > local {
         let assets: Vec<ReleaseAsset> = json["assets"]
             .as_array()
@@ -10951,12 +10967,16 @@ async fn check_for_update() -> Option<UpdateInfo> {
                     .collect()
             })
             .unwrap_or_default();
+        for asset in &assets {
+            tracing::info!("可用资源: {} ({} 字节) - {}", asset.name, asset.size, asset.download_url);
+        }
         Some(UpdateInfo {
             version: tag.to_string(),
             url: json["html_url"].as_str()?.to_string(),
             assets,
         })
     } else {
+        tracing::info!("已是最新版本");
         None
     }
 }
@@ -11011,37 +11031,61 @@ fn update_download_path() -> std::path::PathBuf {
 }
 
 async fn download_update(url: &str, file_path: &std::path::Path, tx: std::sync::mpsc::Sender<UpdateEvent>) {
+    tracing::info!("开始下载更新: {}", url);
+    tracing::info!("保存到: {}", file_path.display());
     let result = async {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(600))
             .build()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                tracing::error!("创建 HTTP 客户端失败: {}", e);
+                e.to_string()
+            })?;
         let resp = client
             .get(url)
             .header("User-Agent", "freedb")
             .send()
             .await
-            .map_err(|e| tr!("网络错误: {}", e).to_string())?;
+            .map_err(|e| {
+                tracing::error!("发送下载请求失败: {} (URL: {})", e, url);
+                tr!("网络错误: {}", e).to_string()
+            })?;
+        tracing::info!("下载响应状态: {}, 最终 URL: {}", resp.status(), resp.url());
         if !resp.status().is_success() {
+            tracing::error!("下载失败: HTTP {}", resp.status().as_u16());
             return Err(tr!("下载失败: HTTP {}", resp.status().as_u16()).to_string());
         }
         let total = resp.content_length().unwrap_or(0);
+        tracing::info!("文件大小: {} 字节", total);
         let mut stream = resp.bytes_stream();
         let mut file = tokio::fs::File::create(file_path)
             .await
-            .map_err(|e| tr!("无法创建临时文件: {}", e).to_string())?;
+            .map_err(|e| {
+                tracing::error!("创建临时文件失败: {}", e);
+                tr!("无法创建临时文件: {}", e).to_string()
+            })?;
         let mut downloaded: u64 = 0;
         use futures_util::StreamExt;
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| tr!("下载中断: {}", e).to_string())?;
+            let chunk = chunk_result.map_err(|e| {
+                tracing::error!("下载数据块失败: {}", e);
+                tr!("下载中断: {}", e).to_string()
+            })?;
             tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
                 .await
-                .map_err(|e| tr!("写入文件失败: {}", e).to_string())?;
+                .map_err(|e| {
+                    tracing::error!("写入文件失败: {}", e);
+                    tr!("写入文件失败: {}", e).to_string()
+                })?;
             downloaded += chunk.len() as u64;
             let _ = tx.send(UpdateEvent::Progress { downloaded, total });
         }
+        tracing::info!("下载完成: {} 字节 -> {}", downloaded, file_path.display());
         Ok(file_path.to_path_buf())
     }.await;
+    if let Err(ref e) = result {
+        tracing::error!("更新下载失败: {}", e);
+    }
     let _ = tx.send(UpdateEvent::Done(result));
 }
 
@@ -11257,7 +11301,7 @@ impl eframe::App for DesktopApp {
                                 UpdateState::Available(info) => {
                                     ui.label("🆕");
                                     ui.colored_label(green_text, format!("FreeDB {} is available!", info.version));
-                                    if toolbar_button(ui, tr!("更新"), ToolbarButtonKind::Primary).clicked() {
+                                    if mini_button(ui, tr!("更新"), MiniButtonKind::Accent).clicked() {
                                         pending_update_action = Some(UpdateAction::StartDownload);
                                     }
                                 }
@@ -11275,14 +11319,14 @@ impl eframe::App for DesktopApp {
                                 UpdateState::ReadyToApply { .. } => {
                                     ui.label("✅");
                                     ui.colored_label(green_text, tr!("更新已下载完成"));
-                                    if toolbar_button(ui, tr!("重启完成更新"), ToolbarButtonKind::Accent).clicked() {
+                                    if mini_button(ui, tr!("重启完成更新"), MiniButtonKind::Accent).clicked() {
                                         pending_update_action = Some(UpdateAction::Apply);
                                     }
                                 }
                                 UpdateState::Error(msg) => {
                                     ui.label("⚠");
                                     ui.colored_label(red_text, tr!("更新失败: {}", msg));
-                                    if toolbar_button(ui, tr!("重试"), ToolbarButtonKind::Subtle).clicked() {
+                                    if mini_button(ui, tr!("重试"), MiniButtonKind::Subtle).clicked() {
                                         pending_update_action = Some(UpdateAction::Retry);
                                     }
                                 }

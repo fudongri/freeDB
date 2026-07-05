@@ -62,11 +62,12 @@ fn main() -> eframe::Result<()> {
         let menu = muda::Menu::new();
 
         if cfg!(target_os = "macos") {
+            let about_meta = muda::AboutMetadata { name: Some("FreeDB".into()), ..muda::from_cargo_metadata!() };
             let app_menu = muda::Submenu::with_items(
                 "FreeDB",
                 true,
                 &[
-                    &muda::PredefinedMenuItem::about(Some(&tr!("关于 FreeDB")), None),
+                    &muda::PredefinedMenuItem::about(Some(&tr!("关于 FreeDB")), Some(about_meta)),
                     &muda::PredefinedMenuItem::separator(),
                     &muda::PredefinedMenuItem::quit(Some(&tr!("退出 FreeDB"))),
                 ],
@@ -92,15 +93,13 @@ fn main() -> eframe::Result<()> {
         .unwrap();
         menu.append(&view_menu).unwrap();
 
-        let settings_menu = muda::Submenu::with_items(
-            &tr!("设置"),
-            true,
-            &[
-                &mi_lang,
-                &mi_scroll_speed,
-            ],
-        )
-        .unwrap();
+        let settings_menu = muda::Submenu::new(&tr!("设置"), true);
+        settings_menu.append(&mi_lang).unwrap();
+        settings_menu.append(&mi_scroll_speed).unwrap();
+        if !cfg!(target_os = "macos") {
+            let about_meta = muda::AboutMetadata { name: Some("FreeDB".into()), ..muda::from_cargo_metadata!() };
+            settings_menu.append(&muda::PredefinedMenuItem::about(Some(&tr!("关于 FreeDB")), Some(about_meta))).unwrap();
+        }
         menu.append(&settings_menu).unwrap();
 
         (Some(rx), Some(menu), Some(view_menu), Some(settings_menu), Some(mi_shortcuts), Some(mi_log), Some(mi_lang), Some(mi_scroll_speed))
