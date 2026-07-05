@@ -4109,13 +4109,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // 向左滚动按钮
-                    let left_btn = ui.add_sized(
-                        [20.0, frame_height],
-                        egui::Button::new("◀")
-                            .rounding(0.0)
-                            .fill(palette.tab_idle_bg)
-                            .stroke(Stroke::new(1.0, palette.soft_border))
-                    );
+                    let can_scroll_left = self.tab_scroll_offset > 0.0;
+                    let left_btn = ui.add_enabled_ui(can_scroll_left, |ui| {
+                        ui.add_sized(
+                            [20.0, frame_height],
+                            egui::Button::new("◀")
+                                .rounding(0.0)
+                                .fill(palette.tab_idle_bg)
+                                .stroke(Stroke::new(1.0, palette.soft_border))
+                        )
+                    }).inner;
                     // 点击或按住时滚动
                     if left_btn.clicked() || left_btn.is_pointer_button_down_on() {
                         self.tab_scroll_offset = (self.tab_scroll_offset - 200.0).max(0.0);
@@ -4123,6 +4126,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                     // 标签栏区域
                     let remaining_width = ui.available_width() - 20.0;
+                    let mut scroll_offset_x = 0.0;
+                    let mut max_scroll_x = 0.0;
                     ui.allocate_ui(egui::vec2(remaining_width, frame_height), |ui| {
                         egui::Frame::new()
                             .fill(palette.toolbar_bg)
@@ -4200,17 +4205,22 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     });
                                 // 同步滚动位置（鼠标滚轮或按钮）
                                 self.tab_scroll_offset = scroll_output.state.offset.x;
+                                scroll_offset_x = scroll_output.state.offset.x;
+                                max_scroll_x = (scroll_output.content_size.x - scroll_output.inner_rect.width()).max(0.0);
                             });
                     });
 
                     // 向右滚动按钮
-                    let right_btn = ui.add_sized(
-                        [20.0, frame_height],
-                        egui::Button::new("▶")
-                            .rounding(0.0)
-                            .fill(palette.tab_idle_bg)
-                            .stroke(Stroke::new(1.0, palette.soft_border))
-                    );
+                    let can_scroll_right = scroll_offset_x < max_scroll_x - 1.0;
+                    let right_btn = ui.add_enabled_ui(can_scroll_right, |ui| {
+                        ui.add_sized(
+                            [20.0, frame_height],
+                            egui::Button::new("▶")
+                                .rounding(0.0)
+                                .fill(palette.tab_idle_bg)
+                                .stroke(Stroke::new(1.0, palette.soft_border))
+                        )
+                    }).inner;
                     // 点击或按住时滚动
                     if right_btn.clicked() || right_btn.is_pointer_button_down_on() {
                         self.tab_scroll_offset += 200.0;
@@ -19865,7 +19875,7 @@ fn tab_button(
     let palette = mac_ui_palette(ui.visuals());
     let display_label = truncate_ui_label(label, 16);
     let is_truncated = display_label != label;
-    let desired_width = (display_label.chars().count() as f32 * 7.0 + 62.0).clamp(96.0, 170.0);
+    let desired_width = (display_label.chars().count() as f32 * 7.0 + 48.0).clamp(90.0, 160.0);
     let desired_size = Vec2::new(desired_width, if selected { 26.0 } else { 24.0 });
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     response
