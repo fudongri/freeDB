@@ -38,6 +38,9 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 unicode-width = "0.2"
 
+[build-dependencies]
+winres.workspace = true
+
 [package.metadata.bundle]
 copyright = "Copyright © 2025 FreeDB contributors"
 name = "FreeDB"

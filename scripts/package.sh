@@ -39,11 +39,15 @@ MOUNT_POINT=$(hdiutil attach "$DMG" -nobrowse -readonly | grep "/Volumes/" | sed
 cp -R "$MOUNT_POINT"/* "$TMP_DMG/"
 hdiutil detach "$MOUNT_POINT" -quiet
 
-# Inject icon into .app bundle
-RESOURCES_DIR="$TMP_DMG/FreeDB.app/Contents/Resources"
+# cargo-bundle 生成的 Info.plist 缺少 CFBundleIconFile，需要用源文件覆盖
+APP_BUNDLE="$TMP_DMG/FreeDB.app"
+cp "$DESKTOP_DIR/macos/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+
+# 注入图标到 Contents/Resources/
+RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 mkdir -p "$RESOURCES_DIR"
 cp "$ASSETS_DIR/freedb-icon.icns" "$RESOURCES_DIR/freedb-icon.icns"
-echo "Icon injected into .app bundle"
+echo "Info.plist 替换完成，图标已注入"
 
 # Re-sign after modifying bundle contents
 codesign --force --sign - "$TMP_DMG/FreeDB.app" 2>/dev/null
