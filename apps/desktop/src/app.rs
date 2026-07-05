@@ -72,6 +72,7 @@ pub struct DesktopApp {
     tab_drag_source: Option<usize>,
     tab_drag_target: Option<usize>,
     scroll_tabs_to_end: bool,
+    is_scrolling_tabs: bool, // 跟踪是否正在拖动滚动条
     database_cache: HashMap<String, Vec<String>>,
     pending_database_list: Option<Receiver<DatabaseListResult>>,
     pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
@@ -957,6 +958,7 @@ impl DesktopApp {
             tab_drag_source: None,
             tab_drag_target: None,
             scroll_tabs_to_end: false,
+            is_scrolling_tabs: false,
             database_cache: HashMap::new(),
             pending_table_preview: None,
             generate_data_receiver: None,
@@ -4062,10 +4064,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut drag_source = self.tab_drag_source;
         let mut drag_target = self.tab_drag_target;
         let mut drag_target_rect = None; // 保存拖拽目标的响应区域
-        // 计算标签栏的高度（padding + 标签高度 + padding）
-        let tabs_height = 2.0 + 26.0 + 2.0; // inner_margin top + max tab height + inner_margin bottom
-        let tabs_min_y = ui.cursor().top();
-        let tabs_max_y = tabs_min_y + tabs_height;
+        // 计算标签栏的高度（padding + 标签高度 + padding + 滚动条高度）
+        let tabs_height = 6.0 + 26.0 + 6.0 + 12.0; // 增加滚动条高度 inner_margin top + max tab height + inner_margin bottom + scrollbar
+        let tabs_min_y = ui.cursor().top() - 2.0; // 增加上边距
+        let tabs_max_y = tabs_min_y + tabs_height + 4.0; // 增加下边距
         // 获取标签栏的X范围
         let tabs_min_x = ui.cursor().left();
         let tabs_max_x = tabs_min_x + ui.available_width();
@@ -4075,6 +4077,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             && pointer_pos.x >= tabs_min_x
             && pointer_pos.x <= tabs_max_x;
 
+        // 检测鼠标是否按住左键
+        let is_pointer_down = ui.input(|i| i.pointer.primary_down());
+
+        // 如果鼠标在标签栏区域内按住左键，标记为正在滚动
+        if is_tabs_hovered && is_pointer_down {
+            self.is_scrolling_tabs = true;
+        }
+        // 如果鼠标松开，重置滚动状态
+        if !is_pointer_down {
+            self.is_scrolling_tabs = false;
+        }
+
+        // 滚动条显示条件：鼠标在标签栏区域内，或者正在拖动滚动条
+        let show_scroll_bar = is_tabs_hovered || self.is_scrolling_tabs;
+
         egui::Frame::new()
             .fill(palette.toolbar_bg)
             .stroke(Stroke::new(1.0, palette.border))
@@ -4083,7 +4100,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let mut scroll_area = egui::ScrollArea::horizontal()
                     .id_salt("workspace-tabs-scroll")
                     .auto_shrink([false, true])
-                    .scroll_bar_visibility(if is_tabs_hovered {
+                    .max_height(30.0) // 固定滚动区域高度
+                    .scroll_bar_visibility(if show_scroll_bar {
                         egui::containers::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
                     } else {
                         egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden
