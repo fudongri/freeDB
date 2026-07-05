@@ -4060,9 +4060,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .stroke(Stroke::new(1.0, palette.border))
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
+                // 检测鼠标是否悬停在标签栏上
+                let tabs_rect = ui.max_rect();
+                let is_tabs_hovered = tabs_rect.contains(ui.input(|i| i.pointer.hover_pos()).unwrap_or_default());
+
                 egui::ScrollArea::horizontal()
                     .id_salt("workspace-tabs-scroll")
                     .auto_shrink([false, true])
+                    .scroll_bar_visibility(if is_tabs_hovered {
+                        egui::containers::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
+                    } else {
+                        egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden
+                    })
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             for (index, tab) in self.tabs.iter().enumerate() {
@@ -4086,6 +4095,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 if interaction.tab_response.dragged() {
                                     drag_source = Some(index);
                                     drag_target = None;
+                                }
+                                // 拖拽开始时自动激活标签页
+                                if interaction.tab_response.drag_started() {
+                                    pending_active_tab = Some(index);
                                 }
                                 if interaction.tab_response.hovered()
                                     && drag_source.is_some()
@@ -4148,6 +4161,45 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             drag_source = None;
             drag_target = None;
+        }
+        // 拖拽时显示幽灵标题
+        if drag_source.is_some() {
+            let pointer_pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or_default();
+
+            // 获取被拖拽标签的标题和图标
+            let src = drag_source.unwrap();
+            let (title, icon) = match &self.tabs[src] {
+                WorkspaceTab::Query(tab) => (tab.title.clone(), tab_icon_symbol(tab)),
+                WorkspaceTab::Table(tab) => (tab.title.clone(), tab_icon_symbol(tab)),
+                WorkspaceTab::CreateTable(state) => {
+                    let title = if state.database_kind == DatabaseKind::MongoDb {
+                        tr!("新建集合")
+                    } else {
+                        tr!("新建表")
+                    };
+                    (title, "△".to_string())
+                },
+                WorkspaceTab::Dashboard => ("Dashboard".to_string(), "◉".to_string()),
+            };
+
+            // 使用egui::Area绘制幽灵标题
+            egui::Area::new("tab-drag-ghost".into())
+                .order(egui::Order::Foreground)
+                .fixed_pos(pointer_pos + egui::vec2(-20.0, -15.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(palette.selection_bg.gamma_multiply(0.3))
+                        .stroke(Stroke::new(1.0, palette.selection_stroke))
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(&icon);
+                                ui.label(&title);
+                            });
+                        });
+                });
         }
         self.tab_drag_source = drag_source;
         self.tab_drag_target = drag_target;
