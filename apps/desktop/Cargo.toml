@@ -17,6 +17,7 @@ app-services = { path = "../../crates/app-services" }
 chrono.workspace = true
 core-domain = { path = "../../crates/core-domain" }
 eframe.workspace = true
+futures-util = "0.3"
 egui.workspace = true
 egui_dock.workspace = true
 egui_extras.workspace = true
@@ -27,7 +28,7 @@ open = "5"
 raw-window-handle.workspace = true
 regex.workspace = true
 regex-syntax.workspace = true
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "native-tls", "stream"], default-features = false }
 rfd.workspace = true
 semver = "1"
 serde.workspace = true

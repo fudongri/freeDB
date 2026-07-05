@@ -24,9 +24,28 @@ use crate::autocomplete::{
     SchemaCache, SqlContextParser,
 };
 
+struct ReleaseAsset {
+    name: String,
+    download_url: String,
+    size: u64,
+}
+
 struct UpdateInfo {
     version: String,
     url: String,
+    assets: Vec<ReleaseAsset>,
+}
+
+enum UpdateState {
+    Available(UpdateInfo),
+    Downloading { downloaded: u64, total: u64 },
+    ReadyToApply { file_path: std::path::PathBuf },
+    Error(String),
+}
+
+enum UpdateEvent {
+    Progress { downloaded: u64, total: u64 },
+    Done(Result<std::path::PathBuf, String>),
 }
 
 pub struct DesktopApp {
@@ -95,8 +114,9 @@ pub struct DesktopApp {
     pending_create_table: Option<Receiver<Result<(), String>>>,
     pending_sql_dump: Option<Receiver<SqlDumpLoadResult>>,
     pending_update_check: Option<Receiver<Option<UpdateInfo>>>,
-    update_info: Option<UpdateInfo>,
-    dismissed_update: bool,
+    update_state: Option<UpdateState>,
+    update_download_rx: Option<Receiver<UpdateEvent>>,
+    update_dismissed: bool,
     is_shortcuts_open: bool,
     is_log_window_open: bool,
     is_scroll_speed_open: bool,
@@ -1110,8 +1130,9 @@ impl DesktopApp {
             pending_create_table: None,
             pending_sql_dump: None,
             pending_update_check: None,
-            update_info: None,
-            dismissed_update: false,
+            update_state: None,
+            update_download_rx: None,
+            update_dismissed: false,
             is_shortcuts_open: false,
             is_log_window_open: false,
             is_scroll_speed_open: false,
@@ -1788,13 +1809,35 @@ impl DesktopApp {
 
         self.poll_sql_dump();
 
-        // Poll update check result
+        // 轮询更新检查结果
         if let Some(receiver) = self.pending_update_check.take() {
             match receiver.try_recv() {
-                Ok(Some(info)) => { self.update_info = Some(info); }
+                Ok(Some(info)) => { self.update_state = Some(UpdateState::Available(info)); }
                 Ok(None) => {} // 已是最新版本
                 Err(TryRecvError::Empty) => { self.pending_update_check = Some(receiver); }
-                Err(TryRecvError::Disconnected) => {} // 网络错误，静默忽略
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+
+        // 轮询下载进度
+        if let Some(receiver) = self.update_download_rx.take() {
+            match receiver.try_recv() {
+                Ok(UpdateEvent::Progress { downloaded, total }) => {
+                    self.update_state = Some(UpdateState::Downloading { downloaded, total });
+                    self.update_download_rx = Some(receiver);
+                }
+                Ok(UpdateEvent::Done(Ok(path))) => {
+                    self.update_state = Some(UpdateState::ReadyToApply { file_path: path });
+                }
+                Ok(UpdateEvent::Done(Err(e))) => {
+                    self.update_state = Some(UpdateState::Error(e));
+                }
+                Err(TryRecvError::Empty) => {
+                    self.update_download_rx = Some(receiver);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.update_state = Some(UpdateState::Error(tr!("下载任务异常终止").to_string()));
+                }
             }
         }
     }
@@ -10831,6 +10874,51 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             });
         self.is_scroll_speed_open = open;
     }
+
+    fn start_update_download(&mut self, info: &UpdateInfo) {
+        let Some(asset) = select_update_asset(info) else {
+            let url = info.url.clone();
+            let _ = open::that(&url);
+            self.update_dismissed = true;
+            return;
+        };
+        let file_path = update_download_path();
+        let url = asset.download_url.clone();
+        let total_size = asset.size;
+        let (tx, rx) = mpsc::channel();
+        let handle = self.runtime.handle().clone();
+        handle.spawn(async move {
+            download_update(&url, &file_path, tx).await;
+        });
+        self.update_download_rx = Some(rx);
+        self.update_state = Some(UpdateState::Downloading {
+            downloaded: 0,
+            total: total_size,
+        });
+    }
+
+    fn apply_downloaded_update(&mut self) {
+        if let Some(UpdateState::ReadyToApply { ref file_path }) = self.update_state {
+            match apply_update_and_restart(file_path) {
+                Ok(()) => unreachable!(),
+                Err(e) => {
+                    self.update_state = Some(UpdateState::Error(e));
+                }
+            }
+        }
+    }
+
+    fn retry_update(&mut self) {
+        self.update_state = None;
+        self.update_download_rx = None;
+        let (tx, rx) = mpsc::channel();
+        let handle = self.runtime.handle().clone();
+        handle.spawn(async move {
+            let result = check_for_update().await;
+            let _ = tx.send(result);
+        });
+        self.pending_update_check = Some(rx);
+    }
 }
 
 async fn check_for_update() -> Option<UpdateInfo> {
@@ -10849,12 +10937,179 @@ async fn check_for_update() -> Option<UpdateInfo> {
     let remote = semver::Version::parse(tag).ok()?;
     let local = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
     if remote > local {
+        let assets: Vec<ReleaseAsset> = json["assets"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|a| {
+                        Some(ReleaseAsset {
+                            name: a["name"].as_str()?.to_string(),
+                            download_url: a["browser_download_url"].as_str()?.to_string(),
+                            size: a["size"].as_u64().unwrap_or(0),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Some(UpdateInfo {
             version: tag.to_string(),
             url: json["html_url"].as_str()?.to_string(),
+            assets,
         })
     } else {
         None
+    }
+}
+
+fn select_update_asset(info: &UpdateInfo) -> Option<&ReleaseAsset> {
+    #[cfg(target_os = "macos")]
+    {
+        info.assets.iter().find(|a| a.name.ends_with(".dmg"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if is_nsis_install() {
+            info.assets.iter().find(|a| a.name.contains("-setup.exe"))
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = info;
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_nsis_install() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|dir| dir.join("uninstall.exe").exists()))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn find_macos_app_bundle() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut path = exe.as_path();
+    loop {
+        if path.extension().map_or(false, |e| e == "app") {
+            return Some(path.to_path_buf());
+        }
+        path = path.parent()?;
+    }
+}
+
+fn update_download_path() -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    { std::env::temp_dir().join("freedb_update.dmg") }
+    #[cfg(target_os = "windows")]
+    { std::env::temp_dir().join("freedb_update.exe") }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    { std::env::temp_dir().join("freedb_update") }
+}
+
+async fn download_update(url: &str, file_path: &std::path::Path, tx: std::sync::mpsc::Sender<UpdateEvent>) {
+    let result = async {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(600))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client
+            .get(url)
+            .header("User-Agent", "freedb")
+            .send()
+            .await
+            .map_err(|e| tr!("网络错误: {}", e).to_string())?;
+        if !resp.status().is_success() {
+            return Err(tr!("下载失败: HTTP {}", resp.status().as_u16()).to_string());
+        }
+        let total = resp.content_length().unwrap_or(0);
+        let mut stream = resp.bytes_stream();
+        let mut file = tokio::fs::File::create(file_path)
+            .await
+            .map_err(|e| tr!("无法创建临时文件: {}", e).to_string())?;
+        let mut downloaded: u64 = 0;
+        use futures_util::StreamExt;
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| tr!("下载中断: {}", e).to_string())?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                .await
+                .map_err(|e| tr!("写入文件失败: {}", e).to_string())?;
+            downloaded += chunk.len() as u64;
+            let _ = tx.send(UpdateEvent::Progress { downloaded, total });
+        }
+        Ok(file_path.to_path_buf())
+    }.await;
+    let _ = tx.send(UpdateEvent::Done(result));
+}
+
+#[cfg(target_os = "macos")]
+fn apply_update_and_restart(dmg_path: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+    let mount_point = "/Volumes/FreeDB_Update";
+    let dmg_str = dmg_path.to_str().ok_or("Invalid path")?;
+
+    let status = Command::new("hdiutil")
+        .args(["attach", dmg_str, "-nobrowse", "-mountpoint", mount_point])
+        .status()
+        .map_err(|e| tr!("挂载 DMG 失败: {}", e).to_string())?;
+    if !status.success() {
+        return Err(tr!("挂载 DMG 失败").to_string());
+    }
+
+    let app_path = find_macos_app_bundle()
+        .unwrap_or_else(|| std::path::PathBuf::from("/Applications/FreeDB.app"));
+    let backup_path = app_path.with_extension("app.old");
+    let _ = std::fs::remove_dir_all(&backup_path);
+    if app_path.exists() {
+        std::fs::rename(&app_path, &backup_path)
+            .map_err(|e| tr!("无法备份旧版本: {}", e).to_string())?;
+    }
+
+    let src_app = format!("{}/FreeDB.app", mount_point);
+    let status = Command::new("cp")
+        .args(["-R", &src_app, app_path.to_str().unwrap_or("/Applications/FreeDB.app")])
+        .status()
+        .map_err(|e| tr!("复制应用失败: {}", e).to_string())?;
+    if !status.success() {
+        let _ = std::fs::rename(&backup_path, &app_path);
+        return Err(tr!("复制应用失败").to_string());
+    }
+
+    let _ = Command::new("xattr").args(["-cr", app_path.to_str().unwrap_or("")]).status();
+    let _ = Command::new("hdiutil").args(["detach", mount_point, "-force"]).status();
+    let _ = std::fs::remove_dir_all(&backup_path);
+    let _ = std::fs::remove_file(dmg_path);
+
+    let _ = Command::new("open").args(["-n", app_path.to_str().unwrap_or("")]).spawn();
+    std::process::exit(0);
+}
+
+#[cfg(target_os = "windows")]
+fn apply_update_and_restart(exe_path: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+    let exe_str = exe_path.to_str().ok_or("Invalid path")?;
+    Command::new(exe_str)
+        .args(["/S"])
+        .spawn()
+        .map_err(|e| tr!("启动安装程序失败: {}", e).to_string())?;
+    std::process::exit(0);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn apply_update_and_restart(_path: &std::path::Path) -> Result<(), String> {
+    Err(tr!("自动更新暂不支持此平台").to_string())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
@@ -10944,6 +11199,7 @@ impl eframe::App for DesktopApp {
             || self.pending_database_list.is_some()
             || self.ddl_pending_action.is_some()
             || self.pending_update_check.is_some()
+            || self.update_download_rx.is_some()
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Table(t) if t.generate_data_running))
         {
             // 后台任务进行中时主动请求后续帧，避免必须等鼠标再次移动才显示结果。
@@ -10973,36 +11229,92 @@ impl eframe::App for DesktopApp {
             .show(ctx, |ui| self.render_toolbar(ui));
 
         // 更新提示栏
-        if let Some(ref info) = self.update_info {
-            if !self.dismissed_update {
-                let bg = if ctx.style().visuals.dark_mode {
-                    Color32::from_rgb(30, 60, 30)
-                } else {
-                    Color32::from_rgb(220, 245, 220)
+        enum UpdateAction { StartDownload, Apply, Retry, Dismiss }
+        let mut pending_update_action: Option<UpdateAction> = None;
+        if let Some(ref state) = self.update_state {
+            if !self.update_dismissed {
+                let dark = ctx.style().visuals.dark_mode;
+                let bg = if dark { Color32::from_rgb(30, 60, 30) } else { Color32::from_rgb(220, 245, 220) };
+                let error_bg = if dark { Color32::from_rgb(60, 30, 30) } else { Color32::from_rgb(245, 220, 220) };
+                let green_text = if dark { Color32::from_rgb(100, 220, 100) } else { Color32::from_rgb(0, 130, 0) };
+                let red_text = if dark { Color32::from_rgb(220, 100, 100) } else { Color32::from_rgb(180, 0, 0) };
+
+                let banner_height = match state {
+                    UpdateState::Downloading { .. } => 44.0,
+                    _ => 28.0,
                 };
+                let banner_bg = match state {
+                    UpdateState::Error(_) => error_bg,
+                    _ => bg,
+                };
+
                 egui::TopBottomPanel::top("update_banner")
-                    .exact_height(28.0)
-                    .frame(egui::Frame::NONE.fill(bg).inner_margin(egui::vec2(8.0, 4.0)))
+                    .exact_height(banner_height)
+                    .frame(egui::Frame::NONE.fill(banner_bg).inner_margin(egui::vec2(8.0, 4.0)))
                     .show(ctx, |ui| {
                         ui.horizontal_centered(|ui| {
-                            ui.label("🆕");
-                            let text_color = if ctx.style().visuals.dark_mode {
-                                Color32::from_rgb(100, 220, 100)
-                            } else {
-                                Color32::from_rgb(0, 130, 0)
-                            };
-                            ui.colored_label(text_color, format!("FreeDB {} is available!", info.version));
-                            if ui.link("Download").clicked() {
-                                let _ = open::that(&info.url);
+                            match state {
+                                UpdateState::Available(info) => {
+                                    ui.label("🆕");
+                                    ui.colored_label(green_text, format!("FreeDB {} is available!", info.version));
+                                    if toolbar_button(ui, tr!("更新"), ToolbarButtonKind::Primary).clicked() {
+                                        pending_update_action = Some(UpdateAction::StartDownload);
+                                    }
+                                }
+                                UpdateState::Downloading { downloaded, total } => {
+                                    ui.spinner();
+                                    let fraction = if *total > 0 { *downloaded as f32 / *total as f32 } else { 0.0 };
+                                    let pct = if *total > 0 {
+                                        format!("{}%", (*downloaded * 100) / *total)
+                                    } else {
+                                        format_bytes(*downloaded)
+                                    };
+                                    ui.label(tr!("正在下载更新..."));
+                                    ui.add(egui::ProgressBar::new(fraction).text(pct).desired_width(200.0));
+                                }
+                                UpdateState::ReadyToApply { .. } => {
+                                    ui.label("✅");
+                                    ui.colored_label(green_text, tr!("更新已下载完成"));
+                                    if toolbar_button(ui, tr!("重启完成更新"), ToolbarButtonKind::Accent).clicked() {
+                                        pending_update_action = Some(UpdateAction::Apply);
+                                    }
+                                }
+                                UpdateState::Error(msg) => {
+                                    ui.label("⚠");
+                                    ui.colored_label(red_text, tr!("更新失败: {}", msg));
+                                    if toolbar_button(ui, tr!("重试"), ToolbarButtonKind::Subtle).clicked() {
+                                        pending_update_action = Some(UpdateAction::Retry);
+                                    }
+                                }
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.small_button("✕").clicked() {
-                                    self.dismissed_update = true;
+                                    pending_update_action = Some(UpdateAction::Dismiss);
                                 }
                             });
                         });
                     });
             }
+        }
+        match pending_update_action {
+            Some(UpdateAction::StartDownload) => {
+                if let Some(UpdateState::Available(ref info)) = self.update_state {
+                    let info_clone = UpdateInfo {
+                        version: info.version.clone(),
+                        url: info.url.clone(),
+                        assets: info.assets.iter().map(|a| ReleaseAsset {
+                            name: a.name.clone(),
+                            download_url: a.download_url.clone(),
+                            size: a.size,
+                        }).collect(),
+                    };
+                    self.start_update_download(&info_clone);
+                }
+            }
+            Some(UpdateAction::Apply) => self.apply_downloaded_update(),
+            Some(UpdateAction::Retry) => self.retry_update(),
+            Some(UpdateAction::Dismiss) => self.update_dismissed = true,
+            None => {}
         }
 
         let palette = if ctx.style().visuals.dark_mode {

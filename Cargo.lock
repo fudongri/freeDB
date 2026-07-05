@@ -184,7 +184,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app-services"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "connection-pool"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "core-domain",
  "driver-api",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "connection-store"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "core-domain"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "app-services",
  "chrono",
@@ -1261,6 +1261,7 @@ dependencies = [
  "egui",
  "egui_dock",
  "egui_extras",
+ "futures-util",
  "i18n",
  "image",
  "muda",
@@ -1386,7 +1387,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "driver-api"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "core-domain",
@@ -1398,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "driver-mongodb"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1416,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "driver-mysql"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1429,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "driver-postgres"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1731,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "export-service"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "core-domain",
@@ -2523,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "history-store"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2620,19 +2621,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-rustls"
-version = "0.27.9"
+name = "hyper-tls"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33ca68d021ef39cf6463ab54c1d0f5daf03377b70561305bb89a8f83aab66e0f"
+checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
 dependencies = [
- "http",
+ "bytes",
+ "http-body-util",
  "hyper",
  "hyper-util",
- "rustls",
+ "native-tls",
  "tokio",
- "tokio-rustls",
+ "tokio-native-tls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -2660,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "i18n"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "sys-locale",
 ]
@@ -3113,12 +3114,6 @@ checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
  "hashbrown 0.16.1",
 ]
-
-[[package]]
-name = "lru-slab"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "macro_magic"
@@ -4501,61 +4496,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quinn"
-version = "0.11.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c1a41e437b6bbd489372cd4971de128e85c855f56c57f283d20ff016cf7c0a8"
-dependencies = [
- "bytes",
- "cfg_aliases",
- "pin-project-lite",
- "quinn-proto",
- "quinn-udp",
- "rustc-hash 2.1.2",
- "rustls",
- "socket2 0.6.4",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "quinn-proto"
-version = "0.11.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
-dependencies = [
- "bytes",
- "getrandom 0.3.4",
- "lru-slab",
- "rand 0.9.4",
- "ring",
- "rustc-hash 2.1.2",
- "rustls",
- "rustls-pki-types",
- "slab",
- "thiserror 2.0.18",
- "tinyvec",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "quinn-udp"
-version = "0.5.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "addec6a0dcad8a8d96a771f815f0eaf55f9d1805756410b39f5fa81332574cbd"
-dependencies = [
- "cfg_aliases",
- "libc",
- "once_cell",
- "socket2 0.6.4",
- "tracing",
- "windows-sys 0.60.2",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4737,33 +4677,34 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
- "hyper-rustls",
+ "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
+ "native-tls",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
- "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
- "tokio-rustls",
+ "tokio-native-tls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
- "webpki-roots",
 ]
 
 [[package]]
@@ -4912,7 +4853,6 @@ version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
 dependencies = [
- "web-time",
  "zeroize",
 ]
 
@@ -4990,7 +4930,7 @@ dependencies = [
 
 [[package]]
 name = "secure-store"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -5137,7 +5077,7 @@ dependencies = [
 
 [[package]]
 name = "session-manager"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "connection-pool",
@@ -5359,7 +5299,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-tunnel"
-version = "0.1.1"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "core-domain",
@@ -6254,6 +6194,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23939e44bb9a5d7576fa2b563dc2e136628f1224e88a8deed09e04858b77871f"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

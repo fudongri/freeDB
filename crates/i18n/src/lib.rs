@@ -687,6 +687,25 @@ fn en(key: &'static str) -> &'static str {
         "允许NULL值" => "Allow NULL",
         "使用默认值" => "Use Default",
 
+        "正在下载更新..." => "Downloading update...",
+        "更新已下载完成" => "Update downloaded",
+        "重启完成更新" => "Restart to update",
+        "更新失败: {}" => "Update failed: {}",
+        "重试" => "Retry",
+        "下载任务异常终止" => "Download task terminated unexpectedly",
+        "网络错误: {}" => "Network error: {}",
+        "下载失败: HTTP {}" => "Download failed: HTTP {}",
+        "无法创建临时文件: {}" => "Cannot create temp file: {}",
+        "下载中断: {}" => "Download interrupted: {}",
+        "写入文件失败: {}" => "Failed to write file: {}",
+        "挂载 DMG 失败: {}" => "Failed to mount DMG: {}",
+        "挂载 DMG 失败" => "Failed to mount DMG",
+        "无法备份旧版本: {}" => "Cannot backup old version: {}",
+        "复制应用失败: {}" => "Failed to copy application: {}",
+        "复制应用失败" => "Failed to copy application",
+        "启动安装程序失败: {}" => "Failed to launch installer: {}",
+        "自动更新暂不支持此平台" => "Auto-update is not supported on this platform",
+
         _ => key,
     }
 }
