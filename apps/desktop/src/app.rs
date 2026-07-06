@@ -2942,15 +2942,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let WorkspaceTab::Query(query_tab) = tab else {
             return;
         };
-        let connection_id = query_tab
-            .connection_id
-            .clone()
-            .or_else(|| self.selected_connection.clone());
-        let Some(connection_id) = connection_id else {
+        let Some(connection_id) = query_tab.connection_id.clone() else {
             self.status_message = tr!("请先选择一个连接").into();
             return;
         };
-        query_tab.connection_id = Some(connection_id.clone());
 
         // 如果底部面板被隐藏，重置编辑器高度
         if query_tab.editor_height.is_some() && query_tab.editor_height.unwrap() > 300.0 {
@@ -4700,7 +4695,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             ui,
                             tab,
                             &self.connections,
-                            self.selected_connection.clone(),
                             &self.database_cache,
                             &self.services,
                             &self.schema_cache,
@@ -6327,7 +6321,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         ui: &mut egui::Ui,
         tab: &mut QueryTabState,
         connections: &[ConnectionProfile],
-        selected_connection: Option<String>,
         database_cache: &HashMap<String, Vec<String>>,
         services: &AppServices,
         schema_cache: &SchemaCache,
@@ -6342,7 +6335,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .map(|item| item.name.clone())
             .unwrap_or_else(|| tr!("请选择连接").into());
         let tab_db_kind = tab.connection_id.as_deref()
-            .or(selected_connection.as_deref())
             .and_then(|cid| connections.iter().find(|c| c.id == cid).map(|c| c.kind));
         let has_result = (tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
             || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan))
@@ -6414,7 +6406,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                                 if toolbar_button(ui, tr!("查看历史查询"), ToolbarButtonKind::Subtle).clicked()
                                 {
-                                    if tab.connection_id.is_some() || selected_connection.is_some() {
+                                    if tab.connection_id.is_some() {
                                         tab.active_bottom_tab = QueryBottomTab::History;
                                         // 如果底部面板被隐藏，重置编辑器高度
                                         if tab.editor_height.is_some() && tab.editor_height.unwrap() > 300.0 {
@@ -6431,9 +6423,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     .on_hover_text(tr!("保存查询 ({}+S)", MOD_KEY))
                                     .clicked()
                                 {
-                                    if let Some(connection_id) =
-                                        tab.connection_id.clone().or_else(|| selected_connection.clone())
-                                    {
+                                    if let Some(connection_id) = tab.connection_id.clone() {
                                         action = TabUiAction::OpenSaveQueryDialog(connection_id);
                                     } else {
                                         tab.messages.push(tr!("请先选择一个连接后再保存查询").into());
@@ -6441,7 +6431,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }
                                 }
                                 if toolbar_button(ui, tr!("格式化"), ToolbarButtonKind::Subtle).clicked() {
-                                    let conn_id = tab.connection_id.as_deref().or(selected_connection.as_deref());
+                                    let conn_id = tab.connection_id.as_deref();
                                     let db_kind = conn_id.and_then(|cid|
                                         connections.iter().find(|c| c.id == cid).map(|c| c.kind)
                                     );
@@ -6499,10 +6489,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                                 // 数据库
                                 ui.label(RichText::new(tr!("数据库")).color(chrome.weak_text));
-                                let effective_connection_id = tab
-                                    .connection_id
-                                    .clone()
-                                    .or_else(|| selected_connection.clone());
+                                let effective_connection_id = tab.connection_id.clone();
                                 let databases = effective_connection_id
                                     .as_ref()
                                     .and_then(|cid| database_cache.get(cid));
