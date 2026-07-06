@@ -891,6 +891,8 @@ struct ConnectionFormState {
     ssh_port: u16,
     ssh_username: String,
     direct_connection: bool,
+    replica_set: String,
+    connection_uri: String,
 }
 
 impl Default for ConnectionFormState {
@@ -912,6 +914,8 @@ impl Default for ConnectionFormState {
             ssh_port: 22,
             ssh_username: String::new(),
             direct_connection: false,
+            replica_set: String::new(),
+            connection_uri: String::new(),
         }
     }
 }
@@ -2315,6 +2319,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             None,
         );
         handle.spawn(async move {
+            let t_ui = std::time::Instant::now();
             let execution = QueryExecution {
                 connection_id: table.connection_id.clone(),
                 database: table.database.clone(),
@@ -2324,6 +2329,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 services.load_table_definition(&table),
                 services.execute_sql(execution),
             );
+            tracing::info!("[UI] open_table_tab 整体耗时: {}ms", t_ui.elapsed().as_millis());
             let _ = sender.send(TablePreviewLoadResult {
                 tab_id,
                 table_name: table.table.clone(),
@@ -2833,6 +2839,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             cursor_ref,
         );
         handle.spawn(async move {
+            let t_ui = std::time::Instant::now();
             let execution = QueryExecution {
                 connection_id: table.connection_id.clone(),
                 database: table.database.clone(),
@@ -2847,6 +2854,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             } else {
                 (None, services.execute_sql(execution).await.map_err(|error| error.to_string()))
             };
+            tracing::info!("[UI] refresh_table_preview 整体耗时: {}ms (reload_def={})", t_ui.elapsed().as_millis(), reload_definition);
             let _ = sender.send(TablePreviewLoadResult {
                 tab_id,
                 table_name: table.table.clone(),
@@ -9281,6 +9289,24 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                 });
 
+                if self.connection_form.kind == DatabaseKind::MongoDb {
+                    ui.add_space(8.0);
+                    egui::Grid::new("mongo-replica-grid")
+                        .num_columns(2)
+                        .spacing([16.0, 12.0])
+                        .min_col_width(108.0)
+                        .show(ui, |ui| {
+                            form_row(ui, tr!("副本集名称"), &mut self.connection_form.replica_set);
+                            ui.end_row();
+                            form_row(ui, tr!("自定义 URI"), &mut self.connection_form.connection_uri);
+                        });
+                    ui.add_space(4.0);
+                    ui.small(
+                        RichText::new(tr!("填写 URI 后将忽略主机/端口/用户等字段，可直接粘贴 mongodb+srv:// 连接字符串"))
+                            .color(palette.subtitle),
+                    );
+                }
+
                 if self.connection_form.ssh_enabled {
                     ui.add_space(8.0);
                     egui::Frame::new()
@@ -12198,6 +12224,8 @@ impl ConnectionFormState {
                 .map(|item| item.username.clone())
                 .unwrap_or_default(),
             direct_connection: profile.direct_connection,
+            replica_set: profile.replica_set.clone().unwrap_or_default(),
+            connection_uri: profile.connection_uri.clone().unwrap_or_default(),
         }
     }
 
@@ -12226,6 +12254,8 @@ impl ConnectionFormState {
                 None
             },
             direct_connection: self.direct_connection,
+            replica_set: optional_string(&self.replica_set),
+            connection_uri: optional_string(&self.connection_uri),
         }
     }
 }

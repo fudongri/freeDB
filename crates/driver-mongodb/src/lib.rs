@@ -23,18 +23,28 @@ impl ConnectionProvider for MongoDbDriver {
         password: &str,
         database: Option<&str>,
     ) -> AppResult<ConnectionHandle> {
-        let auth_db = profile.default_database.as_deref().unwrap_or("admin");
-        let uri = if password.is_empty() {
-            format!("mongodb://{}:{}/?authSource={}", profile.host, profile.port, auth_db)
+        let uri = if let Some(ref custom_uri) = profile.connection_uri {
+            custom_uri.clone()
         } else {
-            format!(
-                "mongodb://{}:{}@{}:{}/?authSource={}",
-                urlencoding::encode(&profile.username),
-                urlencoding::encode(password),
-                profile.host,
-                profile.port,
-                auth_db
-            )
+            let auth_db = profile.default_database.as_deref().unwrap_or("admin");
+            let base = if password.is_empty() {
+                format!("mongodb://{}:{}/", profile.host, profile.port)
+            } else {
+                format!(
+                    "mongodb://{}:{}@{}:{}/",
+                    urlencoding::encode(&profile.username),
+                    urlencoding::encode(password),
+                    profile.host,
+                    profile.port,
+                )
+            };
+            let mut params = vec![format!("authSource={}", auth_db)];
+            if let Some(ref rs) = profile.replica_set {
+                if !rs.is_empty() {
+                    params.push(format!("replicaSet={}", rs));
+                }
+            }
+            format!("{}?{}", base, params.join("&"))
         };
         let mut options = ClientOptions::parse(&uri)
             .await
@@ -291,12 +301,14 @@ impl DatabaseDriver for MongoDbDriver {
         let start = Instant::now();
 
         let result = execute_mongo_command(client, db_name, sql).await?;
+        let elapsed = start.elapsed().as_millis();
+        tracing::info!("[MongoDB] execute_sql 总耗时: {}ms ({}行)", elapsed, result.1.len());
 
         Ok(QueryResult {
             columns: result.0,
             rows: result.1,
             affected_rows: result.2,
-            elapsed_ms: start.elapsed().as_millis(),
+            elapsed_ms: elapsed,
             message: result.3,
             mongo_types: result.4,
         })
@@ -438,6 +450,7 @@ async fn execute_mongo_command(
     db_name: &str,
     input: &str,
 ) -> AppResult<(Vec<String>, Vec<BTreeMap<String, QueryCellValue>>, Option<u64>, Option<String>, HashMap<(usize, String), MongoValue>)> {
+    let t_cmd = std::time::Instant::now();
     let input = strip_comments(input);
     let lower = input.to_lowercase();
 
@@ -565,10 +578,12 @@ async fn execute_mongo_command(
             }
             "aggregate" => {
                 let pipeline = parse_pipeline(&parsed.args)?;
+                let t0 = std::time::Instant::now();
                 let mut cursor = coll
                     .aggregate(pipeline)
                     .await
                     .map_err(map_mongo_error)?;
+                tracing::info!("[MongoDB] aggregate 执行耗时: {}ms", t0.elapsed().as_millis());
                 let (columns, rows, mongo_types) = collect_cursor(&mut cursor).await?;
                 let msg = Some(tr!("查询完成，返回 {} 条记录").replace("{}", &rows.len().to_string()));
                 Ok((columns, rows, None, msg, mongo_types))
@@ -1381,7 +1396,15 @@ async fn collect_cursor(
     let mut columns_set = HashSet::new();
     let mut rows = Vec::new();
     let mut mongo_types = HashMap::new();
-    while let Some(doc) = cursor.try_next().await.map_err(map_mongo_error)? {
+    let mut t_fetch_total = 0u128;
+    let mut t_convert_total = 0u128;
+    loop {
+        let t_fetch = std::time::Instant::now();
+        let maybe_doc = cursor.try_next().await.map_err(map_mongo_error)?;
+        t_fetch_total += t_fetch.elapsed().as_micros();
+        let Some(doc) = maybe_doc else { break };
+
+        let t_convert = std::time::Instant::now();
         let row_idx = rows.len();
         for key in doc.keys() {
             if columns_set.insert(key.clone()) {
@@ -1397,9 +1420,10 @@ async fn collect_cursor(
             }
             row.insert(col.clone(), cell);
         }
+        t_convert_total += t_convert.elapsed().as_micros();
         rows.push(row);
     }
-    tracing::info!("[MongoDB] collect_cursor 处理 {} 行耗时: {}ms", rows.len(), t0.elapsed().as_millis());
+    tracing::info!("[MongoDB] collect_cursor {} 行总耗时: {}ms (网络fetch={}ms, BSON转换={}ms, {}列)", rows.len(), t0.elapsed().as_millis(), t_fetch_total / 1000, t_convert_total / 1000, columns.len());
     Ok((columns, rows, mongo_types))
 }
 

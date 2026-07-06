@@ -95,6 +95,8 @@ pub struct ConnectionProfileInput {
     pub ssl_mode: SslMode,
     pub ssh_tunnel: Option<SshTunnelConfig>,
     pub direct_connection: bool,
+    pub replica_set: Option<String>,
+    pub connection_uri: Option<String>,
 }
 
 impl Default for ConnectionProfileInput {
@@ -113,6 +115,8 @@ impl Default for ConnectionProfileInput {
             ssl_mode: SslMode::Prefer,
             ssh_tunnel: None,
             direct_connection: false,
+            replica_set: None,
+            connection_uri: None,
         }
     }
 }
@@ -136,6 +140,8 @@ pub struct ConnectionProfile {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub direct_connection: bool,
+    pub replica_set: Option<String>,
+    pub connection_uri: Option<String>,
 }
 
 impl ConnectionProfile {
@@ -159,6 +165,8 @@ impl ConnectionProfile {
             created_at: now,
             updated_at: now,
             direct_connection: input.direct_connection,
+            replica_set: input.replica_set,
+            connection_uri: input.connection_uri,
         }
     }
 }

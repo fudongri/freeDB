@@ -26,7 +26,7 @@ impl ConnectionStore {
         let mut statement = connection.prepare(
             "SELECT id, name, kind, group_name, host, port, username, default_database,
                     connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
-                    direct_connection
+                    direct_connection, replica_set, connection_uri
              FROM connection_profiles
              ORDER BY sort_order ASC, name ASC",
         )?;
@@ -51,8 +51,8 @@ impl ConnectionStore {
             "INSERT INTO connection_profiles (
                 id, name, kind, group_name, host, port, username, default_database,
                 connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
-                direct_connection
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                direct_connection, replica_set, connection_uri
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 profile.id,
                 profile.name,
@@ -70,6 +70,8 @@ impl ConnectionStore {
                 profile.created_at.to_rfc3339(),
                 profile.updated_at.to_rfc3339(),
                 profile.direct_connection,
+                profile.replica_set,
+                profile.connection_uri,
             ],
         )?;
         Ok(())
@@ -83,7 +85,7 @@ impl ConnectionStore {
              SET name = ?2, kind = ?3, group_name = ?4, host = ?5, port = ?6,
                  username = ?7, default_database = ?8, connect_timeout_secs = ?9,
                  ssl_mode = ?10, ssh_tunnel_json = ?11, last_used_at = ?12, updated_at = ?13,
-                 direct_connection = ?14
+                 direct_connection = ?14, replica_set = ?15, connection_uri = ?16
              WHERE id = ?1",
             params![
                 profile.id,
@@ -100,6 +102,8 @@ impl ConnectionStore {
                 profile.last_used_at.map(|item| item.to_rfc3339()),
                 profile.updated_at.to_rfc3339(),
                 profile.direct_connection,
+                profile.replica_set,
+                profile.connection_uri,
             ],
         )?;
         Ok(())
@@ -120,7 +124,7 @@ impl ConnectionStore {
             .query_row(
                 "SELECT id, name, kind, group_name, host, port, username, default_database,
                         connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
-                        direct_connection
+                        direct_connection, replica_set, connection_uri
                  FROM connection_profiles WHERE id = ?1",
                 params![connection_id],
                 map_profile,
@@ -200,6 +204,15 @@ impl ConnectionStore {
         // 迁移：已有数据库添加 direct_connection 列
         let _ = connection.execute(
             "ALTER TABLE connection_profiles ADD COLUMN direct_connection INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        // 迁移：已有数据库添加 replica_set / connection_uri 列
+        let _ = connection.execute(
+            "ALTER TABLE connection_profiles ADD COLUMN replica_set TEXT",
+            [],
+        );
+        let _ = connection.execute(
+            "ALTER TABLE connection_profiles ADD COLUMN connection_uri TEXT",
             [],
         );
         // 迁移：更新 kind CHECK 约束以包含 'mongodb'
@@ -367,6 +380,8 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
     let created_at = parse_datetime(&row.get::<_, String>(13)?).map_err(to_sql_error)?;
     let updated_at = parse_datetime(&row.get::<_, String>(14)?).map_err(to_sql_error)?;
     let direct_connection: i64 = row.get(15)?;
+    let replica_set: Option<String> = row.get(16)?;
+    let connection_uri: Option<String> = row.get(17)?;
 
     Ok(ConnectionProfile {
         id: row.get(0)?,
@@ -386,6 +401,8 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
         created_at,
         updated_at,
         direct_connection: direct_connection != 0,
+        replica_set,
+        connection_uri,
     })
 }
 
