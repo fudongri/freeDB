@@ -15,7 +15,6 @@ FreeDB is a lightweight, fast database client built with Rust and [egui](https:/
 - **Multiple tabs** — work with several queries and connections simultaneously
 - **Connection management** — save, edit, organize, and group database connections
 - **Connection pooling** — cached connections with health checks and auto-retry
-- **SSH tunnel** — connect to remote databases through SSH tunneling
 - **SSL/TLS** — configurable SSL modes (disable, prefer, require, verify-ca, verify-full)
 - **Table explorer** — browse tables, views, and schemas in the sidebar
 - **Table views** — data preview, structure, indexes, and DDL
@@ -103,7 +102,6 @@ freedb/
 │   ├── i18n/              # Internationalization (zh-CN / en)
 │   ├── secure-store/      # Credential storage
 │   ├── session-manager/   # Session lifecycle
-│   └── ssh-tunnel/        # SSH tunnel support
 └── scripts/               # Build and packaging scripts
 ```
 
