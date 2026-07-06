@@ -1028,9 +1028,30 @@ fn json_value_to_bson(value: serde_json::Value) -> Bson {
                     if let serde_json::Value::String(s) = val {
                         match key_str {
                             "$date" => {
+                                // RFC 3339 / ISO 8601
                                 if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
                                     let sys: std::time::SystemTime = dt.with_timezone(&chrono::Utc).into();
                                     return Bson::DateTime(sys.into());
+                                }
+                                // 回退：尝试常见非 RFC3339 格式
+                                for fmt in &[
+                                    "%Y-%m-%d %H:%M:%S%.f",
+                                    "%Y-%m-%d %H:%M:%S",
+                                    "%Y-%m-%dT%H:%M:%S%.f",
+                                    "%Y-%m-%dT%H:%M:%S",
+                                    "%Y-%m-%d",
+                                ] {
+                                    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+                                        let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc);
+                                        let sys: std::time::SystemTime = dt.into();
+                                        return Bson::DateTime(sys.into());
+                                    }
+                                    if let Ok(nd) = chrono::NaiveDate::parse_from_str(s, fmt) {
+                                        let ndt = nd.and_hms_opt(0, 0, 0).unwrap();
+                                        let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc);
+                                        let sys: std::time::SystemTime = dt.into();
+                                        return Bson::DateTime(sys.into());
+                                    }
                                 }
                             }
                             "$numberDecimal" => {

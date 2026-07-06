@@ -18712,18 +18712,22 @@ fn mongo_clause_expr(clause: &TableFilterClause, definition: Option<&TableDefini
 /// 将用户输入的筛选值转换为 MongoDB JSON 字面量
 /// 日期 → ISODate("...")，Decimal128 → NumberDecimal("...")，数值 → 无引号数字，其他 → 带引号字符串
 fn mongo_value_literal(value: &str, column_type: Option<&str>) -> String {
-    if looks_like_datetime(value) {
-        return format!("ISODate(\"{}\")", value.replace('\\', "\\\\").replace('"', "\\\""));
-    }
-    // ObjectId：column_type 为 ObjectId，或 24 位十六进制字符串（_id 常见）
-    if column_type == Some("ObjectId") || value.len() == 24 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-        return format!("ObjectId(\"{}\")", escaped);
-    }
-    // Decimal128 字段需要 NumberDecimal() 包裹才能正确匹配
-    if column_type == Some("Decimal128") {
-        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-        return format!("NumberDecimal(\"{}\")", escaped);
+    let is_string_col = column_type == Some("String");
+    // 字符串字段不做类型推断，原样返回带引号字符串
+    if !is_string_col {
+        if looks_like_datetime(value) {
+            return format!("ISODate(\"{}\")", value.replace('\\', "\\\\").replace('"', "\\\""));
+        }
+        // ObjectId：column_type 为 ObjectId，或 24 位十六进制字符串（_id 常见）
+        if column_type == Some("ObjectId") || value.len() == 24 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            return format!("ObjectId(\"{}\")", escaped);
+        }
+        // Decimal128 字段需要 NumberDecimal() 包裹才能正确匹配
+        if column_type == Some("Decimal128") {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            return format!("NumberDecimal(\"{}\")", escaped);
+        }
     }
     if let Ok(n) = value.parse::<i64>() {
         return n.to_string();
@@ -19705,9 +19709,17 @@ fn looks_like_json(text: &str) -> bool {
 }
 
 fn looks_like_datetime(text: &str) -> bool {
+    // ISO 8601: 必须以 4 位年份开头，避免误匹配数值范围（如 "100-200"）
+    if text.len() < 10 || !text.as_bytes()[0].is_ascii_digit() || !text.as_bytes()[1].is_ascii_digit()
+        || !text.as_bytes()[2].is_ascii_digit() || !text.as_bytes()[3].is_ascii_digit()
+    {
+        return false;
+    }
     (text.contains('-') && text.contains(':'))
         || text.ends_with('Z')
-        || text.contains('T') && text.chars().any(|ch| ch.is_ascii_digit())
+        || (text.contains('T') && text.chars().any(|ch| ch.is_ascii_digit()))
+        // 日期部分：YYYY-MM-DD 且长度恰好为 10
+        || (text.len() == 10 && text.as_bytes().get(4) == Some(&b'-') && text.as_bytes().get(7) == Some(&b'-'))
 }
 
 #[derive(Clone, Copy)]
