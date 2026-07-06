@@ -11974,8 +11974,17 @@ impl eframe::App for DesktopApp {
             )) || (input.modifiers.command && input.key_pressed(egui::Key::Slash))
         });
         if toggle_comment {
+            let connection_id = match self.tabs.get(self.active_tab) {
+                Some(WorkspaceTab::Query(tab)) => tab.connection_id.clone(),
+                _ => None,
+            };
+            let is_mongo = connection_id
+                .as_deref()
+                .map(|cid| self.database_kind_for_connection(cid) == DatabaseKind::MongoDb)
+                .unwrap_or(false);
+            let comment_prefix = if is_mongo { "// " } else { "-- " };
             if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-                toggle_sql_line_comment(&mut tab.sql, &mut tab.cursor_range);
+                toggle_sql_line_comment(&mut tab.sql, &mut tab.cursor_range, comment_prefix);
             }
         }
 
@@ -21312,8 +21321,9 @@ fn render_query_empty_state(ui: &mut egui::Ui, title: &str, description: &str) {
 fn toggle_sql_line_comment(
     sql: &mut String,
     cursor_range: &mut Option<egui::text::CCursorRange>,
+    comment_prefix: &str,
 ) {
-    toggle_sql_line_comment_inner(sql, cursor_range);
+    toggle_sql_line_comment_inner(sql, cursor_range, comment_prefix);
 }
 
 /// Find the single character-based edit between old and new strings.
@@ -21501,6 +21511,7 @@ fn replicate_edit_to_extra_cursors(
 fn toggle_sql_line_comment_inner(
     sql: &mut String,
     cursor_range: &mut Option<egui::text::CCursorRange>,
+    comment_prefix: &str,
 ) {
     let text = sql.clone(); // clone to avoid borrow issues
     let (sel_start, sel_end) = cursor_range
@@ -21541,14 +21552,16 @@ fn toggle_sql_line_comment_inner(
     // 判断整体方向：如果没有已注释的行就先注释，否则全注释（与 VSCode 行为一致）
     // 这里简化：第一行决定 toggle 方向
     let first_line = lines[0];
-    let all_commented = !first_line.is_empty() && (first_line.starts_with("-- ") || first_line == "--" || !first_line.starts_with("--"));
+    let bare_prefix = comment_prefix.trim_end();
+    let all_commented = !first_line.is_empty() && (first_line.starts_with(comment_prefix) || first_line == bare_prefix || !first_line.starts_with(bare_prefix));
     // 使用更直观的判断：如果所有非空行都已注释则取消注释，否则注释
     let any_uncommented = lines
         .iter()
-        .any(|l| !l.is_empty() && !l.starts_with("--"));
+        .any(|l| !l.is_empty() && !l.starts_with(bare_prefix));
 
     let mut new_lines: Vec<String> = Vec::with_capacity(lines.len());
     let mut cursor_delta: isize = 0;
+    let prefix_len = comment_prefix.chars().count() as isize;
     for line in &lines {
         if line.is_empty() {
             new_lines.push((*line).to_string());
@@ -21556,13 +21569,13 @@ fn toggle_sql_line_comment_inner(
         }
         if any_uncommented {
             // 注释
-            new_lines.push(format!("-- {}", line));
-            cursor_delta += 3;
+            new_lines.push(format!("{}{}", comment_prefix, line));
+            cursor_delta += prefix_len;
         } else {
-            // 取消注释: remove "-- " or "--"
-            let rest = line.strip_prefix("-- ").or_else(|| line.strip_prefix("--")).unwrap_or(line);
+            // 取消注释
+            let rest = line.strip_prefix(comment_prefix).or_else(|| line.strip_prefix(bare_prefix)).unwrap_or(line);
             new_lines.push(rest.to_string());
-            cursor_delta -= 3_isize;
+            cursor_delta -= prefix_len;
         }
     }
 
