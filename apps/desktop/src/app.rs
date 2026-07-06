@@ -10988,11 +10988,8 @@ fn select_update_asset(info: &UpdateInfo) -> Option<&ReleaseAsset> {
     }
     #[cfg(target_os = "windows")]
     {
-        if is_nsis_install() {
-            info.assets.iter().find(|a| a.name.contains("-setup.exe"))
-        } else {
-            None
-        }
+        // NSIS 安装器支持覆盖安装，便携版用户也可用
+        info.assets.iter().find(|a| a.name.contains("-setup.exe"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -11135,9 +11132,15 @@ fn apply_update_and_restart(dmg_path: &std::path::Path) -> Result<(), String> {
 fn apply_update_and_restart(exe_path: &std::path::Path) -> Result<(), String> {
     use std::process::Command;
     let exe_str = exe_path.to_str().ok_or("Invalid path")?;
-    Command::new(exe_str)
-        .args(["/S"])
-        .spawn()
+    let mut cmd = Command::new(exe_str);
+    cmd.arg("/S");
+    // 便携版用户：安装到当前 exe 所在目录
+    if !is_nsis_install() {
+        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+            cmd.arg(format!("/D={}", dir.display()));
+        }
+    }
+    cmd.spawn()
         .map_err(|e| tr!("启动安装程序失败: {}", e).to_string())?;
     std::process::exit(0);
 }
