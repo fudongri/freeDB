@@ -21,15 +21,7 @@ impl ConnectionProvider for MySqlDriver {
         password: &str,
         _database: Option<&str>,
     ) -> AppResult<ConnectionHandle> {
-        let mut builder = OptsBuilder::default();
-        builder = builder
-            .ip_or_hostname(profile.host.clone())
-            .tcp_port(profile.port)
-            .user(Some(profile.username.clone()))
-            .pass(Some(password.to_string()));
-        builder = apply_ssl(builder, profile.ssl_mode);
-        // MySQL 连接跨库共享，初始不指定数据库，各操作通过 USE db 切换
-        let conn = Conn::new(builder).await.map_err(map_mysql_error)?;
+        let conn = open_conn(profile, password, None).await?;
         Ok(ConnectionHandle::MySql { conn })
     }
 
@@ -390,10 +382,31 @@ fn open_conn(
         .user(Some(profile.username.clone()))
         .pass(Some(password.to_string()));
     builder = apply_ssl(builder, profile.ssl_mode);
+    let prefer_fallback = profile.ssl_mode == SslMode::Prefer;
     if let Some(db) = database {
         builder = builder.db_name(Some(db.to_string()));
     }
-    async move { Conn::new(builder).await.map_err(map_mysql_error) }
+    async move {
+        if prefer_fallback {
+            match Conn::new(builder.clone()).await {
+                Ok(conn) => return Ok(conn),
+                Err(ref e) if is_ssl_error(e) => {
+                    let mut plain = OptsBuilder::default();
+                    plain = plain
+                        .ip_or_hostname(profile.host.clone())
+                        .tcp_port(profile.port)
+                        .user(Some(profile.username.clone()))
+                        .pass(Some(password.to_string()));
+                    if let Some(db) = database {
+                        plain = plain.db_name(Some(db.to_string()));
+                    }
+                    return Conn::new(plain).await.map_err(map_mysql_error);
+                }
+                Err(e) => return Err(map_mysql_error(e)),
+            }
+        }
+        Conn::new(builder).await.map_err(map_mysql_error)
+    }
 }
 
 async fn exec_on_conn(conn: &mut Conn, execution: QueryExecution) -> AppResult<QueryResult> {
@@ -496,6 +509,13 @@ fn map_mysql_error(e: mysql_async::Error) -> AppError {
         mysql_async::Error::Server(_) => AppError::Query(e.to_string()),
         _ => AppError::Connection(e.to_string()),
     }
+}
+
+fn is_ssl_error(e: &mysql_async::Error) -> bool {
+    let msg = e.to_string().to_ascii_lowercase();
+    msg.contains("ssl")
+        || msg.contains("tls")
+        || msg.contains("does not have this capability")
 }
 
 async fn disconnect(conn: Conn) {

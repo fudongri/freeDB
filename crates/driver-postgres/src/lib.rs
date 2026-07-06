@@ -46,11 +46,24 @@ impl ConnectionProvider for PostgresDriver {
                     .danger_accept_invalid_certs(true)
                     .build()
                     .map_err(|e| AppError::Connection(format!("TLS init failed: {e}")))?;
-                let (c, conn) = tokio_postgres::connect(&conn_str, MakeTlsConnector::new(tls))
-                    .await
-                    .map_err(map_pg_error)?;
-                let h: BoxFuture<()> = Box::pin(async move { let _ = conn.await; });
-                (c, tokio::spawn(h))
+                match tokio_postgres::connect(&conn_str, MakeTlsConnector::new(tls)).await {
+                    Ok((c, conn)) => {
+                        let h: BoxFuture<()> = Box::pin(async move { let _ = conn.await; });
+                        (c, tokio::spawn(h))
+                    }
+                    Err(e) => {
+                        let msg = e.to_string().to_ascii_lowercase();
+                        if msg.contains("tls") || msg.contains("ssl") {
+                            let (c, conn) = tokio_postgres::connect(&conn_str, NoTls)
+                                .await
+                                .map_err(map_pg_error)?;
+                            let h: BoxFuture<()> = Box::pin(async move { let _ = conn.await; });
+                            (c, tokio::spawn(h))
+                        } else {
+                            return Err(map_pg_error(e));
+                        }
+                    }
+                }
             }
             SslMode::Require => {
                 let tls = TlsConnector::new()
