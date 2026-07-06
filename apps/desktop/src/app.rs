@@ -11130,18 +11130,54 @@ fn apply_update_and_restart(dmg_path: &std::path::Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn apply_update_and_restart(exe_path: &std::path::Path) -> Result<(), String> {
-    use std::process::Command;
-    let exe_str = exe_path.to_str().ok_or("Invalid path")?;
-    let mut cmd = Command::new(exe_str);
-    cmd.arg("/S");
-    // 便携版用户：安装到当前 exe 所在目录
-    if !is_nsis_install() {
-        if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-            cmd.arg(format!("/D={}", dir.display()));
-        }
+    use std::os::windows::ffi::OsStrExt;
+
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut core::ffi::c_void,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> *mut core::ffi::c_void;
     }
-    cmd.spawn()
-        .map_err(|e| tr!("启动安装程序失败: {}", e).to_string())?;
+
+    const SW_SHOWNORMAL: i32 = 1;
+
+    fn to_wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
+        s.as_ref().encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let file_w = to_wide(exe_path);
+    let verb_w = to_wide("runas");
+    let params_w = if is_nsis_install() {
+        to_wide("/S")
+    } else if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        to_wide(format!("/S /D={}", dir.display()))
+    } else {
+        to_wide("/S")
+    };
+    let dir_w = std::env::current_exe().ok()
+        .and_then(|p| p.parent().map(|d| to_wide(d)))
+        .unwrap_or_else(|| to_wide(""));
+
+    let ret = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb_w.as_ptr(),
+            file_w.as_ptr(),
+            params_w.as_ptr(),
+            dir_w.as_ptr(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    // ShellExecuteW 返回值 <= 32 表示失败
+    if ret as usize <= 32 {
+        return Err(tr!("启动安装程序失败（UAC 提权被拒绝或取消）").to_string());
+    }
+
     std::process::exit(0);
 }
 
