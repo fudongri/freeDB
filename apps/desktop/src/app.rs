@@ -11724,7 +11724,7 @@ impl eframe::App for DesktopApp {
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
                     let suggestion_count = AutocompleteEngine::suggest(
                         &tab.sql,
-                        tab.cursor_range.map(|r| r.primary.index).unwrap_or(tab.sql.len()),
+                        tab.cursor_range.map(|r| r.primary.index).unwrap_or(tab.sql.chars().count()),
                         &self.schema_cache,
                         tab_conn_id.as_deref(),
                         db_kind,
@@ -11768,7 +11768,7 @@ impl eframe::App for DesktopApp {
                 };
                 let db_kind = tab_conn_id.as_deref().map(|cid| self.database_kind_for_connection(cid));
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-                    let cursor = tab.cursor_range.map(|r| r.primary.index).unwrap_or(tab.sql.len());
+                    let cursor = tab.cursor_range.map(|r| r.primary.index).unwrap_or(tab.sql.chars().count());
                     let suggestions = AutocompleteEngine::suggest(
                         &tab.sql,
                         cursor,
@@ -11778,8 +11778,11 @@ impl eframe::App for DesktopApp {
                     );
                     if let Some(s) = suggestions.get(tab.autocomplete.selected_index) {
                         let prefix_start = tab.autocomplete.prefix_start_index;
-                        let before = tab.sql[..prefix_start].to_string();
-                        let after = tab.sql[cursor..].to_string();
+                        let char_to_byte = |char_idx: usize| -> usize {
+                            tab.sql.char_indices().nth(char_idx).map(|(pos, _)| pos).unwrap_or(tab.sql.len())
+                        };
+                        let before = tab.sql[..char_to_byte(prefix_start)].to_string();
+                        let after = tab.sql[char_to_byte(cursor)..].to_string();
                         let text = s.insertion_text.as_deref().unwrap_or(&s.label);
                         let new_cursor = before.chars().count() + s.cursor_offset.unwrap_or(text.chars().count());
                         tab.sql = format!("{}{}{}", before, text, after);
@@ -21536,7 +21539,7 @@ fn toggle_sql_line_comment_inner(
                 .as_ref()
                 .map(|r| r.primary.index)
                 .unwrap_or(0)
-                .min(text.len());
+                .min(text.chars().count());
             (cursor, cursor)
         });
 
@@ -22000,6 +22003,16 @@ fn sql_highlight_job_with_font_size(
             continue;
         }
 
+        if ch == '/' && sql[i..].starts_with("//") {
+            let end = sql[i..]
+                .find('\n')
+                .map(|offset| i + offset)
+                .unwrap_or(sql.len());
+            job.append(&sql[i..end], 0.0, comment.clone());
+            i = end;
+            continue;
+        }
+
         if ch == '#' {
             let end = sql[i..]
                 .find('\n')
@@ -22195,7 +22208,7 @@ fn check_autocomplete_triggers(
         let cursor = tab.cursor_range.map(|r| r.primary.index).unwrap_or(0);
         let prefix =
             SqlContextParser::current_token_prefix(&tab.sql, cursor);
-        let prefix_start = cursor.saturating_sub(prefix.len());
+        let prefix_start = cursor.saturating_sub(prefix.chars().count());
 
         tab.autocomplete.prefix = prefix;
         tab.autocomplete.prefix_start_index = prefix_start;
@@ -22739,10 +22752,13 @@ fn render_query_editor(
                                 let cursor = tab
                                     .cursor_range
                                     .map(|r| r.primary.index)
-                                    .unwrap_or(tab.sql.len());
+                                    .unwrap_or(tab.sql.chars().count());
                                 let prefix_start = tab.autocomplete.prefix_start_index;
-                                let before = &tab.sql[..prefix_start];
-                                let after = &tab.sql[cursor..];
+                                let char_to_byte = |char_idx: usize| -> usize {
+                                    tab.sql.char_indices().nth(char_idx).map(|(pos, _)| pos).unwrap_or(tab.sql.len())
+                                };
+                                let before = &tab.sql[..char_to_byte(prefix_start)];
+                                let after = &tab.sql[char_to_byte(cursor)..];
                                 let new_cursor = before.chars().count() + cursor_offset.unwrap_or(selected.chars().count());
                                 tab.sql = format!("{}{}{}", before, selected, after);
                                 tab.autocomplete.dismiss();
