@@ -35,7 +35,7 @@ egui_dock = "0.18"
 egui_extras = "0.33"
 muda = "0.16"
 mongodb = "3.2"
-mysql_async = "0.36"
+mysql_async = { version = "0.36", features = ["native-tls"] }
 parking_lot = "0.12"
 raw-window-handle = "0.6"
 postgres-native-tls = "0.5"

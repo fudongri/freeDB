@@ -81,7 +81,6 @@ impl AppServices {
         profile.username = input.username;
         profile.default_database = input.default_database;
         profile.password_saved = input.save_password;
-        profile.connect_timeout_secs = input.connect_timeout_secs;
         profile.ssl_mode = input.ssl_mode;
         profile.direct_connection = input.direct_connection;
         profile.replica_set = input.replica_set;

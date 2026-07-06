@@ -884,7 +884,6 @@ struct ConnectionFormState {
     password: String,
     default_database: String,
     save_password: bool,
-    connect_timeout_secs: u64,
     ssl_mode: SslMode,
     direct_connection: bool,
     replica_set: String,
@@ -903,7 +902,6 @@ impl Default for ConnectionFormState {
             password: String::new(),
             default_database: String::new(),
             save_password: true,
-            connect_timeout_secs: 5,
             ssl_mode: SslMode::Prefer,
             direct_connection: false,
             replica_set: String::new(),
@@ -9234,13 +9232,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     );
                                 });
                                 form_row(ui, tr!("默认数据库"), &mut self.connection_form.default_database);
-                                form_grid_row(ui, tr!("超时(秒)"), |ui| {
-                                    ui.add_sized(
-                                        [120.0, 30.0],
-                                        egui::DragValue::new(&mut self.connection_form.connect_timeout_secs)
-                                            .range(1..=60),
-                                    );
-                                });
                                 form_grid_row(ui, "SSL", |ui| {
                                     egui::ComboBox::from_id_salt("ssl-mode")
                                         .selected_text(match self.connection_form.ssl_mode {
@@ -12173,7 +12164,6 @@ impl ConnectionFormState {
             password: String::new(),
             default_database: profile.default_database.clone().unwrap_or_default(),
             save_password: profile.password_saved,
-            connect_timeout_secs: profile.connect_timeout_secs,
             ssl_mode: profile.ssl_mode,
             direct_connection: profile.direct_connection,
             replica_set: profile.replica_set.clone().unwrap_or_default(),
@@ -12193,7 +12183,6 @@ impl ConnectionFormState {
             password: optional_string(&self.password),
             default_database: optional_string(&self.default_database),
             save_password: self.save_password || has_password,
-            connect_timeout_secs: self.connect_timeout_secs,
             ssl_mode: self.ssl_mode,
             direct_connection: self.direct_connection,
             replica_set: optional_string(&self.replica_set),

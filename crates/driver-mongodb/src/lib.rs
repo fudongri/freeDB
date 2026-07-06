@@ -49,7 +49,6 @@ impl ConnectionProvider for MongoDbDriver {
         let mut options = ClientOptions::parse(&uri)
             .await
             .map_err(map_mongo_error)?;
-        options.connect_timeout = Some(std::time::Duration::from_secs(profile.connect_timeout_secs));
         options.direct_connection = Some(profile.direct_connection);
         let client = Client::with_options(options).map_err(map_mongo_error)?;
         Ok(ConnectionHandle::MongoDb {

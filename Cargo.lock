@@ -3457,6 +3457,7 @@ dependencies = [
  "keyed_priority_queue",
  "lru",
  "mysql_common",
+ "native-tls",
  "pem",
  "percent-encoding",
  "rand 0.9.4",

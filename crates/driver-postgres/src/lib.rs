@@ -1,13 +1,19 @@
 use async_trait::async_trait;
 use core_domain::{
     AppError, AppResult, ColumnDefinition, ConnectionProfile, ExplorerNode, ExplorerNodeType,
-    QueryCellValue, QueryExecution, QueryResult, TableChangeSet, TableDefinition, TableRef,
+    QueryCellValue, QueryExecution, QueryResult, SslMode, TableChangeSet, TableDefinition, TableRef,
 };
 use driver_api::{ConnectionHandle, ConnectionProvider, DatabaseDriver};
 use i18n::tr;
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Instant;
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
+
+type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 #[derive(Clone, Default)]
 pub struct PostgresDriver;
@@ -27,13 +33,36 @@ impl ConnectionProvider for PostgresDriver {
             "host={} port={} user={} password={} dbname={}",
             profile.host, profile.port, profile.username, password, db
         );
-        let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
-            .await
-            .map_err(map_pg_error)?;
-        let handle = tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        Ok(ConnectionHandle::Postgres { client, connection: handle })
+        let (client, connection) = match profile.ssl_mode {
+            SslMode::Disable => {
+                let (c, conn) = tokio_postgres::connect(&conn_str, NoTls)
+                    .await
+                    .map_err(map_pg_error)?;
+                let h: BoxFuture<()> = Box::pin(async move { let _ = conn.await; });
+                (c, tokio::spawn(h))
+            }
+            SslMode::Prefer => {
+                let tls = TlsConnector::builder()
+                    .danger_accept_invalid_certs(true)
+                    .build()
+                    .map_err(|e| AppError::Connection(format!("TLS init failed: {e}")))?;
+                let (c, conn) = tokio_postgres::connect(&conn_str, MakeTlsConnector::new(tls))
+                    .await
+                    .map_err(map_pg_error)?;
+                let h: BoxFuture<()> = Box::pin(async move { let _ = conn.await; });
+                (c, tokio::spawn(h))
+            }
+            SslMode::Require => {
+                let tls = TlsConnector::new()
+                    .map_err(|e| AppError::Connection(format!("TLS init failed: {e}")))?;
+                let (c, conn) = tokio_postgres::connect(&conn_str, MakeTlsConnector::new(tls))
+                    .await
+                    .map_err(map_pg_error)?;
+                let h: BoxFuture<()> = Box::pin(async move { let _ = conn.await; });
+                (c, tokio::spawn(h))
+            }
+        };
+        Ok(ConnectionHandle::Postgres { client, connection })
     }
 
     async fn ping(&self, handle: &mut ConnectionHandle) -> AppResult<()> {

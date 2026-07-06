@@ -2,11 +2,11 @@ use anyhow::Context;
 use async_trait::async_trait;
 use core_domain::{
     AppError, AppResult, ColumnDefinition, ConnectionProfile, ExplorerNode, ExplorerNodeType,
-    QueryCellValue, QueryExecution, QueryResult, TableChangeSet, TableDefinition, TableRef,
+    QueryCellValue, QueryExecution, QueryResult, SslMode, TableChangeSet, TableDefinition, TableRef,
 };
 use driver_api::{ConnectionHandle, ConnectionProvider, DatabaseDriver};
 use i18n::tr;
-use mysql_async::{prelude::Queryable, Conn, OptsBuilder, Row, Value};
+use mysql_async::{prelude::Queryable, Conn, OptsBuilder, Row, SslOpts, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
@@ -27,6 +27,7 @@ impl ConnectionProvider for MySqlDriver {
             .tcp_port(profile.port)
             .user(Some(profile.username.clone()))
             .pass(Some(password.to_string()));
+        builder = apply_ssl(builder, profile.ssl_mode);
         // MySQL 连接跨库共享，初始不指定数据库，各操作通过 USE db 切换
         let conn = Conn::new(builder).await.map_err(map_mysql_error)?;
         Ok(ConnectionHandle::MySql { conn })
@@ -360,6 +361,16 @@ impl DatabaseDriver for MySqlDriver {
 
 // ── helpers ──
 
+fn apply_ssl(builder: OptsBuilder, ssl_mode: SslMode) -> OptsBuilder {
+    match ssl_mode {
+        SslMode::Disable => builder,
+        SslMode::Prefer => builder.ssl_opts(
+            SslOpts::default().with_danger_accept_invalid_certs(true),
+        ),
+        SslMode::Require => builder.ssl_opts(SslOpts::default()),
+    }
+}
+
 fn mysql_conn_mut(handle: &mut ConnectionHandle) -> AppResult<&mut Conn> {
     match handle {
         ConnectionHandle::MySql { conn } => Ok(conn),
@@ -378,6 +389,7 @@ fn open_conn(
         .tcp_port(profile.port)
         .user(Some(profile.username.clone()))
         .pass(Some(password.to_string()));
+    builder = apply_ssl(builder, profile.ssl_mode);
     if let Some(db) = database {
         builder = builder.db_name(Some(db.to_string()));
     }

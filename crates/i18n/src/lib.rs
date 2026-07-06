@@ -432,7 +432,6 @@ fn en(key: &'static str) -> &'static str {
         "日期时间, YYYY-MM-DD HH:MM:SS" => "DATETIME, YYYY-MM-DD HH:MM:SS",
         "正在加载索引..." => "Loading indexes...",
         "正在加载表数据..." => "Loading table data...",
-        "超时(秒)" => "Timeout (seconds)",
         "[自定义]" => "[Custom]",
         "[DEBUG] 开始加载连接树" => "[DEBUG] Loading connection tree",
         "[DEBUG] 开始加载节点子级" => "[DEBUG] Loading node children",

@@ -25,7 +25,7 @@ impl ConnectionStore {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
             "SELECT id, name, kind, group_name, host, port, username, default_database,
-                    connect_timeout_secs, ssl_mode, sort_order, last_used_at, created_at, updated_at,
+                    ssl_mode, sort_order, last_used_at, created_at, updated_at,
                     direct_connection, replica_set, connection_uri
              FROM connection_profiles
              ORDER BY sort_order ASC, name ASC",
@@ -49,9 +49,9 @@ impl ConnectionStore {
         connection.execute(
             "INSERT INTO connection_profiles (
                 id, name, kind, group_name, host, port, username, default_database,
-                connect_timeout_secs, ssl_mode, sort_order, last_used_at, created_at, updated_at,
+                ssl_mode, sort_order, last_used_at, created_at, updated_at,
                 direct_connection, replica_set, connection_uri
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 profile.id,
                 profile.name,
@@ -61,7 +61,6 @@ impl ConnectionStore {
                 i64::from(profile.port),
                 profile.username,
                 profile.default_database,
-                profile.connect_timeout_secs as i64,
                 profile.ssl_mode.as_str(),
                 sort_order,
                 profile.last_used_at.map(|item| item.to_rfc3339()),
@@ -80,9 +79,9 @@ impl ConnectionStore {
         connection.execute(
             "UPDATE connection_profiles
              SET name = ?2, kind = ?3, group_name = ?4, host = ?5, port = ?6,
-                 username = ?7, default_database = ?8, connect_timeout_secs = ?9,
-                 ssl_mode = ?10, last_used_at = ?11, updated_at = ?12,
-                 direct_connection = ?13, replica_set = ?14, connection_uri = ?15
+                 username = ?7, default_database = ?8, ssl_mode = ?9,
+                 last_used_at = ?10, updated_at = ?11,
+                 direct_connection = ?12, replica_set = ?13, connection_uri = ?14
              WHERE id = ?1",
             params![
                 profile.id,
@@ -93,7 +92,6 @@ impl ConnectionStore {
                 i64::from(profile.port),
                 profile.username,
                 profile.default_database,
-                profile.connect_timeout_secs as i64,
                 profile.ssl_mode.as_str(),
                 profile.last_used_at.map(|item| item.to_rfc3339()),
                 profile.updated_at.to_rfc3339(),
@@ -119,7 +117,7 @@ impl ConnectionStore {
         connection
             .query_row(
                 "SELECT id, name, kind, group_name, host, port, username, default_database,
-                        connect_timeout_secs, ssl_mode, sort_order, last_used_at, created_at, updated_at,
+                        ssl_mode, sort_order, last_used_at, created_at, updated_at,
                         direct_connection, replica_set, connection_uri
                  FROM connection_profiles WHERE id = ?1",
                 params![connection_id],
@@ -364,18 +362,18 @@ fn current_connection_count(path: &PathBuf) -> Result<i64> {
 
 fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
     let kind = DatabaseKind::from_db_value(&row.get::<_, String>(2)?).map_err(to_sql_error)?;
-    let ssl_mode = SslMode::from_db_value(&row.get::<_, String>(9)?).map_err(to_sql_error)?;
-    let sort_order = row.get::<_, i64>(10)?;
+    let ssl_mode = SslMode::from_db_value(&row.get::<_, String>(8)?).map_err(to_sql_error)?;
+    let sort_order = row.get::<_, i64>(9)?;
     let last_used_at = row
-        .get::<_, Option<String>>(11)?
+        .get::<_, Option<String>>(10)?
         .map(|value| parse_datetime(&value))
         .transpose()
         .map_err(to_sql_error)?;
-    let created_at = parse_datetime(&row.get::<_, String>(12)?).map_err(to_sql_error)?;
-    let updated_at = parse_datetime(&row.get::<_, String>(13)?).map_err(to_sql_error)?;
-    let direct_connection: i64 = row.get(14)?;
-    let replica_set: Option<String> = row.get(15)?;
-    let connection_uri: Option<String> = row.get(16)?;
+    let created_at = parse_datetime(&row.get::<_, String>(11)?).map_err(to_sql_error)?;
+    let updated_at = parse_datetime(&row.get::<_, String>(12)?).map_err(to_sql_error)?;
+    let direct_connection: i64 = row.get(13)?;
+    let replica_set: Option<String> = row.get(14)?;
+    let connection_uri: Option<String> = row.get(15)?;
 
     Ok(ConnectionProfile {
         id: row.get(0)?,
@@ -387,7 +385,6 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
         username: row.get(6)?,
         default_database: row.get(7)?,
         password_saved: false,
-        connect_timeout_secs: row.get::<_, u64>(8)?,
         ssl_mode,
         sort_order,
         last_used_at,
