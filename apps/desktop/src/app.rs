@@ -20072,6 +20072,11 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
                 i += 2;
                 continue;
             }
+            if ch == '/' && next == '/' {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
             if ch == '#' {
                 in_line_comment = true;
                 i += 1;
@@ -21535,11 +21540,21 @@ fn toggle_sql_line_comment_inner(
             (cursor, cursor)
         });
 
+    // 将字符索引转为字节索引（CCursor.index 是字符索引，str 切片需要字节索引）
+    let char_to_byte = |char_idx: usize| -> usize {
+        text.char_indices()
+            .nth(char_idx)
+            .map(|(pos, _)| pos)
+            .unwrap_or(text.len())
+    };
+    let sel_start_byte = char_to_byte(sel_start);
+    let sel_end_byte = char_to_byte(sel_end);
+
     // 找到选区覆盖的所有行
-    let first_line_start = text[..sel_start].rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let last_line_end = text[sel_end..]
+    let first_line_start = text[..sel_start_byte].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let last_line_end = text[sel_end_byte..]
         .find('\n')
-        .map(|p| sel_end + p)
+        .map(|p| sel_end_byte + p)
         .unwrap_or(text.len());
 
     // 选区最后字符正好是 \n 时不用扩展
@@ -21550,10 +21565,8 @@ fn toggle_sql_line_comment_inner(
     }
 
     // 判断整体方向：如果没有已注释的行就先注释，否则全注释（与 VSCode 行为一致）
-    // 这里简化：第一行决定 toggle 方向
     let first_line = lines[0];
     let bare_prefix = comment_prefix.trim_end();
-    let all_commented = !first_line.is_empty() && (first_line.starts_with(comment_prefix) || first_line == bare_prefix || !first_line.starts_with(bare_prefix));
     // 使用更直观的判断：如果所有非空行都已注释则取消注释，否则注释
     let any_uncommented = lines
         .iter()
