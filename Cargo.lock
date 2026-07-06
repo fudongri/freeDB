@@ -196,7 +196,6 @@ dependencies = [
  "parking_lot",
  "secure-store",
  "session-manager",
- "ssh-tunnel",
  "tokio",
  "tracing",
  "uuid",
@@ -896,7 +895,6 @@ dependencies = [
  "driver-mysql",
  "driver-postgres",
  "parking_lot",
- "ssh-tunnel",
  "tokio",
  "tokio-postgres",
  "tracing",
@@ -5084,7 +5082,6 @@ dependencies = [
  "core-domain",
  "driver-api",
  "parking_lot",
- "ssh-tunnel",
  "tokio",
  "tracing",
 ]
@@ -5295,14 +5292,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844"
 dependencies = [
  "bitflags 2.13.0",
-]
-
-[[package]]
-name = "ssh-tunnel"
-version = "1.0.2"
-dependencies = [
- "anyhow",
- "core-domain",
 ]
 
 [[package]]

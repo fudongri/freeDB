@@ -886,10 +886,6 @@ struct ConnectionFormState {
     save_password: bool,
     connect_timeout_secs: u64,
     ssl_mode: SslMode,
-    ssh_enabled: bool,
-    ssh_host: String,
-    ssh_port: u16,
-    ssh_username: String,
     direct_connection: bool,
     replica_set: String,
     connection_uri: String,
@@ -909,10 +905,6 @@ impl Default for ConnectionFormState {
             save_password: true,
             connect_timeout_secs: 5,
             ssl_mode: SslMode::Prefer,
-            ssh_enabled: false,
-            ssh_host: String::new(),
-            ssh_port: 22,
-            ssh_username: String::new(),
             direct_connection: false,
             replica_set: String::new(),
             connection_uri: String::new(),
@@ -9281,8 +9273,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.connection_form.save_password, tr!("保存密码"));
-                    ui.add_space(16.0);
-                    ui.checkbox(&mut self.connection_form.ssh_enabled, tr!("启用 SSH Tunnel"));
                     if self.connection_form.kind == DatabaseKind::MongoDb {
                         ui.add_space(16.0);
                         ui.checkbox(&mut self.connection_form.direct_connection, tr!("直接连接"));
@@ -9305,28 +9295,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         RichText::new(tr!("填写 URI 后将忽略主机/端口/用户等字段，可直接粘贴 mongodb+srv:// 连接字符串"))
                             .color(palette.subtitle),
                     );
-                }
-
-                if self.connection_form.ssh_enabled {
-                    ui.add_space(8.0);
-                    egui::Frame::new()
-                        .fill(palette.section_bg)
-                        .stroke(Stroke::new(1.0, palette.section_border))
-                        .corner_radius(12.0)
-                        .inner_margin(egui::Margin::symmetric(18, 16))
-                        .show(ui, |ui| {
-                            ui.small(RichText::new("SSH Tunnel").color(palette.subtitle));
-                            ui.add_space(6.0);
-                            egui::Grid::new("ssh-form-grid")
-                                .num_columns(2)
-                                .spacing([16.0, 12.0])
-                                .min_col_width(108.0)
-                                .show(ui, |ui| {
-                                    form_row(ui, tr!("SSH 主机"), &mut self.connection_form.ssh_host);
-                                    form_row_u16(ui, tr!("SSH 端口"), &mut self.connection_form.ssh_port);
-                                    form_row(ui, tr!("SSH 用户"), &mut self.connection_form.ssh_username);
-                                });
-                        });
                 }
 
                 ui.add_space(12.0);
@@ -12207,22 +12175,6 @@ impl ConnectionFormState {
             save_password: profile.password_saved,
             connect_timeout_secs: profile.connect_timeout_secs,
             ssl_mode: profile.ssl_mode,
-            ssh_enabled: profile.ssh_tunnel.as_ref().map(|item| item.enabled).unwrap_or(false),
-            ssh_host: profile
-                .ssh_tunnel
-                .as_ref()
-                .map(|item| item.host.clone())
-                .unwrap_or_default(),
-            ssh_port: profile
-                .ssh_tunnel
-                .as_ref()
-                .map(|item| item.port)
-                .unwrap_or(22),
-            ssh_username: profile
-                .ssh_tunnel
-                .as_ref()
-                .map(|item| item.username.clone())
-                .unwrap_or_default(),
             direct_connection: profile.direct_connection,
             replica_set: profile.replica_set.clone().unwrap_or_default(),
             connection_uri: profile.connection_uri.clone().unwrap_or_default(),
@@ -12243,16 +12195,6 @@ impl ConnectionFormState {
             save_password: self.save_password || has_password,
             connect_timeout_secs: self.connect_timeout_secs,
             ssl_mode: self.ssl_mode,
-            ssh_tunnel: if self.ssh_enabled {
-                Some(core_domain::SshTunnelConfig {
-                    enabled: true,
-                    host: self.ssh_host.clone(),
-                    port: self.ssh_port,
-                    username: self.ssh_username.clone(),
-                })
-            } else {
-                None
-            },
             direct_connection: self.direct_connection,
             replica_set: optional_string(&self.replica_set),
             connection_uri: optional_string(&self.connection_uri),

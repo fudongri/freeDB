@@ -11,7 +11,6 @@ use core_domain::{
 };
 use driver_api::DatabaseDriver;
 use parking_lot::RwLock;
-use ssh_tunnel::SshTunnelManager;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,7 +86,6 @@ pub struct SessionStatus {
 #[derive(Clone)]
 pub struct SessionManager {
     pool: Arc<ConnectionPool>,
-    ssh_tunnel: SshTunnelManager,
     statuses: Arc<RwLock<HashMap<String, SessionStatus>>>,
     disconnected_by_user: Arc<RwLock<HashSet<String>>>,
     retry: RetryConfig,
@@ -104,7 +102,6 @@ impl SessionManager {
         let pool = Arc::new(ConnectionPool::new(retry.keepalive_interval_secs));
         Self {
             pool,
-            ssh_tunnel: SshTunnelManager,
             statuses: Arc::new(RwLock::new(HashMap::new())),
             disconnected_by_user: Arc::new(RwLock::new(HashSet::new())),
             retry,
@@ -141,9 +138,6 @@ impl SessionManager {
         profile: &ConnectionProfile,
         password: &str,
     ) -> AppResult<()> {
-        self.ssh_tunnel
-            .validate(profile.ssh_tunnel.as_ref())
-            .map_err(|e| AppError::Validation(e.to_string()))?;
         let result = self
             .driver(profile.kind)
             .test_connection(profile, password)

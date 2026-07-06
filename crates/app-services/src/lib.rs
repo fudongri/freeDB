@@ -83,7 +83,6 @@ impl AppServices {
         profile.password_saved = input.save_password;
         profile.connect_timeout_secs = input.connect_timeout_secs;
         profile.ssl_mode = input.ssl_mode;
-        profile.ssh_tunnel = input.ssh_tunnel;
         profile.direct_connection = input.direct_connection;
         profile.replica_set = input.replica_set;
         profile.connection_uri = input.connection_uri;

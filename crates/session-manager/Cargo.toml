@@ -10,6 +10,5 @@ connection-pool = { path = "../connection-pool" }
 core-domain = { path = "../core-domain" }
 driver-api = { path = "../driver-api" }
 parking_lot.workspace = true
-ssh-tunnel = { path = "../ssh-tunnel" }
 tokio.workspace = true
 tracing.workspace = true

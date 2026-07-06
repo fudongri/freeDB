@@ -15,7 +15,6 @@ i18n = { path = "../i18n" }
 parking_lot.workspace = true
 secure-store = { path = "../secure-store" }
 session-manager = { path = "../session-manager" }
-ssh-tunnel = { path = "../ssh-tunnel" }
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true

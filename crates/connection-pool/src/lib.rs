@@ -3,7 +3,6 @@ use driver_api::{ConnectionHandle, ConnectionProvider};
 use driver_mongodb::MongoDbDriver;
 use driver_mysql::MySqlDriver;
 use driver_postgres::PostgresDriver;
-use ssh_tunnel::SshTunnelManager;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -29,7 +28,6 @@ pub struct ConnectionPool {
     pub postgres: PostgresDriver,
     pub mysql: MySqlDriver,
     pub mongodb: MongoDbDriver,
-    ssh_tunnel: SshTunnelManager,
     keepalive_secs: u64,
 }
 
@@ -40,7 +38,6 @@ impl ConnectionPool {
             postgres: PostgresDriver,
             mysql: MySqlDriver,
             mongodb: MongoDbDriver,
-            ssh_tunnel: SshTunnelManager,
             keepalive_secs,
         }
     }
@@ -75,10 +72,6 @@ impl ConnectionPool {
         password: &str,
         database: Option<&str>,
     ) -> AppResult<Arc<AsyncMutex<ConnectionHandle>>> {
-        self.ssh_tunnel
-            .validate(profile.ssh_tunnel.as_ref())
-            .map_err(|e| AppError::Validation(e.to_string()))?;
-
         let key = pool_key(&profile.id, profile.kind, database);
 
         // 找一个空闲健康连接；一个 ping 失败则全部清掉（链路断开）

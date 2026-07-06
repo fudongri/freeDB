@@ -25,7 +25,7 @@ impl ConnectionStore {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
             "SELECT id, name, kind, group_name, host, port, username, default_database,
-                    connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
+                    connect_timeout_secs, ssl_mode, sort_order, last_used_at, created_at, updated_at,
                     direct_connection, replica_set, connection_uri
              FROM connection_profiles
              ORDER BY sort_order ASC, name ASC",
@@ -37,7 +37,6 @@ impl ConnectionStore {
     }
 
     pub fn save_connection(&self, profile: &ConnectionProfile) -> Result<()> {
-        let ssh_json = serde_json::to_string(&profile.ssh_tunnel)?;
         let connection = self.connection.lock();
         let max_order: i64 = connection
             .query_row(
@@ -50,9 +49,9 @@ impl ConnectionStore {
         connection.execute(
             "INSERT INTO connection_profiles (
                 id, name, kind, group_name, host, port, username, default_database,
-                connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
+                connect_timeout_secs, ssl_mode, sort_order, last_used_at, created_at, updated_at,
                 direct_connection, replica_set, connection_uri
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 profile.id,
                 profile.name,
@@ -64,7 +63,6 @@ impl ConnectionStore {
                 profile.default_database,
                 profile.connect_timeout_secs as i64,
                 profile.ssl_mode.as_str(),
-                ssh_json,
                 sort_order,
                 profile.last_used_at.map(|item| item.to_rfc3339()),
                 profile.created_at.to_rfc3339(),
@@ -78,14 +76,13 @@ impl ConnectionStore {
     }
 
     pub fn update_connection(&self, profile: &ConnectionProfile) -> Result<()> {
-        let ssh_json = serde_json::to_string(&profile.ssh_tunnel)?;
         let connection = self.connection.lock();
         connection.execute(
             "UPDATE connection_profiles
              SET name = ?2, kind = ?3, group_name = ?4, host = ?5, port = ?6,
                  username = ?7, default_database = ?8, connect_timeout_secs = ?9,
-                 ssl_mode = ?10, ssh_tunnel_json = ?11, last_used_at = ?12, updated_at = ?13,
-                 direct_connection = ?14, replica_set = ?15, connection_uri = ?16
+                 ssl_mode = ?10, last_used_at = ?11, updated_at = ?12,
+                 direct_connection = ?13, replica_set = ?14, connection_uri = ?15
              WHERE id = ?1",
             params![
                 profile.id,
@@ -98,7 +95,6 @@ impl ConnectionStore {
                 profile.default_database,
                 profile.connect_timeout_secs as i64,
                 profile.ssl_mode.as_str(),
-                ssh_json,
                 profile.last_used_at.map(|item| item.to_rfc3339()),
                 profile.updated_at.to_rfc3339(),
                 profile.direct_connection,
@@ -123,7 +119,7 @@ impl ConnectionStore {
         connection
             .query_row(
                 "SELECT id, name, kind, group_name, host, port, username, default_database,
-                        connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order, last_used_at, created_at, updated_at,
+                        connect_timeout_secs, ssl_mode, sort_order, last_used_at, created_at, updated_at,
                         direct_connection, replica_set, connection_uri
                  FROM connection_profiles WHERE id = ?1",
                 params![connection_id],
@@ -182,7 +178,6 @@ impl ConnectionStore {
                 default_database TEXT,
                 connect_timeout_secs INTEGER NOT NULL DEFAULT 5,
                 ssl_mode TEXT NOT NULL DEFAULT 'prefer',
-                ssh_tunnel_json TEXT NOT NULL DEFAULT 'null',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 last_used_at TEXT,
                 created_at TEXT NOT NULL,
@@ -240,10 +235,10 @@ impl ConnectionStore {
                  );
                  INSERT INTO _connection_profiles_new
                      (id, name, kind, group_name, host, port, username, default_database,
-                      connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order,
+                      connect_timeout_secs, ssl_mode, sort_order,
                       last_used_at, created_at, updated_at)
                  SELECT id, name, kind, group_name, host, port, username, default_database,
-                        connect_timeout_secs, ssl_mode, ssh_tunnel_json, sort_order,
+                        connect_timeout_secs, ssl_mode, sort_order,
                         last_used_at, created_at, updated_at
                  FROM connection_profiles;
                  DROP TABLE connection_profiles;
@@ -370,18 +365,17 @@ fn current_connection_count(path: &PathBuf) -> Result<i64> {
 fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
     let kind = DatabaseKind::from_db_value(&row.get::<_, String>(2)?).map_err(to_sql_error)?;
     let ssl_mode = SslMode::from_db_value(&row.get::<_, String>(9)?).map_err(to_sql_error)?;
-    let ssh_tunnel = serde_json::from_str(&row.get::<_, String>(10)?).map_err(to_sql_error)?;
-    let sort_order = row.get::<_, i64>(11)?;
+    let sort_order = row.get::<_, i64>(10)?;
     let last_used_at = row
-        .get::<_, Option<String>>(12)?
+        .get::<_, Option<String>>(11)?
         .map(|value| parse_datetime(&value))
         .transpose()
         .map_err(to_sql_error)?;
-    let created_at = parse_datetime(&row.get::<_, String>(13)?).map_err(to_sql_error)?;
-    let updated_at = parse_datetime(&row.get::<_, String>(14)?).map_err(to_sql_error)?;
-    let direct_connection: i64 = row.get(15)?;
-    let replica_set: Option<String> = row.get(16)?;
-    let connection_uri: Option<String> = row.get(17)?;
+    let created_at = parse_datetime(&row.get::<_, String>(12)?).map_err(to_sql_error)?;
+    let updated_at = parse_datetime(&row.get::<_, String>(13)?).map_err(to_sql_error)?;
+    let direct_connection: i64 = row.get(14)?;
+    let replica_set: Option<String> = row.get(15)?;
+    let connection_uri: Option<String> = row.get(16)?;
 
     Ok(ConnectionProfile {
         id: row.get(0)?,
@@ -395,7 +389,6 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
         password_saved: false,
         connect_timeout_secs: row.get::<_, u64>(8)?,
         ssl_mode,
-        ssh_tunnel,
         sort_order,
         last_used_at,
         created_at,

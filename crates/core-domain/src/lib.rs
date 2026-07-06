@@ -72,14 +72,6 @@ impl SslMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SshTunnelConfig {
-    pub enabled: bool,
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionProfileInput {
     pub name: String,
@@ -93,7 +85,6 @@ pub struct ConnectionProfileInput {
     pub save_password: bool,
     pub connect_timeout_secs: u64,
     pub ssl_mode: SslMode,
-    pub ssh_tunnel: Option<SshTunnelConfig>,
     pub direct_connection: bool,
     pub replica_set: Option<String>,
     pub connection_uri: Option<String>,
@@ -113,7 +104,6 @@ impl Default for ConnectionProfileInput {
             save_password: true,
             connect_timeout_secs: 5,
             ssl_mode: SslMode::Prefer,
-            ssh_tunnel: None,
             direct_connection: false,
             replica_set: None,
             connection_uri: None,
@@ -134,7 +124,6 @@ pub struct ConnectionProfile {
     pub password_saved: bool,
     pub connect_timeout_secs: u64,
     pub ssl_mode: SslMode,
-    pub ssh_tunnel: Option<SshTunnelConfig>,
     pub sort_order: i64,
     pub last_used_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -159,7 +148,6 @@ impl ConnectionProfile {
             password_saved: input.save_password,
             connect_timeout_secs: input.connect_timeout_secs,
             ssl_mode: input.ssl_mode,
-            ssh_tunnel: input.ssh_tunnel,
             sort_order: 0,
             last_used_at: None,
             created_at: now,
