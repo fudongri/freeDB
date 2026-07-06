@@ -438,6 +438,7 @@ async fn execute_mongo_command(
     db_name: &str,
     input: &str,
 ) -> AppResult<(Vec<String>, Vec<BTreeMap<String, QueryCellValue>>, Option<u64>, Option<String>, HashMap<(usize, String), MongoValue>)> {
+    let input = strip_comments(input);
     let lower = input.to_lowercase();
 
     // show dbs
@@ -491,7 +492,7 @@ async fn execute_mongo_command(
     }
 
     // db.<collection>.<method>(...)
-    if let Some(parsed) = parse_db_command(input) {
+    if let Some(parsed) = parse_db_command(&input) {
         let db = client.database(db_name);
         let coll = db.collection::<Document>(&parsed.collection);
 
@@ -1078,6 +1079,48 @@ fn json_value_to_bson(value: serde_json::Value) -> Bson {
     }
 }
 
+/// 去除 // 行注释和 /* */ 块注释，保留字符串内的内容
+fn strip_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' || ch == '\'' {
+            let q = ch;
+            out.push(ch);
+            while let Some(sc) = chars.next() {
+                out.push(sc);
+                if sc == '\\' {
+                    if let Some(ec) = chars.next() { out.push(ec); }
+                } else if sc == q {
+                    break;
+                }
+            }
+        } else if ch == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '\n' { out.push('\n'); break; }
+                    }
+                }
+                Some('*') => {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '*' && chars.peek() == Some(&'/') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => out.push(ch),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// 将 Mongo Shell 风格的 JSON 预处理为标准 JSON
 /// 将 MongoDB Shell 语法转换为 JSON
 /// 单遍处理：字符串标准化 + 无引号键名加引号 + 函数调用转换 + 尾逗号
@@ -1463,6 +1506,14 @@ fn map_mongo_error(e: mongodb::error::Error) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_strip_comments() {
+        assert_eq!(strip_comments("// 注释\nshow dbs"), "\nshow dbs");
+        assert_eq!(strip_comments("/* block */show dbs"), "show dbs");
+        assert_eq!(strip_comments("db.a.find({//注释\n})"), "db.a.find({\n})");
+        assert_eq!(strip_comments(r#"db.a.find({"x":"//not comment"})"#), r#"db.a.find({"x":"//not comment"})"#);
+    }
 
     #[test]
     fn test_preprocess_number_decimal() {
