@@ -1079,191 +1079,217 @@ fn json_value_to_bson(value: serde_json::Value) -> Bson {
 }
 
 /// 将 Mongo Shell 风格的 JSON 预处理为标准 JSON
+/// 将 MongoDB Shell 语法转换为 JSON
+/// 单遍处理：字符串标准化 + 无引号键名加引号 + 函数调用转换 + 尾逗号
 fn preprocess_mongo_json(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut out = String::with_capacity(len + 16);
-    let mut i = 0;
+    let mut out = String::with_capacity(input.len() + 16);
+    let mut ci = input.char_indices().peekable();
+    let mut in_string = false;
 
-    while i < len {
-        let b = bytes[i];
+    while let Some((byte_pos, ch)) = ci.next() {
+        let remaining = &input[byte_pos..];
 
-        // 跳过注释
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
+        // 行注释
+        if !in_string && remaining.starts_with("//") {
+            while let Some((_, c)) = ci.next() {
+                if c == '\n' { break; }
             }
             continue;
         }
 
-        // 字符串
-        if b == b'"' {
-            out.push('"');
-            i += 1;
-            while i < len {
-                if bytes[i] == b'\\' && i + 1 < len {
-                    out.push(bytes[i] as char);
-                    out.push(bytes[i + 1] as char);
-                    i += 2;
-                } else if bytes[i] == b'"' {
-                    out.push('"');
-                    i += 1;
-                    break;
-                } else {
-                    out.push(bytes[i] as char);
-                    i += 1;
+        // 块注释
+        if !in_string && remaining.starts_with("/*") {
+            ci.next(); // skip second '*'
+            while let Some((_, c)) = ci.next() {
+                if c == '*' {
+                    if let Some((_, '/')) = ci.peek() {
+                        ci.next();
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // 双引号字符串
+        if ch == '"' {
+            if in_string {
+                out.push('"');
+                in_string = false;
+            } else {
+                out.push('"');
+                in_string = true;
+                while let Some((_, sc)) = ci.next() {
+                    if sc == '\\' {
+                        out.push(sc);
+                        if let Some((_, ec)) = ci.next() {
+                            out.push(ec);
+                        }
+                    } else if sc == '"' {
+                        out.push('"');
+                        in_string = false;
+                        break;
+                    } else {
+                        out.push(sc);
+                    }
                 }
             }
             continue;
         }
 
         // 单引号字符串 → 双引号
-        if b == b'\'' {
+        if !in_string && ch == '\'' {
             out.push('"');
-            i += 1;
-            while i < len {
-                if bytes[i] == b'\\' && i + 1 < len {
-                    out.push(bytes[i] as char);
-                    out.push(bytes[i + 1] as char);
-                    i += 2;
-                } else if bytes[i] == b'\'' {
+            while let Some((_, sc)) = ci.next() {
+                if sc == '\\' {
+                    out.push(sc);
+                    if let Some((_, ec)) = ci.next() {
+                        out.push(ec);
+                    }
+                } else if sc == '\'' {
                     out.push('"');
-                    i += 1;
                     break;
-                } else if bytes[i] == b'"' {
+                } else if sc == '"' {
                     out.push('\\');
                     out.push('"');
-                    i += 1;
                 } else {
-                    out.push(bytes[i] as char);
-                    i += 1;
+                    out.push(sc);
                 }
             }
             continue;
         }
 
-        // ObjectId("...") / ISODate("...") / Date("...") / Timestamp(...) → 值
-        if let Some(rest) = try_consume_prefix(&bytes[i..], b"ObjectId(") {
-            i += 9; // "ObjectId(".len()
-            if let Some((val, consumed)) = extract_quoted_arg(&bytes[i..]) {
-                out.push_str(&format!("{{\"$oid\":\"{}\"}}", val));
-                i += consumed;
-            }
-            // 跳过右括号
-            while i < len && bytes[i] != b')' {
-                i += 1;
-            }
-            if i < len {
-                i += 1; // skip ')'
-            }
+        if in_string {
+            out.push(ch);
             continue;
         }
-        if let Some(rest) = try_consume_prefix(&bytes[i..], b"ISODate(") {
-            i += 8;
-            if let Some((val, consumed)) = extract_quoted_arg(&bytes[i..]) {
-                out.push_str(&format!("{{\"$date\":\"{}\"}}", val));
-                i += consumed;
+
+        // 函数调用转换（使用 remaining 匹配，然后消费迭代器）
+        if remaining.starts_with("new Date(") {
+            for _ in 0..8 { ci.next(); } // 跳过 "new Date" (已消费 'n' 共 9 字符)
+            while let Some((_, c)) = ci.next() {
+                if c == ')' { break; }
             }
-            while i < len && bytes[i] != b')' {
-                i += 1;
-            }
-            if i < len {
-                i += 1;
-            }
+            let now = chrono::Utc::now().to_rfc3339();
+            out.push_str(&format!("{{\"$date\":\"{}\"}}", now));
             continue;
         }
-        if let Some(rest) = try_consume_prefix(&bytes[i..], b"Date(") {
-            i += 5;
-            if let Some((val, consumed)) = extract_quoted_arg(&bytes[i..]) {
-                out.push_str(&format!("{{\"$date\":\"{}\"}}", val));
-                i += consumed;
-            }
-            while i < len && bytes[i] != b')' {
-                i += 1;
-            }
-            if i < len {
-                i += 1;
-            }
-            continue;
-        }
-        if let Some(rest) = try_consume_prefix(&bytes[i..], b"NumberDecimal(") {
-            i += 14;
-            if let Some((val, consumed)) = extract_quoted_arg(&bytes[i..]) {
+        if remaining.starts_with("NumberDecimal(") {
+            for _ in 0..13 { ci.next(); } // 跳过 "NumberDecimal" (已消费 'N' 共 14 字符)
+            if let Some((val, consumed)) = extract_quoted_arg(remaining[14..].as_bytes()) {
                 out.push_str(&format!("{{\"$numberDecimal\":\"{}\"}}", val));
-                i += consumed;
+                for _ in 0..consumed { ci.next(); }
             }
-            while i < len && bytes[i] != b')' {
-                i += 1;
+            while let Some((_, c)) = ci.next() {
+                if c == ')' { break; }
             }
-            if i < len {
-                i += 1;
+            continue;
+        }
+        if remaining.starts_with("ObjectId(") {
+            for _ in 0..8 { ci.next(); } // 跳过 "bjectId(" (已消费 'O' 共 9 字符)
+            if let Some((val, consumed)) = extract_quoted_arg(remaining[9..].as_bytes()) {
+                out.push_str(&format!("{{\"$oid\":\"{}\"}}", val));
+                for _ in 0..consumed { ci.next(); }
+            }
+            while let Some((_, c)) = ci.next() {
+                if c == ')' { break; }
+            }
+            continue;
+        }
+        if remaining.starts_with("ISODate(") {
+            for _ in 0..7 { ci.next(); } // 跳过 "SODate(" (已消费 'I' 共 8 字符)
+            if let Some((val, consumed)) = extract_quoted_arg(remaining[8..].as_bytes()) {
+                out.push_str(&format!("{{\"$date\":\"{}\"}}", val));
+                for _ in 0..consumed { ci.next(); }
+            }
+            while let Some((_, c)) = ci.next() {
+                if c == ')' { break; }
+            }
+            continue;
+        }
+        if remaining.starts_with("Date(") {
+            for _ in 0..4 { ci.next(); } // 跳过 "Date" (已消费 'D' 共 5 字符)
+            if let Some((val, consumed)) = extract_quoted_arg(remaining[5..].as_bytes()) {
+                out.push_str(&format!("{{\"$date\":\"{}\"}}", val));
+                for _ in 0..consumed { ci.next(); }
+            }
+            while let Some((_, c)) = ci.next() {
+                if c == ')' { break; }
             }
             continue;
         }
 
-        // 无引号键名 → 加双引号（在 { 或 , 之后）
-        if (b == b'{' || b == b',') && !out.ends_with('"') {
-            out.push(b as char);
-            i += 1;
-            // 跳过空白
-            while i < len && (bytes[i] == b' ' || bytes[i] == b'\n' || bytes[i] == b'\r' || bytes[i] == b'\t') {
-                out.push(bytes[i] as char);
-                i += 1;
-            }
-            // 检查是否是 key（非数字、非引号开头的标识符）
-            if i < len && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$') {
-                let key_start = i;
-                while i < len
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
-                {
-                    i += 1;
-                }
-                let key = std::str::from_utf8(&bytes[key_start..i]).unwrap_or("");
-                // 跳过空白后检查是否有冒号
-                let mut j = i;
-                while j < len && (bytes[j] == b' ' || bytes[j] == b'\t') {
-                    j += 1;
-                }
-                if j < len && bytes[j] == b':' {
-                    out.push('"');
-                    out.push_str(key);
-                    out.push('"');
-                    // 回退到冒号前的空白
-                    i = j;
+        // { 和 [ 后的无引号键名检测
+        if ch == '{' || ch == '[' {
+            out.push(ch);
+            // 跳过空白（含换行）
+            while let Some(&(_, nc)) = ci.peek() {
+                if nc == ' ' || nc == '\n' || nc == '\r' || nc == '\t' {
+                    out.push(nc);
+                    ci.next();
                 } else {
-                    // 不是键值对，原样输出
-                    out.push_str(key);
+                    break;
                 }
             }
+            // 检查是否是标识符开头 → 读取完整标识符 + 冒号判断
+            try_read_unquoted_key(&input, &mut ci, &mut out);
             continue;
         }
 
-        // 尾逗号处理：逗号后只有空白和 } / ] 则跳过
-        if b == b',' {
-            let mut j = i + 1;
-            while j < len && (bytes[j] == b' ' || bytes[j] == b'\n' || bytes[j] == b'\r' || bytes[j] == b'\t') {
-                j += 1;
+        // 逗号处理
+        if ch == ',' {
+            let rest_after = input[byte_pos + 1..].trim_start();
+            if rest_after.starts_with('}') || rest_after.starts_with(']') {
+                continue; // 尾逗号，跳过
             }
-            if j < len && (bytes[j] == b'}' || bytes[j] == b']') {
-                i += 1; // 跳过尾逗号
-                continue;
+            out.push(',');
+            // 跳过空白
+            while let Some(&(_, nc)) = ci.peek() {
+                if nc == ' ' || nc == '\n' || nc == '\r' || nc == '\t' {
+                    out.push(nc);
+                    ci.next();
+                } else {
+                    break;
+                }
             }
+            // 尝试无引号键名
+            try_read_unquoted_key(&input, &mut ci, &mut out);
+            continue;
         }
 
-        out.push(b as char);
-        i += 1;
+        out.push(ch);
     }
 
     out
 }
 
-fn try_consume_prefix<'a>(bytes: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
-    if bytes.len() >= prefix.len() && &bytes[..prefix.len()] == prefix {
-        Some(&bytes[prefix.len()..])
-    } else {
-        None
+/// 在 { , [ 后尝试读取无引号键名并加引号
+/// 如果不是键名（没有后跟冒号），不消费任何字符
+fn try_read_unquoted_key(input: &str, ci: &mut std::iter::Peekable<std::str::CharIndices<'_>>, out: &mut String) {
+    if let Some(&(_, nc)) = ci.peek() {
+        if nc.is_ascii_alphabetic() || nc == '_' || nc == '$' {
+            let start_pos = ci.peek().map(|&(idx, _)| idx).unwrap_or(input.len());
+            let rest = &input[start_pos..];
+            let ident_len: usize = rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                .map(|c| c.len_utf8())
+                .sum();
+            if ident_len > 0 {
+                let ident = &rest[..ident_len];
+                let after_ident = &rest[ident_len..];
+                if after_ident.trim_start().starts_with(':') {
+                    // 是键名，加引号
+                    out.push('"');
+                    out.push_str(ident);
+                    out.push('"');
+                    for _ in 0..ident_len { ci.next(); }
+                }
+                // 如果不是键名，不消费字符，让主循环逐字符处理
+            }
+        }
     }
 }
+
 
 /// 从字节序列中提取带引号的参数（支持单/双引号），返回 (值, 消耗的字节数含引号，不含外层括号)
 fn extract_quoted_arg(bytes: &[u8]) -> Option<(String, usize)> {
@@ -1431,5 +1457,47 @@ fn map_mongo_error(e: mongodb::error::Error) -> AppError {
         AppError::Connection(err_str)
     } else {
         AppError::Query(err_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_preprocess_number_decimal() {
+        let input = r#"{balance: NumberDecimal("999.99")}"#;
+        let result = preprocess_mongo_json(input);
+        eprintln!("=== Input: {} ===", input);
+        eprintln!("=== Input bytes: {:?} ===", input.as_bytes());
+        eprintln!("=== Result: {} ===", result);
+        eprintln!("=== Result bytes: {:?} ===", result.as_bytes());
+        let v: serde_json::Value = serde_json::from_str(&result).expect(&format!("failed to parse: {result}"));
+        assert_eq!(v["balance"]["$numberDecimal"], "999.99");
+    }
+
+    #[test]
+    fn test_preprocess_new_date() {
+        let input = r#"{createdAt: new Date()}"#;
+        let result = preprocess_mongo_json(input);
+        let v: serde_json::Value = serde_json::from_str(&result).expect(&format!("failed to parse: {result}"));
+        assert!(v["createdAt"]["$date"].is_string());
+    }
+
+    #[test]
+    fn test_preprocess_full_document() {
+        let input = r#"{name: "测试用户", age: 25, balance: NumberDecimal("999.99"), isActive: true, createdAt: new Date(), hobbies: ["coding", "reading"], address: {city: "北京", district: "海淀"}}"#;
+        let result = preprocess_mongo_json(input);
+        eprintln!("=== Result: {} ===", result);
+        let v: serde_json::Value = serde_json::from_str(&result).expect("failed to parse JSON");
+        assert_eq!(v["name"], "测试用户", "name mismatch");
+        assert_eq!(v["age"], 25, "age mismatch");
+        assert_eq!(v["balance"]["$numberDecimal"], "999.99");
+        assert_eq!(v["isActive"], true, "isActive mismatch");
+        assert!(v["createdAt"]["$date"].is_string(), "createdAt should have $date");
+        assert_eq!(v["hobbies"][0], "coding", "hobbies[0] mismatch");
+        assert_eq!(v["hobbies"][1], "reading", "hobbies[1] mismatch");
+        assert_eq!(v["address"]["city"], "北京", "address.city mismatch");
+        assert_eq!(v["address"]["district"], "海淀", "address.district mismatch");
     }
 }

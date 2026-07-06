@@ -5561,19 +5561,45 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 last_error = Some(tr!("无法获取行数据").into());
                 continue;
             };
-            let Some(where_clause) =
-                build_table_row_match_clause(database_kind, definition.as_ref(), &row, &table)
+            let Some(match_doc) = build_mongo_row_match_doc(definition.as_ref(), &row)
             else {
                 last_error = Some(tr!("无法构建 WHERE 条件").into());
                 continue;
             };
-            let sql = format!(
-                "UPDATE {}\nSET {} = {}\nWHERE {}",
-                qualified_table_name(database_kind, &table),
-                quote_identifier(database_kind, column),
-                sql_editor_value_literal(&change.new_value, change.new_is_null),
-                where_clause
-            );
+            let value_literal = if change.new_is_null {
+                "null".to_string()
+            } else {
+                let mongo_type = self.tabs.get(self.active_tab).and_then(|t| match t {
+                    WorkspaceTab::Table(tab) => {
+                        let mt = &tab.preview.as_ref()?.mongo_types;
+                        mt.get(&(*row_index, column.clone()))
+                            .or_else(|| mt.get(&(0, column.clone())))
+                            .copied()
+                    }
+                    _ => None,
+                });
+                mongo_cell_literal(&QueryCellValue::Text(change.new_value.clone()), mongo_type)
+            };
+            let sql = if database_kind == DatabaseKind::MongoDb {
+                format!(
+                    "db.{}.updateOne({{ {} }}, {{ $set: {{ {}: {} }} }})",
+                    table.table, match_doc, column, value_literal
+                )
+            } else {
+                let Some(where_clause) =
+                    build_table_row_match_clause(database_kind, definition.as_ref(), &row, &table)
+                else {
+                    last_error = Some(tr!("无法构建 WHERE 条件").into());
+                    continue;
+                };
+                format!(
+                    "UPDATE {}\nSET {} = {}\nWHERE {}",
+                    qualified_table_name(database_kind, &table),
+                    quote_identifier(database_kind, column),
+                    sql_editor_value_literal(&change.new_value, change.new_is_null),
+                    where_clause
+                )
+            };
             if self.execute_active_table_mutation(sql, "") {
                 success_count += 1;
             } else {
@@ -5857,19 +5883,45 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 last_error = Some(tr!("无法获取行数据").into());
                 continue;
             };
-            let Some(where_clause) =
-                build_table_row_match_clause(database_kind, definition.as_ref(), &row, &table)
+            let Some(match_doc) = build_mongo_row_match_doc(definition.as_ref(), &row)
             else {
                 last_error = Some(tr!("无法构建 WHERE 条件").into());
                 continue;
             };
-            let sql = format!(
-                "UPDATE {}\nSET {} = {}\nWHERE {}",
-                qualified_table_name(database_kind, &table),
-                quote_identifier(database_kind, column),
-                sql_editor_value_literal(&change.new_value, change.new_is_null),
-                where_clause
-            );
+            let value_literal = if change.new_is_null {
+                "null".to_string()
+            } else {
+                let mongo_type = self.tabs.get(self.active_tab).and_then(|t| match t {
+                    WorkspaceTab::Query(tab) => {
+                        let mt = &tab.result.as_ref()?.mongo_types;
+                        mt.get(&(*row_index, column.clone()))
+                            .or_else(|| mt.get(&(0, column.clone())))
+                            .copied()
+                    }
+                    _ => None,
+                });
+                mongo_cell_literal(&QueryCellValue::Text(change.new_value.clone()), mongo_type)
+            };
+            let sql = if database_kind == DatabaseKind::MongoDb {
+                format!(
+                    "db.{}.updateOne({{ {} }}, {{ $set: {{ {}: {} }} }})",
+                    table.table, match_doc, column, value_literal
+                )
+            } else {
+                let Some(where_clause) =
+                    build_table_row_match_clause(database_kind, definition.as_ref(), &row, &table)
+                else {
+                    last_error = Some(tr!("无法构建 WHERE 条件").into());
+                    continue;
+                };
+                format!(
+                    "UPDATE {}\nSET {} = {}\nWHERE {}",
+                    qualified_table_name(database_kind, &table),
+                    quote_identifier(database_kind, column),
+                    sql_editor_value_literal(&change.new_value, change.new_is_null),
+                    where_clause
+                )
+            };
             if self.execute_query_tab_mutation(sql, "") {
                 success_count += 1;
             } else {
@@ -19511,6 +19563,15 @@ fn mongo_cell_literal(value: &QueryCellValue, mongo_type: Option<MongoValue>) ->
                     Some(MongoValue::RegularExpression) => text.clone(), // 已经是 "/pattern/flags" 格式
                     None => {
                         // 无类型信息时回退到启发式猜测
+                        let trimmed = text.trim();
+                        // 检测 JSON 对象/数组
+                        if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                            || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                        {
+                            if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+                                return text.clone();
+                            }
+                        }
                         if let Ok(n) = text.parse::<i64>() {
                             n.to_string()
                         } else if let Ok(f) = text.parse::<f64>() {
