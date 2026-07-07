@@ -14580,6 +14580,62 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             let column_selected = tab.selected_columns.contains(&col_idx);
                                             let search_highlight = tab.search.open && tab.search.matches.iter().any(|&(r, c)| r == row_index && c == col_idx);
                                             let is_current_match = current_match_pos == Some((row_index, col_idx));
+
+                                            // 终点单元格输入框（矩形选区正在输入时）
+                                            let is_endpoint = matches!(tab.cell_selection_current, Some((r, c)) if r == row_index && c == col_idx);
+                                            if is_endpoint && tab.cell_selection_typing {
+                                                let editor_fill = table_active_cell_fill(&palette, fill, false, false);
+                                                ui.painter().rect_filled(
+                                                    table_cell_fill_rect(ui.max_rect(), false),
+                                                    0.0,
+                                                    editor_fill,
+                                                );
+                                                let mut inner = egui::Frame::new()
+                                                    .fill(Color32::TRANSPARENT)
+                                                    .stroke(Stroke::new(1.0, palette.selection_stroke))
+                                                    .inner_margin(egui::Margin::ZERO)
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_height(28.0);
+                                                        TextEdit::multiline(&mut tab.cell_selection_input)
+                                                            .frame(false)
+                                                            .margin(egui::Margin::symmetric(4, 1))
+                                                            .desired_width(ui.available_width().max(24.0))
+                                                            .show(ui)
+                                                    });
+                                                if tab.cell_selection_focus_requested {
+                                                    inner.inner.response.request_focus();
+                                                    let cursor = egui::text::CCursor::new(tab.cell_selection_input.chars().count());
+                                                    inner.inner.state.cursor.set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+                                                    inner.inner.state.store(ui.ctx(), inner.inner.response.id);
+                                                    tab.cell_selection_focus_requested = false;
+                                                }
+                                                let (v_grid, h_grid) = table_grid_colors(&palette, editor_fill, false);
+                                                paint_table_grid_lines(ui, inner.response.rect, v_grid, h_grid);
+
+                                                // Enter → 批量提交
+                                                let enter_pressed = ui.ctx().input_mut(|i| {
+                                                    let pressed = i.key_pressed(egui::Key::Enter);
+                                                    if pressed { i.consume_key(egui::Modifiers::NONE, egui::Key::Enter); }
+                                                    pressed
+                                                });
+                                                if enter_pressed {
+                                                    commit_cell_selection(tab, &columns);
+                                                }
+                                                // Esc → 清除选区
+                                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                                    tab.cell_selection_anchor = None;
+                                                    tab.cell_selection_current = None;
+                                                    tab.cell_selection_typing = false;
+                                                    tab.cell_selection_input.clear();
+                                                }
+                                                // Ctrl+S → 自动确认再保存
+                                                if ui.input(|i| i.key_pressed(egui::Key::S) && (i.modifiers.ctrl || i.modifiers.command)) {
+                                                    commit_cell_selection(tab, &columns);
+                                                    tab.deferred_save_action = true;
+                                                }
+                                                return; // 闭包内提前返回
+                                            }
+
                                             let (response, _pointer_over, _cell_rect) = if is_editing {
                                                 let edit = tab.editing_cell.as_mut().expect("edit state");
                                                 let r = render_table_editor_cell(
@@ -14674,6 +14730,34 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         tab.cell_selection_anchor = None;
                                                         tab.cell_selection_current = None;
                                                     }
+                                                }
+                                            }
+                                            // ── 矩形选区键盘输入 ──
+                                            if tab.cell_selection_anchor.is_some() && !tab.cell_selection_typing {
+                                                let text_input: Option<String> = ui.input(|i| {
+                                                    for event in &i.events {
+                                                        if let egui::Event::Text(text) = event {
+                                                            return Some(text.clone());
+                                                        }
+                                                    }
+                                                    None
+                                                });
+                                                if let Some(text) = text_input {
+                                                    tab.cell_selection_typing = true;
+                                                    tab.cell_selection_input = text;
+                                                    tab.cell_selection_focus_requested = true;
+                                                    ui.ctx().request_repaint();
+                                                }
+                                                let backspace = ui.input(|i| {
+                                                    i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)
+                                                });
+                                                if backspace {
+                                                    tab.cell_selection_typing = true;
+                                                    tab.cell_selection_input.clear();
+                                                }
+                                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                                    tab.cell_selection_anchor = None;
+                                                    tab.cell_selection_current = None;
                                                 }
                                             }
                                             if !is_editing && response.clicked() && tab.cell_selection_anchor.is_none() {
@@ -15192,6 +15276,68 @@ fn cell_in_selection(tab: &TableTabState, row: usize, col: usize) -> bool {
     } else {
         false
     }
+}
+
+fn commit_cell_selection(
+    tab: &mut TableTabState,
+    columns: &[String],
+) {
+    let (Some((ar, ac)), Some((cr, cc))) = (tab.cell_selection_anchor, tab.cell_selection_current) else {
+        return;
+    };
+    let (min_r, max_r) = (ar.min(cr), ar.max(cr));
+    let (min_c, max_c) = (ac.min(cc), ac.max(cc));
+    let new_value = tab.cell_selection_input.clone();
+    let new_is_null = new_value.is_empty();
+
+    // 提取旧值（不可变借用 tab.preview，之后释放再写入 pending_cell_changes）
+    let changes: Vec<(usize, String, PendingCellChange)> = {
+        let result = match tab.preview.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+        let mut out = Vec::new();
+        for row_idx in min_r..=max_r {
+            for col_idx in min_c..=max_c {
+                let Some(column) = columns.get(col_idx) else { continue };
+                let old_value = result
+                    .rows
+                    .get(row_idx)
+                    .and_then(|row| row.get(column))
+                    .map(|v| v.as_text().unwrap_or_default().to_string())
+                    .unwrap_or_default();
+                let old_is_null = result
+                    .rows
+                    .get(row_idx)
+                    .and_then(|row| row.get(column))
+                    .map(|v| v.is_null())
+                    .unwrap_or(true);
+                if new_value != old_value || new_is_null != old_is_null {
+                    out.push((
+                        row_idx,
+                        column.clone(),
+                        PendingCellChange {
+                            column: column.clone(),
+                            old_value,
+                            old_is_null,
+                            new_value: new_value.clone(),
+                            new_is_null,
+                        },
+                    ));
+                }
+            }
+        }
+        out
+    }; // tab.preview 的不可变借用在此结束
+
+    for (row_idx, col_key, change) in changes {
+        tab.pending_cell_changes.insert((row_idx, col_key), change);
+    }
+
+    tab.cell_selection_anchor = None;
+    tab.cell_selection_current = None;
+    tab.cell_selection_typing = false;
+    tab.cell_selection_input.clear();
 }
 
 fn render_table_body_interactive_cell(
