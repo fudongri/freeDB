@@ -441,6 +441,11 @@ struct TableTabState {
     pending_insert_row: Option<BTreeMap<String, QueryCellValue>>,
     scroll_to_insert_row: bool,
     selected_columns: BTreeSet<usize>,
+    // 矩形选区
+    cell_selection_anchor: Option<(usize, usize)>,
+    cell_selection_current: Option<(usize, usize)>,
+    cell_selection_typing: bool,
+    cell_selection_input: String,
     // 结构编辑状态
     editing_structure: bool,
     show_structure_sql_preview: bool,
@@ -2250,6 +2255,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             pending_insert_row: None,
             scroll_to_insert_row: false,
             selected_columns: BTreeSet::new(),
+            // 矩形选区
+            cell_selection_anchor: None,
+            cell_selection_current: None,
+            cell_selection_typing: false,
+            cell_selection_input: String::new(),
             editing_structure: false,
             show_structure_sql_preview: false,
             show_index_sql_preview: false,
