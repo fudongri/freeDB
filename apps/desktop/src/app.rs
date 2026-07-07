@@ -14603,7 +14603,11 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     search_highlight,
                                                     is_current_match,
                                                     &tab.search.committed_keyword,
-                                                    false, false, false, false, "",
+                                                    true,  // selectable
+                                                    cell_in_selection(tab, row_index, col_idx),
+                                                    matches!(tab.cell_selection_current, Some((r, c)) if r == row_index && c == col_idx),
+                                                    tab.cell_selection_typing,
+                                                    &tab.cell_selection_input,
                                                 )
                                             };
                                             let modifiers = ui.ctx().input(|input| input.modifiers);
@@ -14617,7 +14621,62 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     normalize_preview_selection(tab);
                                                 }
                                             }
-                                            if !is_editing && response.clicked() {
+                                            // ── 矩形选区交互 ──
+                                            {
+                                                // 拖拽开始
+                                                if response.drag_started() {
+                                                    tab.cell_selection_anchor = Some((row_index, col_idx));
+                                                    tab.cell_selection_current = Some((row_index, col_idx));
+                                                    tab.cell_selection_typing = false;
+                                                    tab.cell_selection_input.clear();
+                                                    tab.editing_cell = None;
+                                                }
+                                                // 拖拽中
+                                                if response.is_pointer_button_down_on()
+                                                    && tab.cell_selection_anchor.is_some()
+                                                    && !tab.cell_selection_typing
+                                                {
+                                                    tab.cell_selection_current = Some((row_index, col_idx));
+                                                }
+                                                // 拖拽结束
+                                                if response.drag_stopped() {
+                                                    if let Some(press_origin) = response.interact_pointer_pos {
+                                                        if let Some(release_pos) = ui.input(|i| i.pointer.latest_pos()) {
+                                                            let dist = (release_pos - press_origin).length();
+                                                            if dist > 2.0 {
+                                                                tab.cell_selection_current = Some((row_index, col_idx));
+                                                            } else {
+                                                                tab.cell_selection_anchor = None;
+                                                                tab.cell_selection_current = None;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // 单击且有选区
+                                                if response.clicked() && tab.cell_selection_anchor.is_some() && !tab.cell_selection_typing {
+                                                    if cell_in_selection(tab, row_index, col_idx) {
+                                                        // 清除选区，进入单格编辑
+                                                        tab.cell_selection_anchor = None;
+                                                        tab.cell_selection_current = None;
+                                                        commit_current_edit_to_pending(tab);
+                                                        tab.editing_cell = Some(TableCellEditState {
+                                                            target: TableEditTarget::ExistingRow(row_index),
+                                                            column: column.clone(),
+                                                            value: cell_value.as_text().unwrap_or_default().to_string(),
+                                                            is_null: cell_value.is_null(),
+                                                            original_value: cell_value.as_text().unwrap_or_default().to_string(),
+                                                            original_is_null: cell_value.is_null(),
+                                                            focus_requested: true,
+                                                        });
+                                                        ui.ctx().request_repaint();
+                                                    } else {
+                                                        // 点击选区外 → 清除选区
+                                                        tab.cell_selection_anchor = None;
+                                                        tab.cell_selection_current = None;
+                                                    }
+                                                }
+                                            }
+                                            if !is_editing && response.clicked() && tab.cell_selection_anchor.is_none() {
                                                 if range_select {
                                                     extend_preview_selection(tab, row_index);
                                                     tab.editing_cell = None;
@@ -15123,6 +15182,16 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
         tab.editing_cell = None;
     }
     action
+}
+
+fn cell_in_selection(tab: &TableTabState, row: usize, col: usize) -> bool {
+    if let (Some((ar, ac)), Some((cr, cc))) = (tab.cell_selection_anchor, tab.cell_selection_current) {
+        let (min_r, max_r) = (ar.min(cr), ar.max(cr));
+        let (min_c, max_c) = (ac.min(cc), ac.max(cc));
+        row >= min_r && row <= max_r && col >= min_c && col <= max_c
+    } else {
+        false
+    }
 }
 
 fn render_table_body_interactive_cell(
