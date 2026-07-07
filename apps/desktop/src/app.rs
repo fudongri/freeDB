@@ -446,6 +446,7 @@ struct TableTabState {
     cell_selection_current: Option<(usize, usize)>,
     cell_selection_typing: bool,
     cell_selection_input: String,
+    cell_selection_focus_requested: bool,
     // 结构编辑状态
     editing_structure: bool,
     show_structure_sql_preview: bool,
@@ -2260,6 +2261,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             cell_selection_current: None,
             cell_selection_typing: false,
             cell_selection_input: String::new(),
+            cell_selection_focus_requested: false,
             editing_structure: false,
             show_structure_sql_preview: false,
             show_index_sql_preview: false,
@@ -13270,7 +13272,7 @@ fn render_result_table(
                                 // Row number cell
                                 row_ui.col(|ui| {
                                     let row_num_value = QueryCellValue::Text(format!("{}", index + 1));
-                                    let response = render_table_body_interactive_cell(
+                                    let (response, _, _) = render_table_body_interactive_cell(
                                         ui,
                                         &palette,
                                         fill,
@@ -13281,6 +13283,7 @@ fn render_result_table(
                                         false,
                                         false,
                                         "",
+                                        false, false, false, false, "",
                                     );
                                     let modifiers = ui.ctx().input(|input| input.modifiers);
                                     if response.secondary_clicked() {
@@ -13774,7 +13777,7 @@ fn render_editable_result_table(
                                 // 行号
                                 row_ui.col(|ui| {
                                     let row_num_value = QueryCellValue::Text(format!("{}", row_index + 1));
-                                    let response = render_table_body_interactive_cell(
+                                    let (response, _, _) = render_table_body_interactive_cell(
                                         ui,
                                         &palette,
                                         fill,
@@ -13785,6 +13788,7 @@ fn render_editable_result_table(
                                         false,
                                         false,
                                         "",
+                                        false, false, false, false, "",
                                     );
                                     let modifiers = ui.ctx().input(|input| input.modifiers);
                                     if response.secondary_clicked() {
@@ -13860,16 +13864,17 @@ fn render_editable_result_table(
                                         let column_selected = selected_columns.contains(&col_idx);
                                         let search_highlight = search.open && search.matches.iter().any(|&(r, c)| r == row_index && c == col_idx);
                                         let is_current_match = current_match_pos == Some((row_index, col_idx));
-                                        let response = if is_editing {
+                                        let (response, _, _) = if is_editing {
                                             let editor = edit.editing_cell.as_mut().expect("edit state");
-                                            render_table_editor_cell(
+                                            let r = render_table_editor_cell(
                                                 ui,
                                                 &palette,
                                                 fill,
                                                 editor,
                                                 false,
                                                 false,
-                                            )
+                                            );
+                                            (r, false, ui.max_rect())
                                         } else {
                                             render_table_body_interactive_cell(
                                                 ui,
@@ -13882,6 +13887,7 @@ fn render_editable_result_table(
                                                 search_highlight,
                                                 is_current_match,
                                                 &search.committed_keyword,
+                                                false, false, false, false, "",
                                             )
                                         };
                                         // 点击进入编辑
@@ -14423,7 +14429,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     if show_row_number {
                                         row_ui.col(|ui| {
                                         let row_num_value = QueryCellValue::Text(format!("{}", row_index + 1));
-                                        let response = render_table_body_interactive_cell(
+                                        let (response, _, _) = render_table_body_interactive_cell(
                                             ui,
                                             &palette,
                                             fill,
@@ -14434,6 +14440,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             false,
                                             false,
                                             "",
+                                            false, false, false, false, "",
                                         );
                                         let modifiers = ui.ctx().input(|input| input.modifiers);
                                         let toggle_select = modifiers.ctrl || modifiers.command;
@@ -14573,16 +14580,17 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             let column_selected = tab.selected_columns.contains(&col_idx);
                                             let search_highlight = tab.search.open && tab.search.matches.iter().any(|&(r, c)| r == row_index && c == col_idx);
                                             let is_current_match = current_match_pos == Some((row_index, col_idx));
-                                            let response = if is_editing {
+                                            let (response, _pointer_over, _cell_rect) = if is_editing {
                                                 let edit = tab.editing_cell.as_mut().expect("edit state");
-                                                render_table_editor_cell(
+                                                let r = render_table_editor_cell(
                                                     ui,
                                                     &palette,
                                                     fill,
                                                     edit,
                                                     false,
                                                     row_selected,
-                                                )
+                                                );
+                                                (r, false, ui.max_rect())
                                             } else {
                                                 render_table_body_interactive_cell(
                                                     ui,
@@ -14595,6 +14603,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     search_highlight,
                                                     is_current_match,
                                                     &tab.search.committed_keyword,
+                                                    false, false, false, false, "",
                                                 )
                                             };
                                             let modifiers = ui.ctx().input(|input| input.modifiers);
@@ -14803,12 +14812,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         if edit.target == TableEditTarget::PendingInsert
                                                             && edit.column == *column
                                                 );
-                                                let response = if is_editing {
+                                                let (response, _pointer_over, _cell_rect) = if is_editing {
                                                     let edit =
                                                         tab.editing_cell.as_mut().expect("edit state");
-                                                    render_table_editor_cell(
+                                                    let r = render_table_editor_cell(
                                                         ui, &palette, fill, edit, true, false,
-                                                    )
+                                                    );
+                                                    (r, false, ui.max_rect())
                                                 } else {
                                                     render_table_body_interactive_cell(
                                                         ui,
@@ -14823,6 +14833,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         false,
                                                         false,
                                                         "",
+                                                        false, false, false, false, "",
                                                     )
                                                 };
                                                 let cell_clicked = if !is_editing {
@@ -15125,18 +15136,29 @@ fn render_table_body_interactive_cell(
     search_highlight: bool,
     is_current_match: bool,
     keyword: &str,
-) -> egui::Response {
+    selectable: bool,
+    in_selection: bool,
+    is_endpoint: bool,
+    selection_typing: bool,
+    selection_input: &str,
+) -> (egui::Response, bool, egui::Rect) {
     let display = query_cell_display_text(value, weak);
     let display_color = display.color(palette);
     let rect = ui.max_rect();
-    let fill = if column_selected {
+    // 选区高亮（优先级高于列选中）
+    let fill = if in_selection && selection_typing {
+        blend_color(fill, palette.selection_bg, 0.22)
+    } else if in_selection {
+        blend_color(fill, palette.selection_bg, 0.14)
+    } else if column_selected {
         blend_color(fill, palette.selection_bg, 0.12)
     } else if search_highlight {
         blend_color(fill, palette.selection_bg, 0.18)
     } else {
         fill
     };
-    let response = ui.allocate_rect(rect, egui::Sense::click());
+    let sense = if selectable { egui::Sense::click_and_drag() } else { egui::Sense::click() };
+    let response = ui.allocate_rect(rect, sense);
     ui.painter()
         .rect_filled(table_cell_fill_rect(rect, selected), 0.0, fill);
     if is_current_match {
@@ -15197,13 +15219,26 @@ fn render_table_body_interactive_cell(
             display_color,
         );
     }
+    // 选区预览文本（非终点单元格，正在输入时）
+    if in_selection && selection_typing && !is_endpoint && !selection_input.is_empty() {
+        let font_id = FontId::new(12.0, FontFamily::Proportional);
+        ui.painter().with_clip_rect(clipped_rect).text(
+            egui::pos2(clipped_rect.left(), rect.center().y),
+            Align2::LEFT_CENTER,
+            selection_input,
+            font_id,
+            display_color,
+        );
+    }
     let hover_text = match value {
         QueryCellValue::Null => "(NULL)".to_string(),
         QueryCellValue::Text(text) if text.is_empty() => String::new(),
         QueryCellValue::Text(text) => text.clone(),
     };
+    let pointer_over = response.hovered();
     let response = response.on_hover_text(hover_text);
-    response.on_hover_cursor(egui::CursorIcon::Text)
+    let response = response.on_hover_cursor(egui::CursorIcon::Text);
+    (response, pointer_over, rect)
 }
 
 fn render_table_editor_cell(
