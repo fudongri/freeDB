@@ -5355,6 +5355,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     tab.history = history;
                     tab.saved_queries = saved_queries;
                     tab.all_saved_queries = all_saved_queries;
+                    tab.title = saved.title.clone();
                     tab.selected_saved_query_id = Some(saved.id.clone());
                     tab.selected_saved_query_sql = Some(raw_sql);
                     tab.selected_saved_query_connection_id = tab.connection_id.clone();
@@ -5380,6 +5381,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     tab.history = history;
                     tab.saved_queries = saved_queries;
                     tab.all_saved_queries = all_saved_queries;
+                    if tab.selected_saved_query_id.as_deref() == Some(entry_id) {
+                        tab.title = title.to_string();
+                    }
                     tab.messages.push(tr!("已重命名查询：{}", title.trim()));
                 }
             }
@@ -5415,6 +5419,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         tab.selected_saved_query_sql = None;
                         tab.selected_saved_query_connection_id = None;
                         tab.selected_saved_query_database = None;
+                        tab.title = tr!("查询").into();
                     }
                     tab.messages.push(tr!("已删除保存查询：{}", pending.title));
                 }
@@ -22580,9 +22585,10 @@ fn tab_button(
     selected: bool,
 ) -> TabButtonOutput {
     let palette = mac_ui_palette(ui.visuals());
-    let display_label = truncate_ui_label(label, 16);
+    let display_label = truncate_ui_label_by_width(label, 20);
     let is_truncated = display_label != label;
-    let desired_width = (display_label.chars().count() as f32 * 7.0 + 48.0).clamp(90.0, 160.0);
+    let label_display_width: usize = display_label.chars().map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)).sum();
+    let desired_width = (label_display_width as f32 * 6.5 + 48.0).clamp(90.0, 170.0);
     let desired_size = Vec2::new(desired_width, if selected { 26.0 } else { 24.0 });
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     response
@@ -24628,6 +24634,7 @@ fn render_saved_queries_panel(
                                     tab.sql = entry.sql_text.clone();
                                     tab.connection_id = Some(entry.connection_id.clone());
                                     tab.database = entry.database.clone();
+                                    tab.title = entry.title.clone();
                                     tab.selected_saved_query_id = Some(entry.id.clone());
                                     tab.selected_saved_query_sql = Some(entry.sql_text.clone());
                                     tab.selected_saved_query_connection_id = Some(entry.connection_id.clone());
