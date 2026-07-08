@@ -14585,6 +14585,7 @@ fn render_editable_result_table(
             let auto_scroll_x = if cell_selection_anchor.is_some()
                 && ui.input(|i| i.pointer.any_down())
                 && !*cell_selection_typing
+                && result_column_resize_drag.is_none()
             {
                 if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
                     let right_edge = (clip_rect_for_scroll.right() - edge_width).max(clip_rect_for_scroll.left());
@@ -14958,6 +14959,7 @@ fn render_editable_result_table(
                                                 && cell_contains_pointer
                                                 && !*cell_selection_typing
                                                 && !*cell_selection_drag_started
+                                                && result_column_resize_drag.is_none()
                                                 && (cell_selection_anchor.is_none()
                                                     || cell_selection_anchor.is_some_and(|a| a != (row_index, col_idx)))
                                             {
@@ -14981,6 +14983,7 @@ fn render_editable_result_table(
                                                 && cell_contains_pointer
                                                 && cell_selection_anchor.is_some()
                                                 && !*cell_selection_typing
+                                                && result_column_resize_drag.is_none()
                                             {
                                                 *cell_selection_current = Some((row_index, col_idx));
                                             }
@@ -15414,7 +15417,7 @@ fn render_editable_result_table(
                 let scroll_visible_rect = sa_result.inner_rect;
                 let pointer_down = ui.input(|i| i.pointer.any_down());
                 let pointer_pos = ui.input(|i| i.pointer.latest_pos());
-                if cell_selection_anchor.is_some() && pointer_down && !*cell_selection_typing {
+                if cell_selection_anchor.is_some() && pointer_down && !*cell_selection_typing && result_column_resize_drag.is_none() {
                     if let Some(pos) = pointer_pos {
                         let bottom_edge = (scroll_visible_rect.bottom() - edge_width).max(scroll_visible_rect.top());
                         let top_edge = (scroll_visible_rect.top() + edge_width).min(scroll_visible_rect.bottom());
@@ -15557,6 +15560,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
             let auto_scroll_x = if tab.cell_selection_anchor.is_some()
                 && ui.input(|i| i.pointer.any_down())
                 && !tab.cell_selection_typing
+                && tab.column_resize_drag.is_none()
             {
                 if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
                     let right_edge = (clip_rect_for_scroll.right() - edge_width).max(clip_rect_for_scroll.left());
@@ -16071,6 +16075,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     && cell_contains_pointer
                                                     && !tab.cell_selection_typing
                                                     && !tab.cell_selection_drag_started
+                                                    && tab.column_resize_drag.is_none()
                                                     && (tab.cell_selection_anchor.is_none()
                                                         || tab.cell_selection_anchor.is_some_and(|a| a != (row_index, col_idx)))
                                                 {
@@ -16092,6 +16097,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     && cell_contains_pointer
                                                     && tab.cell_selection_anchor.is_some()
                                                     && !tab.cell_selection_typing
+                                                    && tab.column_resize_drag.is_none()
                                                 {
                                                     tab.cell_selection_current = Some((row_index, col_idx));
                                                 }
@@ -16734,7 +16740,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                 let scroll_visible_rect = sa_editable.inner_rect;
                 let pointer_down = ui.input(|i| i.pointer.any_down());
                 let pointer_pos = ui.input(|i| i.pointer.latest_pos());
-                if tab.cell_selection_anchor.is_some() && pointer_down && !tab.cell_selection_typing {
+                if tab.cell_selection_anchor.is_some() && pointer_down && !tab.cell_selection_typing && tab.column_resize_drag.is_none() {
                     if let Some(pos) = pointer_pos {
                         let bottom_edge = (scroll_visible_rect.bottom() - edge_width).max(scroll_visible_rect.top());
                         let top_edge = (scroll_visible_rect.top() + edge_width).min(scroll_visible_rect.bottom());
