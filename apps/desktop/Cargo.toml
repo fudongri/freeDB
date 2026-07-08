@@ -14,6 +14,7 @@ path = "src/bin/export_icon.rs"
 
 [dependencies]
 app-services = { path = "../../crates/app-services" }
+arboard = "3"
 chrono.workspace = true
 core-domain = { path = "../../crates/core-domain" }
 eframe.workspace = true

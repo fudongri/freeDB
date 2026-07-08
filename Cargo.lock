@@ -1253,6 +1253,7 @@ name = "desktop"
 version = "1.0.2"
 dependencies = [
  "app-services",
+ "arboard",
  "chrono",
  "core-domain",
  "eframe",
