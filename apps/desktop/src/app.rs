@@ -16912,7 +16912,11 @@ fn commit_cell_selection(
 }
 
 fn clear_table_cell_selection(tab: &mut TableTabState) {
-    clear_table_cell_selection(tab);
+    tab.cell_selection_anchor = None;
+    tab.cell_selection_current = None;
+    tab.cell_selection_typing = false;
+    tab.cell_selection_input.clear();
+    tab.cell_selection_is_null = false;
     tab.cell_selection_drag_started = false;
 }
 
