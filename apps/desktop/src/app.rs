@@ -24631,24 +24631,22 @@ fn render_query_editor(
                                     // Option+press without drag: add/remove single cursor
                                     // Option+drag: generate a cursor on each visible line from start to current
 
-                                    // Build galley once (needed by both press and drag paths)
+                                    // Use TextEdit's galley for cursor positioning to ensure
+                                    // consistent layout with the rendered text.
+                                    let galley_for_drag = output.galley.clone();
+                                    let galley_pos_for_drag = output.galley_pos;
                                     let galley_opt = alt_held.then(|| {
                                         let local_pos = pointer_pos?;
                                         if !editor_rect.contains(local_pos) { return None; }
-                                        let mut job = sql_highlight_job(&tab.sql, ui.visuals());
-                                        job.wrap.max_width = editor_rect.width().max(0.0);
-                                        for section in &mut job.sections {
-                                            section.format.line_height = Some(gutter_row_height);
-                                        }
-                                        Some((local_pos, ui.fonts_mut(|fonts| fonts.layout_job(job))))
+                                        Some((local_pos, galley_for_drag.clone()))
                                     }).flatten();
 
                                     if let Some((pos, galley)) = &galley_opt {
-                                        let local_pos = egui::pos2(
-                                            pos.x - editor_rect.left(),
-                                            pos.y - editor_rect.top(),
+                                        let galley_local = egui::pos2(
+                                            pos.x - galley_pos_for_drag.x,
+                                            pos.y - galley_pos_for_drag.y,
                                         );
-                                        let ccursor = galley.cursor_from_pos(local_pos.to_vec2());
+                                        let ccursor = galley.cursor_from_pos(galley_local.to_vec2());
                                         let layout = galley.layout_from_cursor(ccursor);
                                         let row_x = galley.rows.get(layout.row)
                                             .map(|r| r.pos.x + r.x_offset(layout.column))
@@ -24687,6 +24685,10 @@ fn render_query_editor(
                                                         continue;
                                                     }
                                                     if let Some(row) = galley.rows.get(line_idx) {
+                                                        // Skip empty rows (e.g., trailing newline creates an extra row with no glyphs)
+                                                        if row.glyphs.is_empty() {
+                                                            continue;
+                                                        }
                                                         // Find cursor at the drag's x position on this row
                                                         let row_local = egui::pos2(drag.x, row.min_y() + row.height() * 0.5);
                                                         let c = galley.cursor_from_pos(row_local.to_vec2());
@@ -24729,17 +24731,9 @@ fn render_query_editor(
 
                                 // --- Extra cursor rendering (multi-cursor) ---
                                 if !tab.extra_cursors.is_empty() {
-                                    let galley = {
-                                        let mut job = sql_highlight_job(&tab.sql, ui.visuals());
-                                        job.wrap.max_width = editor_rect.width().max(0.0);
-                                        for section in &mut job.sections {
-                                            section.format.line_height = Some(gutter_row_height);
-                                        }
-                                        ui.fonts_mut(|fonts| fonts.layout_job(job))
-                                    };
-
+                                    let galley = &output.galley;
                                     let painter = ui.painter();
-                                    let offset = editor_rect.left_top().to_vec2();
+                                    let offset = output.galley_pos.to_vec2();
 
                                     // Re-draw primary cursor (non-blinking) to cover
                                     // TextEdit's blinking cursor with matching style.
