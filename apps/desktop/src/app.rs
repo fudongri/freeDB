@@ -17475,14 +17475,9 @@ fn table_active_cell_fill(
             110,
         )
     } else if selected {
-        blend_color(palette.selection_bg, base_fill, 0.08)
+        blend_color(palette.selection_bg, base_fill, 0.25)
     } else {
-        Color32::from_rgba_premultiplied(
-            base_fill.r().saturating_add(8),
-            base_fill.g().saturating_add(12),
-            base_fill.b().saturating_add(18),
-            255,
-        )
+        blend_color(palette.selection_bg, base_fill, 0.18)
     }
 }
 
