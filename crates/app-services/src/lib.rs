@@ -393,6 +393,7 @@ impl AppServices {
             title: record.title,
             sql_text: record.sql_text,
             saved_at: record.saved_at,
+            sort_order: record.sort_order,
         })
     }
 
@@ -408,6 +409,7 @@ impl AppServices {
                 title: record.title,
                 sql_text: record.sql_text,
                 saved_at: record.saved_at,
+                sort_order: record.sort_order,
             })
             .collect())
     }
@@ -424,6 +426,7 @@ impl AppServices {
                 title: record.title,
                 sql_text: record.sql_text,
                 saved_at: record.saved_at,
+                sort_order: record.sort_order,
             })
             .collect())
     }
@@ -446,6 +449,10 @@ impl AppServices {
 
     pub fn delete_saved_query(&self, id: &str) -> Result<()> {
         self.history_store.delete_saved_query(id)
+    }
+
+    pub fn update_saved_query_sort_orders(&self, updates: &[(String, i32)]) -> Result<()> {
+        self.history_store.update_saved_query_sort_orders(updates)
     }
 
     pub fn export_query_result_csv(

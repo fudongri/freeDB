@@ -23,6 +23,7 @@ pub struct SavedQueryRecord {
     pub title: String,
     pub sql_text: String,
     pub saved_at: DateTime<Utc>,
+    pub sort_order: i32,
 }
 
 #[derive(Clone)]
@@ -102,15 +103,24 @@ impl HistoryStore {
             .ok();
         let saved_at = Utc::now();
         let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
+        // 获取当前最大 sort_order
+        let max_sort_order: i32 = connection
+            .query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM saved_queries WHERE connection_id = ?1",
+                params![connection_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+        let sort_order = max_sort_order + 1;
         connection.execute(
-            "INSERT INTO saved_queries (id, connection_id, database, title, sql_text, saved_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO saved_queries (id, connection_id, database, title, sql_text, saved_at, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                 database = excluded.database,
                 title = excluded.title,
                 sql_text = excluded.sql_text,
                 saved_at = excluded.saved_at",
-            params![id, connection_id, database, title, sql_text, saved_at.to_rfc3339()],
+            params![id, connection_id, database, title, sql_text, saved_at.to_rfc3339(), sort_order],
         )?;
         Ok(SavedQueryRecord {
             id,
@@ -119,6 +129,7 @@ impl HistoryStore {
             title: title.to_string(),
             sql_text: sql_text.to_string(),
             saved_at,
+            sort_order,
         })
     }
 
@@ -150,6 +161,19 @@ impl HistoryStore {
         Ok(())
     }
 
+    pub fn update_saved_query_sort_orders(&self, updates: &[(String, i32)]) -> Result<()> {
+        let connection = self.connection.lock();
+        let tx = connection.unchecked_transaction()?;
+        for (id, sort_order) in updates {
+            tx.execute(
+                "UPDATE saved_queries SET sort_order = ?2 WHERE id = ?1",
+                params![id, sort_order],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_saved_queries(
         &self,
         connection_id: &str,
@@ -157,10 +181,10 @@ impl HistoryStore {
     ) -> Result<Vec<SavedQueryRecord>> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
-            "SELECT id, connection_id, database, title, sql_text, saved_at
+            "SELECT id, connection_id, database, title, sql_text, saved_at, sort_order
              FROM saved_queries
              WHERE connection_id = ?1
-             ORDER BY saved_at DESC
+             ORDER BY sort_order ASC, saved_at DESC
              LIMIT ?2",
         )?;
         let rows = statement.query_map(params![connection_id, limit as i64], |row| {
@@ -173,6 +197,7 @@ impl HistoryStore {
                 saved_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                     .map_err(to_sql_error)?
                     .with_timezone(&Utc),
+                sort_order: row.get(6)?,
             })
         })?;
 
@@ -182,9 +207,9 @@ impl HistoryStore {
     pub fn list_all_saved_queries(&self, limit: usize) -> Result<Vec<SavedQueryRecord>> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
-            "SELECT id, connection_id, database, title, sql_text, saved_at
+            "SELECT id, connection_id, database, title, sql_text, saved_at, sort_order
              FROM saved_queries
-             ORDER BY saved_at DESC
+             ORDER BY sort_order ASC, saved_at DESC
              LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit as i64], |row| {
@@ -197,6 +222,7 @@ impl HistoryStore {
                 saved_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                     .map_err(to_sql_error)?
                     .with_timezone(&Utc),
+                sort_order: row.get(6)?,
             })
         })?;
 
@@ -221,6 +247,7 @@ impl HistoryStore {
                 title TEXT NOT NULL,
                 sql_text TEXT NOT NULL,
                 saved_at TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(connection_id, sql_text)
             );
             CREATE INDEX IF NOT EXISTS idx_saved_queries_connection_id
@@ -256,6 +283,30 @@ impl HistoryStore {
                 "ALTER TABLE query_history ADD COLUMN success INTEGER NOT NULL DEFAULT 1;",
             )?;
         }
+
+        // Migrate: add sort_order column to saved_queries if missing
+        let has_sort_order_column: bool = connection
+            .prepare("SELECT sort_order FROM saved_queries LIMIT 0")
+            .is_ok();
+        if !has_sort_order_column {
+            connection.execute_batch(
+                "ALTER TABLE saved_queries ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            // 为现有记录设置 sort_order（按 saved_at 降序）
+            connection.execute_batch(
+                "UPDATE saved_queries SET sort_order = (
+                    SELECT COUNT(*) FROM saved_queries AS sq2
+                    WHERE sq2.connection_id = saved_queries.connection_id
+                    AND sq2.saved_at >= saved_queries.saved_at
+                ) - 1;",
+            )?;
+        }
+
+        // 确保 sort_order 索引存在（在列迁移之后创建）
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_saved_queries_sort_order
+                ON saved_queries(connection_id, sort_order);",
+        )?;
 
         Ok(())
     }

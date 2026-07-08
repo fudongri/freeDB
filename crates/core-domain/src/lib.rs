@@ -359,6 +359,7 @@ pub struct SavedQueryEntry {
     pub title: String,
     pub sql_text: String,
     pub saved_at: DateTime<Utc>,
+    pub sort_order: i32,
 }
 
 impl SavedQueryEntry {
@@ -375,6 +376,7 @@ impl SavedQueryEntry {
             title: title.into(),
             sql_text: sql_text.into(),
             saved_at: Utc::now(),
+            sort_order: 0,
         }
     }
 }
