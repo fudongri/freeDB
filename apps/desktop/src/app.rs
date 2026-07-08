@@ -274,6 +274,21 @@ struct OptionDragStart {
     x: f32,
 }
 
+/// 单个查询结果页的选区状态（行选中、列选中、矩形选区）
+#[derive(Clone, Default)]
+struct QueryResultSelectionState {
+    selected_columns: BTreeSet<usize>,
+    selected_result_rows: BTreeSet<usize>,
+    selected_result_row: Option<usize>,
+    selection_anchor_row: Option<usize>,
+    cell_selection_anchor: Option<(usize, usize)>,
+    cell_selection_current: Option<(usize, usize)>,
+    cell_selection_typing: bool,
+    cell_selection_input: String,
+    cell_selection_focus_requested: bool,
+    cell_selection_is_null: bool,
+}
+
 #[derive(Clone)]
 struct QueryTabState {
     id: String,
@@ -299,10 +314,8 @@ struct QueryTabState {
     active_bottom_tab: QueryBottomTab,
     last_executed_sql: Option<String>,
     result_sort: TableSortState,
-    selected_columns: BTreeSet<usize>,
-    selected_result_rows: BTreeSet<usize>,
-    selected_result_row: Option<usize>,
-    selection_anchor_row: Option<usize>,
+    /// 每个结果页独立的选区状态（行选中、列选中、矩形选区）
+    result_selections: Vec<QueryResultSelectionState>,
     column_order: Vec<String>,
     column_drag: Option<TableColumnDragState>,
     multi_results: Vec<QueryResult>,
@@ -340,13 +353,6 @@ struct QueryTabState {
     pending_edit_context_analysis: bool,
     /// 手动编辑模式：等待用户输入表名
     manual_edit_prompt: bool,
-    // 矩形选区（查询结果页）
-    cell_selection_anchor: Option<(usize, usize)>,
-    cell_selection_current: Option<(usize, usize)>,
-    cell_selection_typing: bool,
-    cell_selection_input: String,
-    cell_selection_focus_requested: bool,
-    cell_selection_is_null: bool,
 }
 
 /// SQL 查询页的内联编辑上下文。当检测到简单单表 SELECT 时创建。
@@ -1968,7 +1974,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         };
         match tab {
             WorkspaceTab::Query(query_tab) => {
-                query_tab.selected_columns.clear();
+                let sel = query_tab.current_selections_mut();
+                sel.selected_columns.clear();
+                sel.selected_result_rows.clear();
+                sel.selected_result_row = None;
+                sel.selection_anchor_row = None;
             }
             WorkspaceTab::Table(table_tab) => {
                 table_tab.selected_columns.clear();
@@ -1989,7 +1999,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         match tab {
             WorkspaceTab::Query(query_tab) => {
-                if query_tab.selected_columns.is_empty() {
+                let idx = query_tab.selected_result_index;
+                if idx >= query_tab.result_selections.len() { return; }
+                let selected_columns = query_tab.result_selections[idx].selected_columns.clone();
+                if selected_columns.is_empty() {
                     return;
                 }
                 let Some(ref result) = query_tab.result else { return };
@@ -2011,7 +2024,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ordered
                 };
                 // 用索引获取选中列，避免同名列歧义
-                let mut sorted_indices: Vec<usize> = query_tab.selected_columns.iter().copied().collect();
+                let mut sorted_indices: Vec<usize> = selected_columns.iter().copied().collect();
                 sorted_indices.sort();
                 let selected_cols: Vec<&String> = sorted_indices
                     .iter()
@@ -2037,7 +2050,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let row_count = result.rows.len();
                 ctx.copy_text(text);
                 self.status_message = tr!("已复制 {} 列, {} 行", col_count, row_count);
-                query_tab.selected_columns.clear();
+                query_tab.current_selections_mut().selected_columns.clear();
             }
             WorkspaceTab::Table(table_tab) => {
                 if table_tab.selected_columns.is_empty() {
@@ -3011,6 +3024,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return;
         };
         let Some(connection_id) = query_tab.connection_id.clone() else {
+            self.status_level = StatusLevel::Error;
             self.status_message = tr!("请先选择一个连接").into();
             return;
         };
@@ -3070,11 +3084,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         query_tab.explain_view_mode = ExplainViewMode::Tree;
         query_tab.query_explain_json = None;
         query_tab.edit_context = None;
-        query_tab.cell_selection_anchor = None;
-        query_tab.cell_selection_current = None;
-        query_tab.cell_selection_typing = false;
-        query_tab.cell_selection_input.clear();
-        query_tab.cell_selection_is_null = false;
+        query_tab.result_selections.clear();
 
         // 检测是否为 EXPLAIN 查询
         let is_explain = statements.iter().any(|s| is_explain_query(s));
@@ -4773,7 +4783,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             &self.schema_cache,
                             pending_query_batch_save,
                         ),
-                        WorkspaceTab::Table(tab) => Self::render_table_tab(ui, tab),
+                        WorkspaceTab::Table(tab) => Self::render_table_tab(ui, tab, self.pending_batch_save),
                         WorkspaceTab::CreateTable(tab) => Self::render_create_table_tab(ui, tab),
                         WorkspaceTab::Dashboard => {
                             self.render_dashboard_tab(ui);
@@ -4901,6 +4911,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::OpenSaveQueryDialog(connection_id) => {
                 self.open_save_query_dialog(&connection_id);
             }
+            TabUiAction::UpdateSelectedSavedQuery(connection_id) => {
+                self.update_selected_saved_query(&connection_id);
+            }
+            TabUiAction::ShowStatusError(msg) => {
+                self.status_level = StatusLevel::Error;
+                self.status_message = msg.into();
+            }
             TabUiAction::OpenRenameSavedQueryDialog(entry) => {
                 self.open_rename_saved_query_dialog(&entry);
             }
@@ -4981,11 +4998,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ctx.editing_cell = None;
                         ctx.pending_cell_changes.clear();
                     }
-                    tab.cell_selection_anchor = None;
-                    tab.cell_selection_current = None;
-                    tab.cell_selection_typing = false;
-                    tab.cell_selection_input.clear();
-                    tab.cell_selection_is_null = false;
+                    let sel = tab.current_selections_mut();
+                    sel.cell_selection_anchor = None;
+                    sel.cell_selection_current = None;
+                    sel.cell_selection_typing = false;
+                    sel.cell_selection_input.clear();
+                    sel.cell_selection_is_null = false;
                 }
             }
             TabUiAction::EnableManualQueryEdit(table_name) => {
@@ -5817,11 +5835,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 .find(|t| matches!(t, WorkspaceTab::Query(q) if q.id == trigger.tab_id))
             {
                 tab.edit_context = None;
-                tab.cell_selection_anchor = None;
-                tab.cell_selection_current = None;
-                tab.cell_selection_typing = false;
-                tab.cell_selection_input.clear();
-                tab.cell_selection_is_null = false;
+                let sel = tab.current_selections_mut();
+                sel.cell_selection_anchor = None;
+                sel.cell_selection_current = None;
+                sel.cell_selection_typing = false;
+                sel.cell_selection_input.clear();
+                sel.cell_selection_is_null = false;
             }
             return;
         };
@@ -5934,11 +5953,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         Err(_) => {
                             // 表定义加载失败，清除编辑上下文
                             tab.edit_context = None;
-                            tab.cell_selection_anchor = None;
-                            tab.cell_selection_current = None;
-                            tab.cell_selection_typing = false;
-                            tab.cell_selection_input.clear();
-                            tab.cell_selection_is_null = false;
+                            let sel = tab.current_selections_mut();
+                            sel.cell_selection_anchor = None;
+                            sel.cell_selection_current = None;
+                            sel.cell_selection_typing = false;
+                            sel.cell_selection_input.clear();
+                            sel.cell_selection_is_null = false;
                         }
                     }
                 }
@@ -6584,10 +6604,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     .clicked()
                                 {
                                     if let Some(connection_id) = tab.connection_id.clone() {
-                                        action = TabUiAction::OpenSaveQueryDialog(connection_id);
+                                        if tab.selected_saved_query_id.is_some() {
+                                            action = TabUiAction::UpdateSelectedSavedQuery(connection_id);
+                                        } else {
+                                            action = TabUiAction::OpenSaveQueryDialog(connection_id);
+                                        }
                                     } else {
-                                        tab.messages.push(tr!("请先选择一个连接后再保存查询").into());
-                                        tab.active_bottom_tab = QueryBottomTab::Messages;
+                                        action = TabUiAction::ShowStatusError(tr!("请先选择一个连接后再保存查询").into());
                                     }
                                 }
                                 if toolbar_button(ui, tr!("格式化"), ToolbarButtonKind::Subtle).clicked() {
@@ -6933,19 +6956,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         if !edit_ctx.committed_edit_this_frame && !query_batch_dialog_open {
                                             let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
                                             if cancel_esc {
-                                                if tab.cell_selection_anchor.is_some() {
+                                                while tab.result_selections.len() <= tab.selected_result_index {
+                                                    tab.result_selections.push(QueryResultSelectionState::default());
+                                                }
+                                                let sel = &mut tab.result_selections[tab.selected_result_index];
+                                                if sel.cell_selection_anchor.is_some() {
                                                     // 矩形选区激活：撤销并清除选区
                                                     let columns: Vec<String> = tab.result.as_ref()
                                                         .map(|r| r.columns.clone())
                                                         .unwrap_or_default();
                                                     revert_query_cell_selection_pending(
-                                                        tab.cell_selection_anchor, tab.cell_selection_current,
+                                                        sel.cell_selection_anchor, sel.cell_selection_current,
                                                         &columns, &mut edit_ctx.pending_cell_changes,
                                                     );
                                                     clear_query_cell_selection(
-                                                        &mut tab.cell_selection_anchor, &mut tab.cell_selection_current,
-                                                        &mut tab.cell_selection_typing, &mut tab.cell_selection_input,
-                                                        &mut tab.cell_selection_is_null,
+                                                        &mut sel.cell_selection_anchor, &mut sel.cell_selection_current,
+                                                        &mut sel.cell_selection_typing, &mut sel.cell_selection_input,
+                                                        &mut sel.cell_selection_is_null,
                                                     );
                                                 } else if edit_ctx.editing_cell.is_some() {
                                                     // 有激活的编辑器：取消当前编辑
@@ -6973,7 +7000,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 query_batch_dialog_open = true;
                                             }
                                             let editing_active = edit_ctx.editing_cell.is_some();
-                                            let cell_sel_typing = tab.cell_selection_anchor.is_some() && tab.cell_selection_typing;
+                                            let cell_sel_typing = tab.result_selections.get(tab.selected_result_index).map_or(false, |s| s.cell_selection_anchor.is_some() && s.cell_selection_typing);
                                             if editing_active && !cell_sel_typing {
                                                 let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                                 if save_enter {
@@ -7065,36 +7092,40 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }
                                     if let Some(result) = &mut tab.result {
                                         // 渲染表格（先于编辑工具栏）
+                                        while tab.result_selections.len() <= tab.selected_result_index {
+                                            tab.result_selections.push(QueryResultSelectionState::default());
+                                        }
+                                        let sel = &mut tab.result_selections[tab.selected_result_index];
                                         if let Some(ref mut edit_ctx) = tab.edit_context {
                                             if edit_ctx.definition.is_some() {
                                                 let result_action = render_editable_result_table(
                                                     ui, &tab.id, result, edit_ctx,
                                                     &mut tab.result_sort,
-                                                    &mut tab.selected_columns,
-                                                    &mut tab.selected_result_rows,
-                                                    &mut tab.selected_result_row,
-                                                    &mut tab.selection_anchor_row,
+                                                    &mut sel.selected_columns,
+                                                    &mut sel.selected_result_rows,
+                                                    &mut sel.selected_result_row,
+                                                    &mut sel.selection_anchor_row,
                                                     &mut tab.search,
                                                     &mut tab.column_order,
                                                     &mut tab.column_drag,
-                                                    &mut tab.cell_selection_anchor,
-                                                    &mut tab.cell_selection_current,
-                                                    &mut tab.cell_selection_typing,
-                                                    &mut tab.cell_selection_input,
-                                                    &mut tab.cell_selection_focus_requested,
-                                                    &mut tab.cell_selection_is_null,
+                                                    &mut sel.cell_selection_anchor,
+                                                    &mut sel.cell_selection_current,
+                                                    &mut sel.cell_selection_typing,
+                                                    &mut sel.cell_selection_input,
+                                                    &mut sel.cell_selection_focus_requested,
+                                                    &mut sel.cell_selection_is_null,
                                                 );
                                                 if !matches!(result_action.action, TabUiAction::None) {
                                                     action = result_action.action;
                                                 }
                                             } else {
-                                                let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.selected_result_rows, &mut tab.selected_result_row, &mut tab.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                                let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
                                                 if !matches!(result_action.action, TabUiAction::None) {
                                                     action = result_action.action;
                                                 }
                                             }
                                         } else {
-                                            let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut tab.selected_columns, &mut tab.selected_result_rows, &mut tab.selected_result_row, &mut tab.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                            let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
                                             if !matches!(result_action.action, TabUiAction::None) {
                                                 action = result_action.action;
                                             }
@@ -7729,7 +7760,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         action
     }
 
-    fn render_table_tab(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAction {
+    fn render_table_tab(ui: &mut egui::Ui, tab: &mut TableTabState, pending_batch_save: bool) -> TabUiAction {
         tab.committed_edit_this_frame = false;
         let palette = mac_ui_palette(ui.visuals());
         let show_table_loading = |ui: &mut egui::Ui, label: &str| {
@@ -7952,18 +7983,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 matches!(edit.target, TableEditTarget::ExistingRow(_))
                                                 && (edit.value != edit.original_value || edit.is_null != edit.original_is_null)
                                             });
-                                            if tab.deferred_save_action {
-                                                tab.deferred_save_action = false;
-                                                action = TabUiAction::SavePendingCellChanges;
-                                            }
                                             let has_pending = !tab.pending_cell_changes.is_empty() || current_edit_changed;
-                                            if has_pending {
+                                            if has_pending && !pending_batch_save {
+                                                if tab.deferred_save_action {
+                                                    tab.deferred_save_action = false;
+                                                    action = TabUiAction::SavePendingCellChanges;
+                                                }
                                                 let editing_active = tab.editing_cell.is_some();
                                                 if editing_active {
-                                                    // While cell editor is open, Enter saves all pending changes
                                                     let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                                     if save_enter {
                                                         tab.deferred_save_action = true;
+                                                        ui.ctx().input_mut(|input| { input.consume_key(egui::Modifiers::NONE, egui::Key::Enter); });
                                                     }
                                                     // Esc cancels the current cell edit
                                                     let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
@@ -7978,6 +8009,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                                     if save_enter {
                                                         action = TabUiAction::SavePendingCellChanges;
+                                                        ui.ctx().input_mut(|input| { input.consume_key(egui::Modifiers::NONE, egui::Key::Enter); });
                                                     }
                                                     let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
                                                     if cancel_esc {
@@ -12141,6 +12173,24 @@ impl eframe::App for DesktopApp {
                             tab.cell_selection_is_null = false;
                             true
                         }
+                        Some(WorkspaceTab::Query(tab)) if tab.result_selections.get(tab.selected_result_index).map_or(false, |s| s.cell_selection_anchor.is_some()) => {
+                            let sel = &mut tab.result_selections[tab.selected_result_index];
+                            if let Some(ref mut edit) = tab.edit_context {
+                                if let Some(ref result) = tab.result {
+                                    let columns = result.columns.clone();
+                                    revert_query_cell_selection_pending(
+                                        sel.cell_selection_anchor, sel.cell_selection_current,
+                                        &columns, &mut edit.pending_cell_changes,
+                                    );
+                                }
+                            }
+                            sel.cell_selection_anchor = None;
+                            sel.cell_selection_current = None;
+                            sel.cell_selection_typing = false;
+                            sel.cell_selection_input.clear();
+                            sel.cell_selection_is_null = false;
+                            true
+                        }
                         _ => false,
                     };
                     if !selection_cleared {
@@ -12367,6 +12417,7 @@ impl eframe::App for DesktopApp {
                     if let Some(cid) = connection_id {
                         self.open_save_query_dialog(&cid);
                     } else {
+                        self.status_level = StatusLevel::Error;
                         self.status_message = tr!("请先选择一个连接后再保存查询").into();
                     }
                 }
@@ -12550,10 +12601,7 @@ impl QueryTabState {
             active_bottom_tab: QueryBottomTab::Messages,
             last_executed_sql: None,
             result_sort: TableSortState::default(),
-            selected_columns: BTreeSet::new(),
-            selected_result_rows: BTreeSet::new(),
-            selected_result_row: None,
-            selection_anchor_row: None,
+            result_selections: Vec::new(),
             column_order: Vec::new(),
             column_drag: None,
             multi_results: Vec::new(),
@@ -12581,15 +12629,33 @@ impl QueryTabState {
             edit_context: None,
             pending_edit_context_analysis: false,
             manual_edit_prompt: false,
-            cell_selection_anchor: None,
-            cell_selection_current: None,
-            cell_selection_typing: false,
-            cell_selection_input: String::new(),
-            cell_selection_focus_requested: false,
-            cell_selection_is_null: false,
         }
     }
+
+    fn current_selections(&self) -> &QueryResultSelectionState {
+        self.result_selections.get(self.selected_result_index).unwrap_or(&EMPTY_SELECTIONS)
+    }
+
+    fn current_selections_mut(&mut self) -> &mut QueryResultSelectionState {
+        while self.result_selections.len() <= self.selected_result_index {
+            self.result_selections.push(QueryResultSelectionState::default());
+        }
+        &mut self.result_selections[self.selected_result_index]
+    }
 }
+
+static EMPTY_SELECTIONS: QueryResultSelectionState = QueryResultSelectionState {
+    selected_columns: BTreeSet::new(),
+    selected_result_rows: BTreeSet::new(),
+    selected_result_row: None,
+    selection_anchor_row: None,
+    cell_selection_anchor: None,
+    cell_selection_current: None,
+    cell_selection_typing: false,
+    cell_selection_input: String::new(),
+    cell_selection_focus_requested: false,
+    cell_selection_is_null: false,
+};
 
 // #region debug-point shared:reporter
 fn debug_report(run_id: &str, hypothesis_id: &str, location: &str, msg: &str, data: String) {
@@ -12718,6 +12784,8 @@ enum TabUiAction {
     StopExecution,
     RefreshQueryHistory(String),
     OpenSaveQueryDialog(String),
+    UpdateSelectedSavedQuery(String),
+    ShowStatusError(String),
     OpenRenameSavedQueryDialog(SavedQueryEntry),
     PromptDeleteSavedQuery(SavedQueryEntry),
     RefreshActiveTable { reload_definition: bool },
@@ -13914,6 +13982,11 @@ fn render_result_table(
                     let esc_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
                     if esc_pressed {
                         *column_drag = None;
+                        if !selected_rows.is_empty() {
+                            selected_rows.clear();
+                            *selected_row = None;
+                            *selection_anchor = None;
+                        }
                     }
                     let column_drag_released = ui.input(|input| {
                         input.pointer.button_released(egui::PointerButton::Primary)
@@ -14313,6 +14386,8 @@ fn render_editable_result_table(
                                         if modifiers.shift {
                                             extend_query_selection(selected_rows, selected_row, selection_anchor, row_index);
                                         } else if modifiers.ctrl || modifiers.command {
+                                            toggle_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                        } else if query_row_is_selected(selected_rows, selected_row, row_index) {
                                             toggle_query_selection(selected_rows, selected_row, selection_anchor, row_index);
                                         } else {
                                             set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
@@ -14791,6 +14866,11 @@ fn render_editable_result_table(
                     let esc_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
                     if esc_pressed {
                         *column_drag = None;
+                        if cell_selection_anchor.is_none() && !selected_rows.is_empty() {
+                            selected_rows.clear();
+                            *selected_row = None;
+                            *selection_anchor = None;
+                        }
                     }
                     let column_drag_released = ui.input(|input| {
                         input.pointer.button_released(egui::PointerButton::Primary)
@@ -16426,9 +16506,9 @@ fn render_table_body_interactive_cell(
     let fill = if in_selection && selection_typing {
         blend_color(fill, palette.selection_bg, 0.35)
     } else if in_selection {
-        blend_color(fill, palette.selection_bg, 0.25)
+        blend_color(palette.selection_bg, fill, 0.18)
     } else if column_selected {
-        blend_color(fill, palette.selection_bg, 0.12)
+        blend_color(palette.selection_bg, fill, 0.18)
     } else if search_highlight {
         blend_color(fill, palette.selection_bg, 0.18)
     } else {
