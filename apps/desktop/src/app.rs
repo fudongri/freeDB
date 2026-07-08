@@ -82,6 +82,7 @@ pub struct DesktopApp {
     active_connections: HashMap<String, HashSet<String>>, // 活跃连接 → 已打开的数据库 id 集合
     sidebar_drag_source: Option<String>,       // 正在被拖拽的连接 id
     sidebar_drag_y: f32,                       // 拖拽时鼠标 Y 坐标
+    node_drag_source: Option<ExplorerNode>,    // 正在被拖拽的树节点（用于插入 SQL）
     pending_delete_confirmation: Option<PendingDeleteConfirmation>,
     pending_saved_query_dialog: Option<SavedQueryDialogState>,
     pending_saved_query_delete: Option<PendingSavedQueryDelete>,
@@ -1135,6 +1136,7 @@ impl DesktopApp {
             active_connections: HashMap::new(),
             sidebar_drag_source: None,
             sidebar_drag_y: 0.0,
+            node_drag_source: None,
             pending_delete_confirmation: None,
             pending_saved_query_dialog: None,
             pending_saved_query_delete: None,
@@ -4457,6 +4459,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         node.connection_id.clone(),
                         node.clone(),
                     ));
+                }
+            }
+            // 拖拽节点名称到 SQL 编辑器
+            if response.drag_started() {
+                if matches!(
+                    node.node_type,
+                    ExplorerNodeType::Database
+                        | ExplorerNodeType::Schema
+                        | ExplorerNodeType::Table
+                        | ExplorerNodeType::View
+                ) {
+                    self.node_drag_source = Some(node.clone());
                 }
             }
             } // end of else (non-renaming mode)
@@ -12445,6 +12459,83 @@ impl eframe::App for DesktopApp {
             .exact_height(24.0)
             .show(ctx, |ui| self.render_status_bar(ui));
         egui::CentralPanel::default().show(ctx, |ui| self.render_tabs(ui));
+
+        // 树节点拖拽幽灵名称渲染和释放检测
+        if let Some(ref dragged_node) = self.node_drag_source.clone() {
+            let pointer_pos = ctx.input(|i| i.pointer.hover_pos()).unwrap_or_default();
+            let node_name = &dragged_node.name;
+            let palette = mac_ui_palette(&ctx.style().visuals);
+
+            // 幽灵名称跟随鼠标
+            egui::Area::new("node-drag-ghost".into())
+                .order(egui::Order::Foreground)
+                .fixed_pos(pointer_pos + egui::vec2(12.0, -12.0))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(palette.selection_bg.gamma_multiply(0.5))
+                        .stroke(Stroke::new(1.0, palette.selection_stroke))
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(node_name)
+                                        .size(12.5)
+                                        .color(palette.text),
+                                );
+                            });
+                        });
+                });
+
+            // 按 Escape 取消拖拽
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.node_drag_source = None;
+            }
+
+            // 释放检测：插入到当前查询编辑器
+            let released = ctx.input(|i| i.pointer.any_released());
+            if released {
+                let insert_name = node_name.clone();
+                let node_type = dragged_node.node_type.clone();
+                let kind = self.database_kind_for_connection(&dragged_node.connection_id);
+                let insert_text = match node_type {
+                    ExplorerNodeType::Table | ExplorerNodeType::View => {
+                        if kind == DatabaseKind::MongoDb {
+                            format!("db.{}", insert_name)
+                        } else {
+                            match (&dragged_node.schema, &dragged_node.database) {
+                                (Some(s), _) => format!("{s}.{insert_name}"),
+                                (None, Some(_)) => insert_name.clone(),
+                                _ => insert_name.clone(),
+                            }
+                        }
+                    }
+                    _ => insert_name.clone(),
+                };
+                // 查找当前活动的查询编辑器并插入文本
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                    let char_idx = tab.cursor_range
+                        .map(|r| r.primary.index)
+                        .unwrap_or(tab.sql.chars().count());
+                    // char_idx 是字符索引，需要转成字节索引
+                    let byte_idx = tab.sql.char_indices()
+                        .nth(char_idx)
+                        .map(|(pos, _)| pos)
+                        .unwrap_or(tab.sql.len());
+                    tab.sql.insert_str(byte_idx, &insert_text);
+                    let new_char_idx = char_idx + insert_text.chars().count();
+                    tab.cursor_range = Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(new_char_idx),
+                    ));
+                    // 请求焦点并设置光标到插入内容之后
+                    tab.editor_focus_requested = true;
+                    tab.autocomplete_cursor_target = Some(new_char_idx);
+                }
+                self.node_drag_source = None;
+                ctx.request_repaint();
+            }
+        }
         self.render_connection_dialog(ctx);
         self.render_delete_confirm_dialog(ctx);
         self.render_saved_query_dialog(ctx);
