@@ -288,6 +288,7 @@ struct QueryResultSelectionState {
     cell_selection_focus_requested: bool,
     cell_selection_is_null: bool,
     cell_selection_auto_scroll_y: f32,
+    cell_selection_drag_started: bool,
 }
 
 #[derive(Clone)]
@@ -319,9 +320,10 @@ struct QueryTabState {
     result_selections: Vec<QueryResultSelectionState>,
     column_order: Vec<String>,
     column_drag: Option<TableColumnDragState>,
+    result_column_widths: Option<Vec<f32>>,
+    result_column_resize_drag: Option<(usize, f32)>,
     multi_results: Vec<QueryResult>,
     multi_statements: Vec<String>,
-    /// 所有执行过的语句（包括 SET/PREPARE 等非查询语句，用于 EXECUTE 回溯）
     executed_statements: Vec<String>,
     selected_result_index: usize,
     editor_focus_requested: bool,
@@ -480,6 +482,7 @@ struct TableTabState {
     cell_selection_focus_requested: bool,
     cell_selection_is_null: bool,
     cell_selection_auto_scroll_y: f32,
+    cell_selection_drag_started: bool,
     // 结构编辑状态
     editing_structure: bool,
     show_structure_sql_preview: bool,
@@ -496,6 +499,7 @@ struct TableTabState {
     hidden_columns: BTreeSet<String>,
     column_order: Vec<String>,
     column_drag: Option<TableColumnDragState>,
+    column_resize_drag: Option<(usize, f32)>,
     show_column_filter: bool,
     search: TableSearchState,
     // MongoDB 游标分页：每页最后一条的 _id
@@ -1570,6 +1574,7 @@ impl DesktopApp {
                     tab.cell_selection_current = None;
                     tab.cell_selection_typing = false;
                     tab.cell_selection_input.clear();
+                    tab.cell_selection_drag_started = false;
                 }
                 if let Some(err) = &result.error {
                     self.status_message = tr!("执行失败: {}", err.clone());
@@ -1981,12 +1986,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 sel.selected_result_rows.clear();
                 sel.selected_result_row = None;
                 sel.selection_anchor_row = None;
+                sel.cell_selection_anchor = None;
+                sel.cell_selection_current = None;
+                sel.cell_selection_typing = false;
+                sel.cell_selection_input.clear();
+                sel.cell_selection_is_null = false;
+                sel.cell_selection_drag_started = false;
             }
             WorkspaceTab::Table(table_tab) => {
                 table_tab.selected_columns.clear();
                 table_tab.selected_preview_row = None;
                 table_tab.selected_preview_rows.clear();
                 table_tab.selection_anchor_row = None;
+                clear_table_cell_selection(table_tab);
+                table_tab.editing_cell = None;
             }
             WorkspaceTab::Dashboard => {}
             WorkspaceTab::CreateTable(_) => {}
@@ -2334,6 +2347,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             cell_selection_focus_requested: false,
             cell_selection_is_null: false,
             cell_selection_auto_scroll_y: 0.0,
+            cell_selection_drag_started: false,
             editing_structure: false,
             show_structure_sql_preview: false,
             show_index_sql_preview: false,
@@ -2348,6 +2362,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             hidden_columns: BTreeSet::new(),
             column_order: Vec::new(),
             column_drag: None,
+            column_resize_drag: None,
             show_column_filter: false,
             search: TableSearchState::default(),
             mongo_page_cursors: Vec::new(),
@@ -6980,7 +6995,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     clear_query_cell_selection(
                                                         &mut sel.cell_selection_anchor, &mut sel.cell_selection_current,
                                                         &mut sel.cell_selection_typing, &mut sel.cell_selection_input,
-                                                        &mut sel.cell_selection_is_null,
+                                                        &mut sel.cell_selection_is_null, &mut sel.cell_selection_drag_started,
                                                     );
                                                 } else if edit_ctx.editing_cell.is_some() {
                                                     // 有激活的编辑器：取消当前编辑
@@ -7123,13 +7138,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     &mut sel.cell_selection_focus_requested,
                                                     &mut sel.cell_selection_is_null,
                                                     &mut sel.cell_selection_auto_scroll_y,
+                                                    &mut sel.cell_selection_drag_started,
+                                                    &mut tab.result_column_widths,
+                                                    &mut tab.result_column_resize_drag,
                                                 );
                                                 if !matches!(result_action.action, TabUiAction::None) {
                                                     action = result_action.action;
                                                 }
                                             }
                                         } else {
-                                            let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
+                                            let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag, &mut tab.result_column_widths, &mut tab.result_column_resize_drag);
                                             if !matches!(result_action.action, TabUiAction::None) {
                                                 action = result_action.action;
                                             }
@@ -12170,11 +12188,7 @@ impl eframe::App for DesktopApp {
                                 let columns: Vec<String> = preview.columns.clone();
                                 revert_cell_selection_pending(tab, &columns);
                             }
-                            tab.cell_selection_anchor = None;
-                            tab.cell_selection_current = None;
-                            tab.cell_selection_typing = false;
-                            tab.cell_selection_input.clear();
-                            tab.cell_selection_is_null = false;
+                            clear_table_cell_selection(tab);
                             true
                         }
                         Some(WorkspaceTab::Query(tab)) if tab.result_selections.get(tab.selected_result_index).map_or(false, |s| s.cell_selection_anchor.is_some()) => {
@@ -12608,6 +12622,8 @@ impl QueryTabState {
             result_selections: Vec::new(),
             column_order: Vec::new(),
             column_drag: None,
+            result_column_widths: None,
+            result_column_resize_drag: None,
             multi_results: Vec::new(),
             multi_statements: Vec::new(),
             executed_statements: Vec::new(),            selected_result_index: 0,
@@ -12660,6 +12676,7 @@ static EMPTY_SELECTIONS: QueryResultSelectionState = QueryResultSelectionState {
     cell_selection_focus_requested: false,
     cell_selection_is_null: false,
     cell_selection_auto_scroll_y: 0.0,
+    cell_selection_drag_started: false,
 };
 
 // #region debug-point shared:reporter
@@ -13679,6 +13696,8 @@ fn render_result_table(
     search: &mut TableSearchState,
     column_order: &mut Vec<String>,
     column_drag: &mut Option<TableColumnDragState>,
+    result_column_widths: &mut Option<Vec<f32>>,
+    result_column_resize_drag: &mut Option<(usize, f32)>,
 ) -> ResultTableActionResult {
     let palette = mac_ui_palette(ui.visuals());
     if result.columns.is_empty() {
@@ -13751,7 +13770,11 @@ fn render_result_table(
             let ctx = ui.ctx().clone();
             let modifiers = ctx.input(|input| input.modifiers);
             let ctrl_held = modifiers.ctrl || modifiers.command;
-            let column_widths = estimate_query_column_widths(&display_columns, &result.rows);
+            let mut column_widths = if let Some(w) = result_column_widths {
+                if w.len() == display_columns.len() { w.clone() } else { estimate_query_column_widths(&display_columns, &result.rows) }
+            } else {
+                estimate_query_column_widths(&display_columns, &result.rows)
+            };
             let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
             let mut sort_click_result = None;
             let mut sa_result = egui::ScrollArea::horizontal()
@@ -13768,7 +13791,7 @@ fn render_result_table(
                     let mut table = TableBuilder::new(ui)
                         .vscroll(true)
                         .striped(true)
-                        .resizable(true)
+                        .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
                     if let Some(row_idx) = scroll_target_row {
@@ -13787,7 +13810,7 @@ fn render_result_table(
                                 .clip(true),
                         );
                     }
-                    table
+                    let body_output = table
                         .header(30.0, |mut header| {
                             // Row number header
                             header.col(|ui| {
@@ -13829,10 +13852,42 @@ fn render_result_table(
                                             selected_columns.clear();
                                             selected_columns.insert(col_idx);
                                         }
+                                        // 选列时清除行选中
+                                        *selected_row = None;
+                                        selected_rows.clear();
+                                        *selection_anchor = None;
                                         ui.ctx().request_repaint();
                                     }
-                                    // 拖拽开始
-                                    if cell_dragged && column_drag.is_none() {
+                                    // 列宽调整手柄（表头右侧拖拽）
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(
+                                        egui::pos2(resize_handle_x, cell_rect.top()),
+                                        cell_rect.right_bottom(),
+                                    );
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    if on_resize_handle {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        *result_column_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = *result_column_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < column_widths.len() {
+                                                    column_widths[col_idx] = (column_widths[col_idx] + delta).max(40.0);
+                                                    *result_column_resize_drag = Some((col_idx, pos.x));
+                                                    ctx.request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // 拖拽开始（列宽调整时不触发）
+                                    if cell_dragged && column_drag.is_none() && result_column_resize_drag.is_none() {
                                         let initial_x = cell_rect.left();
                                         *column_drag = Some(TableColumnDragState::new(col_idx, col_idx, initial_x));
                                     }
@@ -13869,6 +13924,8 @@ fn render_result_table(
                                             *selected_row = Some(index);
                                             normalize_query_selection(selected_rows, selected_row, selection_anchor);
                                         }
+                                        // 选行时清除列选中
+                                        selected_columns.clear();
                                     }
                                     if response.clicked() {
                                         if modifiers.shift {
@@ -13878,6 +13935,8 @@ fn render_result_table(
                                         } else {
                                             set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
                                         }
+                                        // 选行时清除列选中
+                                        selected_columns.clear();
                                         ui.ctx().request_repaint();
                                     }
                                     response.context_menu(|ui| {
@@ -13887,6 +13946,8 @@ fn render_result_table(
                                             *selected_row = Some(index);
                                             normalize_query_selection(selected_rows, selected_row, selection_anchor);
                                         }
+                                        // 右键菜单选行时清除列选中
+                                        selected_columns.clear();
                                         let selected_indices = query_selected_row_indices(selected_rows, selected_row, index);
                                         let copy_label = if selected_indices.len() > 1 {
                                             tr!("复制选中 {} 条数据", selected_indices.len())
@@ -14111,6 +14172,12 @@ fn render_result_table(
                     sa_result.state.store(ui.ctx(), sa_result.id);
                 }
             }
+            // 列宽调整后写回
+            *result_column_widths = Some(column_widths);
+            // 指针释放时清除列宽调整状态
+            if result_column_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                *result_column_resize_drag = None;
+            }
             sort_click_result
         });
     let action = if let Some(row_act) = pending_row_action.into_inner() {
@@ -14206,6 +14273,9 @@ fn render_editable_result_table(
     cell_selection_focus_requested: &mut bool,
     cell_selection_is_null: &mut bool,
     cell_selection_auto_scroll_y: &mut f32,
+    cell_selection_drag_started: &mut bool,
+    result_column_widths: &mut Option<Vec<f32>>,
+    result_column_resize_drag: &mut Option<(usize, f32)>,
 ) -> ResultTableActionResult {
     let palette = mac_ui_palette(ui.visuals());
     if result.columns.is_empty() {
@@ -14275,7 +14345,11 @@ fn render_editable_result_table(
             let ctx = ui.ctx().clone();
             let modifiers = ctx.input(|input| input.modifiers);
             let ctrl_held = modifiers.ctrl || modifiers.command;
-            let column_widths = estimate_query_column_widths(&display_columns, &result.rows);
+            let mut column_widths = if let Some(w) = result_column_widths {
+                if w.len() == display_columns.len() { w.clone() } else { estimate_query_column_widths(&display_columns, &result.rows) }
+            } else {
+                estimate_query_column_widths(&display_columns, &result.rows)
+            };
             let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
             let mut sort_click_result = None;
             let frame_dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
@@ -14308,10 +14382,11 @@ fn render_editable_result_table(
                 .show(ui, |ui| {
                     let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    let table_state_id = ui.id().with(format!("editable-result-table-{}", tab_id));
                     let mut table = TableBuilder::new(ui)
                         .vscroll(true)
                         .striped(true)
-                        .resizable(true)
+                        .resizable(false)
                         .id_salt(format!("editable-result-table-{}", tab_id))
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
                     if let Some(row_idx) = scroll_target_row {
@@ -14326,7 +14401,7 @@ fn render_editable_result_table(
                             egui_extras::Column::initial(*width).at_least(72.0).clip(true),
                         );
                     }
-                    table
+                    let mut body_output_e = table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, None);
@@ -14338,7 +14413,7 @@ fn render_editable_result_table(
                                     let is_selected = selected_columns.contains(&col_idx);
                                     let col_data_type = edit.definition.as_ref()
                                         .and_then(|d| d.columns.iter().find(|c| c.name == *column))
-                                        .map(|c| c.data_type.as_str());
+                                        .map(|c| c.data_type.clone());
                                     let col_values: Vec<QueryCellValue> = result.rows.iter()
                                         .filter_map(|r| r.get(column).cloned())
                                         .collect();
@@ -14350,14 +14425,14 @@ fn render_editable_result_table(
                                         sort_indicator(sort_state, column),
                                         is_selected,
                                         is_dragged,
-                                        col_data_type,
+                                        col_data_type.as_deref(),
                                         Some(&col_values),
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort.set(Some((column.clone(), matches!(choice, TableHeaderSortChoice::Descending))));
                                     }
                                     if let Some(act) = copy_action {
-                                        pending_header_copy.set(Some((act, column.clone(), col_data_type.map(|s| s.to_string()))));
+                                        pending_header_copy.set(Some((act, column.clone(), col_data_type)));
                                     }
                                     if clicked {
                                         if ctrl_held {
@@ -14370,9 +14445,48 @@ fn render_editable_result_table(
                                             selected_columns.clear();
                                             selected_columns.insert(col_idx);
                                         }
+                                        // 选列时清除行选中和矩形选区
+                                        *selected_row = None;
+                                        selected_rows.clear();
+                                        *selection_anchor = None;
+                                        *cell_selection_anchor = None;
+                                        *cell_selection_current = None;
+                                        *cell_selection_typing = false;
+                                        cell_selection_input.clear();
+                                        *cell_selection_is_null = false;
+                                        edit.editing_cell = None;
                                         ui.ctx().request_repaint();
                                     }
-                                    if cell_dragged && column_drag.is_none() {
+                                    // 列宽调整手柄（表头右侧拖拽）
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(
+                                        egui::pos2(resize_handle_x, cell_rect.top()),
+                                        cell_rect.right_bottom(),
+                                    );
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    if on_resize_handle {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        *result_column_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = *result_column_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < column_widths.len() {
+                                                    column_widths[col_idx] = (column_widths[col_idx] + delta).max(40.0);
+                                                    *result_column_resize_drag = Some((col_idx, pos.x));
+                                                    ctx.request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // 拖拽开始（列宽调整时不触发）
+                                    if cell_dragged && column_drag.is_none() && result_column_resize_drag.is_none() {
                                         *column_drag = Some(TableColumnDragState::new(col_idx, col_idx, cell_rect.left()));
                                     }
                                     header_cell_rects.push(cell_rect);
@@ -14408,6 +14522,14 @@ fn render_editable_result_table(
                                             *selected_row = Some(row_index);
                                             normalize_query_selection(selected_rows, selected_row, selection_anchor);
                                         }
+                                        // 选行时清除列选中和矩形选区
+                                        selected_columns.clear();
+                                        *cell_selection_anchor = None;
+                                        *cell_selection_current = None;
+                                        *cell_selection_typing = false;
+                                        cell_selection_input.clear();
+                                        *cell_selection_is_null = false;
+                                        edit.editing_cell = None;
                                     }
                                     if response.clicked() {
                                         if modifiers.shift {
@@ -14419,6 +14541,14 @@ fn render_editable_result_table(
                                         } else {
                                             set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
                                         }
+                                        // 选行时清除列选中和矩形选区
+                                        selected_columns.clear();
+                                        *cell_selection_anchor = None;
+                                        *cell_selection_current = None;
+                                        *cell_selection_typing = false;
+                                        cell_selection_input.clear();
+                                        *cell_selection_is_null = false;
+                                        edit.editing_cell = None;
                                         ui.ctx().request_repaint();
                                     }
                                     response.context_menu(|ui| {
@@ -14428,6 +14558,14 @@ fn render_editable_result_table(
                                             *selected_row = Some(row_index);
                                             normalize_query_selection(selected_rows, selected_row, selection_anchor);
                                         }
+                                        // 右键菜单选行时清除列选中和矩形选区
+                                        selected_columns.clear();
+                                        *cell_selection_anchor = None;
+                                        *cell_selection_current = None;
+                                        *cell_selection_typing = false;
+                                        cell_selection_input.clear();
+                                        *cell_selection_is_null = false;
+                                        edit.editing_cell = None;
                                         let selected_indices = query_selected_row_indices(selected_rows, selected_row, row_index);
                                         let copy_label = if selected_indices.len() > 1 {
                                             tr!("复制选中 {} 条数据", selected_indices.len())
@@ -14522,6 +14660,7 @@ fn render_editable_result_table(
                                                 clear_query_cell_selection(
                                                     cell_selection_anchor, cell_selection_current,
                                                     cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                    cell_selection_drag_started,
                                                 );
                                             } else {
                                                 let enter_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
@@ -14530,6 +14669,7 @@ fn render_editable_result_table(
                                                     commit_query_cell_selection(
                                                         cell_selection_anchor, cell_selection_current,
                                                         cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                        cell_selection_drag_started,
                                                         result, &display_columns, &mut edit.pending_cell_changes,
                                                     );
                                                     edit.committed_edit_this_frame = true;
@@ -14538,6 +14678,7 @@ fn render_editable_result_table(
                                                     commit_query_cell_selection(
                                                         cell_selection_anchor, cell_selection_current,
                                                         cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                        cell_selection_drag_started,
                                                         result, &display_columns, &mut edit.pending_cell_changes,
                                                     );
                                                     edit.committed_edit_this_frame = true;
@@ -14586,16 +14727,26 @@ fn render_editable_result_table(
                                                 .map(|pos| cell_rect.contains(pos))
                                                 .unwrap_or(false);
 
+                                            // 拖拽开始：指针按下且在当前单元格内，无已有选区或点击了不同单元格
                                             if pointer_down
                                                 && cell_contains_pointer
-                                                && cell_selection_anchor.is_none()
                                                 && !*cell_selection_typing
+                                                && !*cell_selection_drag_started
+                                                && (cell_selection_anchor.is_none()
+                                                    || cell_selection_anchor.is_some_and(|a| a != (row_index, col_idx)))
                                             {
                                                 *cell_selection_anchor = Some((row_index, col_idx));
                                                 *cell_selection_current = Some((row_index, col_idx));
                                                 *cell_selection_typing = false;
                                                 cell_selection_input.clear();
+                                                *cell_selection_is_null = false;
+                                                *cell_selection_drag_started = true;
                                                 edit.editing_cell = None;
+                                                // 矩形选区开始时清除行选中和列选中
+                                                *selected_row = None;
+                                                selected_rows.clear();
+                                                *selection_anchor = None;
+                                                selected_columns.clear();
                                                 // 让 SQL 编辑器失去焦点
                                                 let editor_id = egui::Id::from(format!("query-editor-{}", tab_id));
                                                 ui.ctx().memory_mut(|mem| mem.surrender_focus(editor_id));
@@ -14608,11 +14759,13 @@ fn render_editable_result_table(
                                                 *cell_selection_current = Some((row_index, col_idx));
                                             }
                                             if pointer_just_released && cell_selection_anchor.is_some() && !*cell_selection_typing {
+                                                *cell_selection_drag_started = false;
                                                 if let (Some((ar, ac)), Some((cr, cc))) = (*cell_selection_anchor, *cell_selection_current) {
                                                     if ar == cr && ac == cc {
                                                         clear_query_cell_selection(
                                                             cell_selection_anchor, cell_selection_current,
                                                             cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                            cell_selection_drag_started,
                                                         );
                                                     }
                                                 }
@@ -14624,6 +14777,7 @@ fn render_editable_result_table(
                                                 clear_query_cell_selection(
                                                     cell_selection_anchor, cell_selection_current,
                                                     cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                    cell_selection_drag_started,
                                                 );
                                             }
                                             if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
@@ -14649,6 +14803,7 @@ fn render_editable_result_table(
                                                 commit_query_cell_selection(
                                                     cell_selection_anchor, cell_selection_current,
                                                     cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                    cell_selection_drag_started,
                                                     result, &display_columns, &mut edit.pending_cell_changes,
                                                 );
                                             }
@@ -14702,6 +14857,7 @@ fn render_editable_result_table(
                                                 clear_query_cell_selection(
                                                     cell_selection_anchor, cell_selection_current,
                                                     cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                    cell_selection_drag_started,
                                                 );
                                             } else {
                                                 commit_query_edit_to_pending(edit);
@@ -14714,6 +14870,11 @@ fn render_editable_result_table(
                                                     original_is_null: cell_value.is_null(),
                                                     focus_requested: true,
                                                 });
+                                                // 进入单元格编辑时清除行选中和列选中
+                                                *selected_row = None;
+                                                selected_rows.clear();
+                                                *selection_anchor = None;
+                                                selected_columns.clear();
                                                 ui.ctx().request_repaint();
                                             }
                                         }
@@ -14780,6 +14941,7 @@ fn render_editable_result_table(
                                                     clear_query_cell_selection(
                                                         cell_selection_anchor, cell_selection_current,
                                                         cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                        cell_selection_drag_started,
                                                     );
                                                     ui.close();
                                                 }
@@ -14803,6 +14965,7 @@ fn render_editable_result_table(
                                                     clear_query_cell_selection(
                                                         cell_selection_anchor, cell_selection_current,
                                                         cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                        cell_selection_drag_started,
                                                     );
                                                     ui.close();
                                                 }
@@ -15003,8 +15166,15 @@ fn render_editable_result_table(
                     if let Some(sort_request) = sort_click_result {
                         selected_sort.set(Some(sort_request));
                     }
-                    let table_state_id = ui.id().with(format!("editable-result-table-{}", tab_id));
-                    table_state_id.with("__scroll_area")
+                    // 垂直自动滚动：直接修改内部 ScrollArea state
+                    if *cell_selection_auto_scroll_y != 0.0 {
+                        let v_frame_dt = ctx.input(|i| i.stable_dt).max(0.001);
+                        let scroll_delta_y = *cell_selection_auto_scroll_y * v_frame_dt;
+                        let max_y = (body_output_e.content_size.y - body_output_e.inner_rect.height()).max(0.0);
+                        body_output_e.state.offset.y = (body_output_e.state.offset.y + scroll_delta_y).clamp(0.0, max_y);
+                        body_output_e.state.store(ui.ctx(), body_output_e.id);
+                        ui.ctx().request_repaint();
+                    }
                 });
             // 水平自动滚动（post-show + clamp 防抖动）
             if auto_scroll_x != 0.0 || column_drag_scroll_x != 0.0 {
@@ -15013,38 +15183,21 @@ fn render_editable_result_table(
                 sa_result.state.store(ui.ctx(), sa_result.id);
                 ui.ctx().request_repaint();
             }
-            // 垂直自动滚动（post-show，通过 ID 链访问 table 内部 scroll area）
-            if *cell_selection_auto_scroll_y != 0.0 {
-                let outer_id = ui.id();
-                let hscroll_id = outer_id.with(format!("editable-result-{}-{}", result.columns.len(), result.rows.len()));
-                let inner_id = outer_id.with(hscroll_id);
-                let table_state_id = inner_id.with(format!("editable-result-table-{}", tab_id));
-                let vscroll_id = table_state_id.with("__scroll_area");
-                if let Some(mut ss) = egui::containers::scroll_area::State::load(ui.ctx(), vscroll_id) {
-                    let max_y = (sa_result.content_size.y - sa_result.inner_rect.height()).max(0.0);
-                    let old_y = ss.offset.y;
-                    ss.offset.y = (ss.offset.y + *cell_selection_auto_scroll_y * frame_dt).min(max_y).max(0.0);
-                    if (ss.offset.y - old_y).abs() < 0.5 {
-                        *cell_selection_auto_scroll_y = 0.0;
-                    } else {
-                        ss.store(ui.ctx(), vscroll_id);
-                        ui.ctx().request_repaint();
-                    }
-                }
-            }
-            // 矩形选区拖拽自动滚动速度计算
+            // 矩形选区拖拽自动滚动速度计算 (查询结果页)
             {
+                let scroll_visible_rect = sa_result.inner_rect;
                 let pointer_down = ui.input(|i| i.pointer.any_down());
                 let pointer_pos = ui.input(|i| i.pointer.latest_pos());
                 if cell_selection_anchor.is_some() && pointer_down && !*cell_selection_typing {
                     if let Some(pos) = pointer_pos {
-                        let bottom_edge = (clip_rect_for_scroll.bottom() - edge_width).max(clip_rect_for_scroll.top());
-                        let top_edge = (clip_rect_for_scroll.top() + edge_width).min(clip_rect_for_scroll.bottom());
-                        if pos.y > bottom_edge {
-                            let t = ((pos.y - bottom_edge) / edge_width).clamp(0.0, 1.0);
+                        let bottom_edge = (scroll_visible_rect.bottom() - edge_width).max(scroll_visible_rect.top());
+                        let top_edge = (scroll_visible_rect.top() + edge_width).min(scroll_visible_rect.bottom());
+                        let pos_y = pos.y;
+                        if pos_y > bottom_edge {
+                            let t = ((pos_y - bottom_edge) / edge_width).clamp(0.0, 1.0);
                             *cell_selection_auto_scroll_y = t * speed_max;
-                        } else if pos.y < top_edge {
-                            let t = ((top_edge - pos.y) / edge_width).clamp(0.0, 1.0);
+                        } else if pos_y < top_edge {
+                            let t = ((top_edge - pos_y) / edge_width).clamp(0.0, 1.0);
                             *cell_selection_auto_scroll_y = -t * speed_max;
                         } else {
                             *cell_selection_auto_scroll_y = 0.0;
@@ -15072,6 +15225,12 @@ fn render_editable_result_table(
                     &column,
                     descending,
                 );
+            }
+            // 列宽调整后写回
+            *result_column_widths = Some(column_widths);
+            // 指针释放时清除列宽调整状态
+            if result_column_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                *result_column_resize_drag = None;
             }
         });
     ResultTableActionResult { sort_click: None, action: action.take().unwrap_or(TabUiAction::None) }
@@ -15126,7 +15285,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
         return TabUiAction::None;
     }
     let row_count = preview.rows.len();
-    let column_widths = if tab.preview_column_widths.len() == columns.len() {
+    let mut column_widths = if tab.preview_column_widths.len() == columns.len() {
         tab.preview_column_widths.clone()
     } else {
         let widths = estimate_query_column_widths(&columns, &preview.rows);
@@ -15185,10 +15344,11 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                 .show(ui, |ui| {
                     let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    let table_state_id = ui.id().with(format!("editable-table-body-{}", tab.title));
                     let mut table = TableBuilder::new(ui)
                         .vscroll(true)
                         .striped(true)
-                        .resizable(true)
+                        .resizable(false)
                         .id_salt(format!("editable-table-body-{}", tab.title))
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
@@ -15226,7 +15386,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     let is_dragged = tab.column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let col_data_type = tab.definition.as_ref()
                                         .and_then(|d| d.columns.iter().find(|c| c.name == *column))
-                                        .map(|c| c.data_type.as_str());
+                                        .map(|c| c.data_type.clone());
                                     let col_values: Vec<QueryCellValue> = tab.preview.as_ref()
                                         .map(|p| p.rows.iter().filter_map(|r| r.get(column).cloned()).collect())
                                         .unwrap_or_default();
@@ -15238,7 +15398,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         sort_indicator(&tab.preview_sort, column),
                                         is_selected,
                                         is_dragged,
-                                        col_data_type,
+                                        col_data_type.as_deref(),
                                         Some(&col_values),
                                     );
                                     if let Some(choice) = sort_choice {
@@ -15255,13 +15415,47 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             tab.selected_columns.clear();
                                             tab.selected_columns.insert(col_idx);
                                         }
+                                        // 选列时清除行选中和矩形选区
+                                        tab.selected_preview_row = None;
+                                        tab.selected_preview_rows.clear();
+                                        tab.selection_anchor_row = None;
+                                        clear_table_cell_selection(tab);
+                                        tab.editing_cell = None;
                                         ctx.request_repaint();
                                     }
                                     if copy_action.is_some() {
-                                        pending_header_copy = copy_action.map(|a| (a, column.clone(), col_data_type.map(|s| s.to_string())));
+                                        pending_header_copy = copy_action.map(|a| (a, column.clone(), col_data_type));
                                     }
-                                    // 拖拽开始：记录原始列位置
-                                    if cell_dragged && tab.column_drag.is_none() {
+                                    // 列宽调整手柄（表头右侧拖拽）
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(
+                                        egui::pos2(resize_handle_x, cell_rect.top()),
+                                        cell_rect.right_bottom(),
+                                    );
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    if on_resize_handle {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        tab.column_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = tab.column_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < column_widths.len() {
+                                                    column_widths[col_idx] = (column_widths[col_idx] + delta).max(40.0);
+                                                    tab.column_resize_drag = Some((col_idx, pos.x));
+                                                    ctx.request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // 拖拽开始：记录原始列位置（列宽调整时不触发）
+                                    if cell_dragged && tab.column_drag.is_none() && tab.column_resize_drag.is_none() {
                                         let initial_x = cell_rect.left();
                                         tab.column_drag = Some(TableColumnDragState::new(col_idx, col_idx, initial_x));
                                     }
@@ -15269,6 +15463,12 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 });
                             }
                         });
+                    // 指针释放时清除列宽调整状态
+                    if tab.column_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                        tab.column_resize_drag = None;
+                    }
+                    // 列宽调整后写回
+                    tab.preview_column_widths = column_widths;
                     // 拖拽中更新 target_index（不在此处绘制，等 body 完成后绘制）
                     if let Some(drag) = tab.column_drag.as_mut() {
                         if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
@@ -15336,8 +15536,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             TableHeaderCopyAction::CopyAsInCondition => TabUiAction::CopyColumnAsInCondition(non_null_values, col_type),
                         };
                     }
-                    table_header
-                        .body(|mut body| {
+                    let mut body_output = table_header.body(|mut body| {
                                 // Sync PendingInsert editing cell value to pending_row each frame
                                 if let Some(edit) = tab.editing_cell.as_ref() {
                                     if matches!(edit.target, TableEditTarget::PendingInsert) {
@@ -15390,6 +15589,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 tab.selected_preview_row = Some(row_index);
                                                 normalize_preview_selection(tab);
                                             }
+                                            // 选行时清除列选中和矩形选区
+                                            tab.selected_columns.clear();
+                                            clear_table_cell_selection(tab);
                                         }
                                         if response.clicked() {
                                             if range_select {
@@ -15402,6 +15604,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 set_single_preview_selection(tab, row_index);
                                                 tab.editing_cell = None;
                                             }
+                                            // 选行时清除列选中和矩形选区
+                                            tab.selected_columns.clear();
+                                            clear_table_cell_selection(tab);
                                             ui.ctx().request_repaint();
                                         }
                                         response.context_menu(|ui| {
@@ -15411,6 +15616,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 tab.selected_preview_row = Some(row_index);
                                                 normalize_preview_selection(tab);
                                             }
+                                            // 右键菜单选行时清除列选中和矩形选区
+                                            tab.selected_columns.clear();
+                                            clear_table_cell_selection(tab);
                                             let selected_row_indices =
                                                 preview_selected_row_indices(tab, row_index);
                                             let selected_count = selected_row_indices.len();
@@ -15556,11 +15764,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 let esc_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
                                                 if esc_pressed {
                                                     revert_cell_selection_pending(tab, &columns);
-                                                    tab.cell_selection_anchor = None;
-                                                    tab.cell_selection_current = None;
-                                                    tab.cell_selection_typing = false;
-                                                    tab.cell_selection_input.clear();
-                                                    tab.cell_selection_is_null = false;
+                                                    clear_table_cell_selection(tab);
                                                 } else {
                                                     // Enter 或失焦 → 批量提交
                                                     let enter_pressed = ui.ctx().input(|input| {
@@ -15630,18 +15834,26 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 let cell_contains_pointer = pointer_pos
                                                     .map(|pos| cell_rect.contains(pos))
                                                     .unwrap_or(false);
-
-                                                // 拖拽开始：指针按下且在当前单元格内，无已有选区
+                                                // 拖拽开始：指针按下且在当前单元格内，无已有选区或点击了不同单元格
                                                 if pointer_down
                                                     && cell_contains_pointer
-                                                    && tab.cell_selection_anchor.is_none()
                                                     && !tab.cell_selection_typing
+                                                    && !tab.cell_selection_drag_started
+                                                    && (tab.cell_selection_anchor.is_none()
+                                                        || tab.cell_selection_anchor.is_some_and(|a| a != (row_index, col_idx)))
                                                 {
                                                     tab.cell_selection_anchor = Some((row_index, col_idx));
                                                     tab.cell_selection_current = Some((row_index, col_idx));
                                                     tab.cell_selection_typing = false;
                                                     tab.cell_selection_input.clear();
+                                                    tab.cell_selection_is_null = false;
+                                                    tab.cell_selection_drag_started = true;
                                                     tab.editing_cell = None;
+                                                    // 矩形选区开始时清除行选中和列选中
+                                                    tab.selected_preview_row = None;
+                                                    tab.selected_preview_rows.clear();
+                                                    tab.selection_anchor_row = None;
+                                                    tab.selected_columns.clear();
                                                 }
                                                 // 拖拽中：指针持续按下且移动到当前单元格
                                                 if pointer_down
@@ -15653,11 +15865,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 }
                                                 // 拖拽结束：指针松开
                                                 if pointer_just_released && tab.cell_selection_anchor.is_some() && !tab.cell_selection_typing {
+                                                    tab.cell_selection_drag_started = false;
                                                     if let (Some((ar, ac)), Some((cr, cc))) = (tab.cell_selection_anchor, tab.cell_selection_current) {
                                                         if ar == cr && ac == cc {
                                                             // 仅点击了一个单元格 → 清除选区（后续由 click 逻辑处理编辑）
                                                             tab.cell_selection_anchor = None;
                                                             tab.cell_selection_current = None;
+                                                            tab.cell_selection_drag_started = false;
                                                         }
                                                     }
                                                 }
@@ -15670,6 +15884,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     tab.cell_selection_current = None;
                                                     tab.cell_selection_typing = false;
                                                     tab.cell_selection_input.clear();
+                                                    tab.cell_selection_drag_started = false;
                                                 }
                                                 // Cmd+A → 全选
                                                 if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
@@ -15734,12 +15949,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             if !is_editing && response.clicked() {
                                                 if tab.cell_selection_anchor.is_some() {
                                                     // 有选区时的点击处理（输入模式下也生效）
-                                                    tab.cell_selection_anchor = None;
-                                                    tab.cell_selection_current = None;
-                                                    tab.cell_selection_typing = false;
-                                                    tab.cell_selection_input.clear();
-                                                    tab.cell_selection_is_null = false;
+                                                    clear_table_cell_selection(tab);
                                                 }
+                                                // 进入单元格编辑时清除行选中和列选中
+                                                tab.selected_preview_row = None;
+                                                tab.selected_preview_rows.clear();
+                                                tab.selection_anchor_row = None;
+                                                tab.selected_columns.clear();
                                                 if tab.pending_insert_row.is_none() {
                                                     // 无选区：进入编辑模式，不选中行
                                                     commit_current_edit_to_pending(tab);
@@ -15808,6 +16024,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 tab.selected_preview_row = Some(row_index);
                                                 normalize_preview_selection(tab);
                                             }
+                                            // 右键菜单选行时清除列选中和矩形选区
+                                            tab.selected_columns.clear();
+                                            clear_table_cell_selection(tab);
                                             let selected_row_indices =
                                                 preview_selected_row_indices(tab, row_index);
                                             let selected_count = selected_row_indices.len();
@@ -15858,11 +16077,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                             }
                                                         }
                                                     }
-                                                    tab.cell_selection_anchor = None;
-                                                    tab.cell_selection_current = None;
-                                                    tab.cell_selection_typing = false;
-                                                    tab.cell_selection_input.clear();
-                                                    tab.cell_selection_is_null = false;
+                                                    clear_table_cell_selection(tab);
                                                     ui.close();
                                                 }
                                                 if ui.button(tr!("设置为 NULL ({})", cell_count)).clicked() {
@@ -15884,11 +16099,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                             }
                                                         }
                                                     }
-                                                    tab.cell_selection_anchor = None;
-                                                    tab.cell_selection_current = None;
-                                                    tab.cell_selection_typing = false;
-                                                    tab.cell_selection_input.clear();
-                                                    tab.cell_selection_is_null = false;
+                                                    clear_table_cell_selection(tab);
                                                     ui.close();
                                                 }
                                             } else {
@@ -16268,8 +16479,15 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             }
                         }
                     }
-                    let table_state_id = ui.id().with(format!("editable-table-body-{}", tab.title));
-                    table_state_id.with("__scroll_area")
+                    // 垂直自动滚动：直接修改内部 ScrollArea state
+                    if tab.cell_selection_auto_scroll_y != 0.0 {
+                        let frame_dt = ctx.input(|i| i.stable_dt).max(0.001);
+                        let scroll_delta_y = tab.cell_selection_auto_scroll_y * frame_dt;
+                        let max_y = (body_output.content_size.y - body_output.inner_rect.height()).max(0.0);
+                        body_output.state.offset.y = (body_output.state.offset.y + scroll_delta_y).clamp(0.0, max_y);
+                        body_output.state.store(ui.ctx(), body_output.id);
+                        ctx.request_repaint();
+                    }
                 });
             // 水平自动滚动（post-show + clamp 防抖动）
             if auto_scroll_x != 0.0 || column_drag_scroll_x != 0.0 {
@@ -16278,38 +16496,21 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                 sa_editable.state.store(ui.ctx(), sa_editable.id);
                 ui.ctx().request_repaint();
             }
-            // 垂直自动滚动（post-show，通过 ID 链访问 table 内部 scroll area）
-            if tab.cell_selection_auto_scroll_y != 0.0 {
-                let outer_id = ui.id();
-                let hscroll_id = outer_id.with(format!("editable-table-grid-{}", tab.title));
-                let inner_id = outer_id.with(hscroll_id);
-                let table_state_id = inner_id.with(format!("editable-table-body-{}", tab.title));
-                let vscroll_id = table_state_id.with("__scroll_area");
-                if let Some(mut ss) = egui::containers::scroll_area::State::load(ui.ctx(), vscroll_id) {
-                    let max_y = (sa_editable.content_size.y - sa_editable.inner_rect.height()).max(0.0);
-                    let old_y = ss.offset.y;
-                    ss.offset.y = (ss.offset.y + tab.cell_selection_auto_scroll_y * frame_dt).min(max_y).max(0.0);
-                    if (ss.offset.y - old_y).abs() < 0.5 {
-                        tab.cell_selection_auto_scroll_y = 0.0;
-                    } else {
-                        ss.store(ui.ctx(), vscroll_id);
-                        ui.ctx().request_repaint();
-                    }
-                }
-            }
-            // 矩形选区拖拽自动滚动速度计算
+            // 矩形选区拖拽自动滚动速度计算 (数据页)
             {
+                let scroll_visible_rect = sa_editable.inner_rect;
                 let pointer_down = ui.input(|i| i.pointer.any_down());
                 let pointer_pos = ui.input(|i| i.pointer.latest_pos());
                 if tab.cell_selection_anchor.is_some() && pointer_down && !tab.cell_selection_typing {
                     if let Some(pos) = pointer_pos {
-                        let bottom_edge = (clip_rect_for_scroll.bottom() - edge_width).max(clip_rect_for_scroll.top());
-                        let top_edge = (clip_rect_for_scroll.top() + edge_width).min(clip_rect_for_scroll.bottom());
-                        if pos.y > bottom_edge {
-                            let t = ((pos.y - bottom_edge) / edge_width).clamp(0.0, 1.0);
+                        let bottom_edge = (scroll_visible_rect.bottom() - edge_width).max(scroll_visible_rect.top());
+                        let top_edge = (scroll_visible_rect.top() + edge_width).min(scroll_visible_rect.bottom());
+                        let pos_y = pos.y;
+                        if pos_y > bottom_edge {
+                            let t = ((pos_y - bottom_edge) / edge_width).clamp(0.0, 1.0);
                             tab.cell_selection_auto_scroll_y = t * speed_max;
-                        } else if pos.y < top_edge {
-                            let t = ((top_edge - pos.y) / edge_width).clamp(0.0, 1.0);
+                        } else if pos_y < top_edge {
+                            let t = ((top_edge - pos_y) / edge_width).clamp(0.0, 1.0);
                             tab.cell_selection_auto_scroll_y = -t * speed_max;
                         } else {
                             tab.cell_selection_auto_scroll_y = 0.0;
@@ -16473,11 +16674,13 @@ fn commit_cell_selection(
         tab.pending_cell_changes.insert((row_idx, col_key), change);
     }
 
-    tab.cell_selection_anchor = None;
-    tab.cell_selection_current = None;
-    tab.cell_selection_typing = false;
-    tab.cell_selection_input.clear();
-    tab.cell_selection_is_null = false;
+    clear_table_cell_selection(tab);
+    tab.cell_selection_drag_started = false;
+}
+
+fn clear_table_cell_selection(tab: &mut TableTabState) {
+    clear_table_cell_selection(tab);
+    tab.cell_selection_drag_started = false;
 }
 
 fn query_cell_in_selection(anchor: Option<(usize, usize)>, current: Option<(usize, usize)>, row: usize, col: usize) -> bool {
@@ -16496,12 +16699,14 @@ fn clear_query_cell_selection(
     typing: &mut bool,
     input: &mut String,
     is_null: &mut bool,
+    drag_started: &mut bool,
 ) {
     *anchor = None;
     *current = None;
     *typing = false;
     input.clear();
     *is_null = false;
+    *drag_started = false;
 }
 
 fn sync_query_cell_selection_to_pending(
@@ -16564,6 +16769,7 @@ fn commit_query_cell_selection(
     typing: &mut bool,
     input: &mut String,
     is_null: &mut bool,
+    drag_started: &mut bool,
     result: &QueryResult,
     columns: &[String],
     pending: &mut BTreeMap<(usize, String), PendingCellChange>,
@@ -16609,7 +16815,7 @@ fn commit_query_cell_selection(
         pending.insert((row_idx, col_key), change);
     }
 
-    clear_query_cell_selection(anchor, current, typing, input, is_null);
+    clear_query_cell_selection(anchor, current, typing, input, is_null, drag_started);
 }
 
 fn render_table_body_interactive_cell(
