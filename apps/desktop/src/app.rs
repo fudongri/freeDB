@@ -14133,6 +14133,7 @@ fn render_result_table(
                                         false,
                                         "",
                                         false, false, false, false, "", false,
+                                        None,
                                     );
                                     let modifiers = ui.ctx().input(|input| input.modifiers);
                                     if response.secondary_clicked() {
@@ -14366,7 +14367,7 @@ fn render_result_table(
                                     paint_text_truncated(
                                         ui,
                                         egui::pos2(left + 4.0, y),
-                                        &query_cell_display_text(cell, false).text,
+                                        &query_cell_display_text(cell, false, None).text,
                                         fid.clone(),
                                         tc,
                                         data_w,
@@ -14530,6 +14531,11 @@ fn render_editable_result_table(
         }
         ordered
     };
+
+    // 列类型映射（用于按类型决定对齐方式）
+    let col_type_map: std::collections::HashMap<String, String> = edit.definition.as_ref()
+        .map(|def| def.columns.iter().map(|c| (c.name.clone(), c.data_type.clone())).collect())
+        .unwrap_or_default();
 
     let action: Cell<Option<TabUiAction>> = Cell::new(None);
     let selected_sort: Cell<Option<(String, bool)>> = Cell::new(None);
@@ -14731,6 +14737,7 @@ fn render_editable_result_table(
                                         false,
                                         "",
                                         false, false, false, false, "", false,
+                                        None,
                                     );
                                     let modifiers = ui.ctx().input(|input| input.modifiers);
                                     if response.secondary_clicked() {
@@ -14934,6 +14941,7 @@ fn render_editable_result_table(
                                                 *cell_selection_typing,
                                                 cell_selection_input,
                                                 *cell_selection_is_null,
+                                                col_type_map.get(column).map(|s| s.as_str()),
                                             )
                                         };
                                         // ── 矩形选区交互 ──
@@ -15372,7 +15380,7 @@ fn render_editable_result_table(
                                     paint_text_truncated(
                                         ui,
                                         egui::pos2(left + 4.0, y),
-                                        &query_cell_display_text(cell, false).text,
+                                        &query_cell_display_text(cell, false, None).text,
                                         fid.clone(),
                                         tc,
                                         data_w,
@@ -15511,6 +15519,10 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
         widths
     };
     let editable_columns = table_editable_columns(tab);
+    // 列类型映射（用于按类型决定对齐方式）
+    let col_type_map: std::collections::HashMap<String, String> = tab.definition.as_ref()
+        .map(|def| def.columns.iter().map(|c| (c.name.clone(), c.data_type.clone())).collect())
+        .unwrap_or_default();
     let mut action = TabUiAction::None;
     let mut selected_sort = None;
     let mut pending_header_copy: Option<(TableHeaderCopyAction, String, Option<String>)> = None;
@@ -15796,6 +15808,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             false,
                                             "",
                                             false, false, false, false, "", false,
+                                            None,
                                         );
                                         let modifiers = ui.ctx().input(|input| input.modifiers);
                                         let toggle_select = modifiers.ctrl || modifiers.command;
@@ -16029,6 +16042,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     tab.cell_selection_typing,
                                                     &tab.cell_selection_input,
                                                     tab.cell_selection_is_null,
+                                                    col_type_map.get(column).map(|s| s.as_str()),
                                                 )
                                             };
                                             let modifiers = ui.ctx().input(|input| input.modifiers);
@@ -16445,6 +16459,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         false,
                                                         "",
                                                         false, false, false, false, "", false,
+                                                        col_type_map.get(column).map(|s| s.as_str()),
                                                     )
                                                 };
                                                 let cell_clicked = if !is_editing {
@@ -16687,7 +16702,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         paint_text_truncated(
                                             ui,
                                             egui::pos2(left + 4.0, y),
-                                            &query_cell_display_text(cell, false).text,
+                                            &query_cell_display_text(cell, false, None).text,
                                             fid.clone(),
                                             tc,
                                             data_w,
@@ -17053,8 +17068,9 @@ fn render_table_body_interactive_cell(
     selection_typing: bool,
     selection_input: &str,
     selection_is_null: bool,
+    column_type: Option<&str>,
 ) -> (egui::Response, bool, egui::Rect) {
-    let display = query_cell_display_text(value, weak);
+    let display = query_cell_display_text(value, weak, column_type);
     let display_color = display.color(palette);
     let rect = ui.max_rect();
     // 选区高亮（优先级高于列选中）
@@ -19618,7 +19634,7 @@ fn table_body_cell(
     is_current_match: bool,
     keyword: &str,
 ) {
-    let display = query_cell_display_text(value, weak);
+    let display = query_cell_display_text(value, weak, None);
     let display_color = display.color(palette);
     let rect = ui.max_rect();
     let fill = if column_selected {
@@ -19697,7 +19713,7 @@ fn table_text_cell(
     text: &str,
     weak: bool,
 ) {
-    let display = table_display_text(text, weak);
+    let display = table_display_text(text, weak, None);
     let display_color = display.color(palette);
     let rect = ui.max_rect();
     let response = ui.allocate_rect(rect, egui::Sense::click());
@@ -21726,7 +21742,7 @@ fn estimate_query_column_widths(
                 .iter()
                 .take(300)
                 .filter_map(|row| row.get(column))
-                .map(|value| estimate_table_text_width(&query_cell_display_text(value, false).text) + 20.0)
+                .map(|value| estimate_table_text_width(&query_cell_display_text(value, false, None).text) + 20.0)
                 .fold(0.0, f32::max);
 
             let body_auto_width = body_width.clamp(88.0, 260.0);
@@ -21788,7 +21804,7 @@ impl TableCellDisplay {
     }
 }
 
-fn table_display_text(text: &str, weak: bool) -> TableCellDisplay {
+fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> TableCellDisplay {
     let trimmed = text.trim();
     if weak {
         return TableCellDisplay {
@@ -21796,6 +21812,21 @@ fn table_display_text(text: &str, weak: bool) -> TableCellDisplay {
             tone: TableCellTone::Weak,
             align: TableCellAlign::Center,
             monospace: true,
+        };
+    }
+
+    // 列类型已知时，按类型决定对齐，不再逐行猜测
+    if let Some(ct) = column_type {
+        let (align, monospace) = if is_numeric_type(ct) {
+            (TableCellAlign::Right, true)
+        } else {
+            (TableCellAlign::Left, false)
+        };
+        return TableCellDisplay {
+            text: trimmed.to_string(),
+            tone: TableCellTone::Normal,
+            align,
+            monospace,
         };
     }
 
@@ -21834,21 +21865,32 @@ fn table_display_text(text: &str, weak: bool) -> TableCellDisplay {
     }
 }
 
-fn query_cell_display_text(value: &QueryCellValue, weak: bool) -> TableCellDisplay {
+fn query_cell_display_text(value: &QueryCellValue, weak: bool, column_type: Option<&str>) -> TableCellDisplay {
     match value {
-        QueryCellValue::Null => TableCellDisplay {
-            text: "(NULL)".into(),
-            tone: TableCellTone::Weak,
-            align: TableCellAlign::Center,
-            monospace: false,
-        },
+        QueryCellValue::Null => {
+            let (align, monospace) = if let Some(ct) = column_type {
+                if is_numeric_type(ct) {
+                    (TableCellAlign::Right, true)
+                } else {
+                    (TableCellAlign::Left, false)
+                }
+            } else {
+                (TableCellAlign::Center, false)
+            };
+            TableCellDisplay {
+                text: "(NULL)".into(),
+                tone: TableCellTone::Weak,
+                align,
+                monospace,
+            }
+        }
         QueryCellValue::Text(text) if text.is_empty() => TableCellDisplay {
             text: String::new(),
             tone: TableCellTone::Normal,
-            align: TableCellAlign::Left,
+            align: if column_type.is_some_and(|ct| is_numeric_type(ct)) { TableCellAlign::Right } else { TableCellAlign::Left },
             monospace: false,
         },
-        QueryCellValue::Text(text) => table_display_text(text, weak),
+        QueryCellValue::Text(text) => table_display_text(text, weak, column_type),
     }
 }
 
