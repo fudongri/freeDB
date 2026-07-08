@@ -287,6 +287,7 @@ struct QueryResultSelectionState {
     cell_selection_input: String,
     cell_selection_focus_requested: bool,
     cell_selection_is_null: bool,
+    cell_selection_auto_scroll_y: f32,
 }
 
 #[derive(Clone)]
@@ -478,6 +479,7 @@ struct TableTabState {
     cell_selection_input: String,
     cell_selection_focus_requested: bool,
     cell_selection_is_null: bool,
+    cell_selection_auto_scroll_y: f32,
     // 结构编辑状态
     editing_structure: bool,
     show_structure_sql_preview: bool,
@@ -2331,6 +2333,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             cell_selection_input: String::new(),
             cell_selection_focus_requested: false,
             cell_selection_is_null: false,
+            cell_selection_auto_scroll_y: 0.0,
             editing_structure: false,
             show_structure_sql_preview: false,
             show_index_sql_preview: false,
@@ -7114,12 +7117,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     &mut sel.cell_selection_input,
                                                     &mut sel.cell_selection_focus_requested,
                                                     &mut sel.cell_selection_is_null,
+                                                    &mut sel.cell_selection_auto_scroll_y,
                                                 );
-                                                if !matches!(result_action.action, TabUiAction::None) {
-                                                    action = result_action.action;
-                                                }
-                                            } else {
-                                                let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag);
                                                 if !matches!(result_action.action, TabUiAction::None) {
                                                     action = result_action.action;
                                                 }
@@ -12655,6 +12654,7 @@ static EMPTY_SELECTIONS: QueryResultSelectionState = QueryResultSelectionState {
     cell_selection_input: String::new(),
     cell_selection_focus_requested: false,
     cell_selection_is_null: false,
+    cell_selection_auto_scroll_y: 0.0,
 };
 
 // #region debug-point shared:reporter
@@ -14200,6 +14200,7 @@ fn render_editable_result_table(
     cell_selection_input: &mut String,
     cell_selection_focus_requested: &mut bool,
     cell_selection_is_null: &mut bool,
+    cell_selection_auto_scroll_y: &mut f32,
 ) -> ResultTableActionResult {
     let palette = mac_ui_palette(ui.visuals());
     if result.columns.is_empty() {
@@ -14272,6 +14273,26 @@ fn render_editable_result_table(
             let column_widths = estimate_query_column_widths(&display_columns, &result.rows);
             let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
             let mut sort_click_result = None;
+            let frame_dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
+            // 预计算水平自动滚动速度（在 closure 外计算，在 closure 内应用到滚动状态，使 clamp 同帧生效）
+            let column_drag_scroll_x = column_drag.as_ref().map_or(0.0, |d| d.scroll_speed_x);
+            let edge_width = 60.0_f32;
+            let speed_max = 1200.0_f32;
+            let clip_rect_for_scroll = ui.clip_rect();
+            let auto_scroll_x = if cell_selection_anchor.is_some()
+                && ui.input(|i| i.pointer.any_down())
+                && !*cell_selection_typing
+            {
+                if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+                    let right_edge = (clip_rect_for_scroll.right() - edge_width).max(clip_rect_for_scroll.left());
+                    let left_edge = (clip_rect_for_scroll.left() + edge_width).min(clip_rect_for_scroll.right());
+                    if pos.x > right_edge {
+                        ((pos.x - right_edge) / edge_width).clamp(0.0, 1.0) * speed_max
+                    } else if pos.x < left_edge {
+                        -((left_edge - pos.x) / edge_width).clamp(0.0, 1.0) * speed_max
+                    } else { 0.0 }
+                } else { 0.0 }
+            } else { 0.0 };
             let mut sa_result = egui::ScrollArea::horizontal()
                 .id_salt(format!(
                     "editable-result-{}-{}",
@@ -14286,6 +14307,7 @@ fn render_editable_result_table(
                         .vscroll(true)
                         .striped(true)
                         .resizable(true)
+                        .id_salt(format!("editable-result-table-{}", tab_id))
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
                     if let Some(row_idx) = scroll_target_row {
                         table = table.scroll_to_row(row_idx, Some(egui::Align::Center));
@@ -14976,15 +14998,57 @@ fn render_editable_result_table(
                     if let Some(sort_request) = sort_click_result {
                         selected_sort.set(Some(sort_request));
                     }
+                    let table_state_id = ui.id().with(format!("editable-result-table-{}", tab_id));
+                    table_state_id.with("__scroll_area")
                 });
-            // 边缘自动滚动
+            // 水平自动滚动（post-show + clamp 防抖动）
+            if auto_scroll_x != 0.0 || column_drag_scroll_x != 0.0 {
+                let max_x = (sa_result.content_size.x - sa_result.inner_rect.width()).max(0.0);
+                sa_result.state.offset.x = (sa_result.state.offset.x + (auto_scroll_x + column_drag_scroll_x) * frame_dt).min(max_x).max(0.0);
+                sa_result.state.store(ui.ctx(), sa_result.id);
+                ui.ctx().request_repaint();
+            }
+            // 垂直自动滚动（post-show，通过 ID 链访问 table 内部 scroll area）
+            if *cell_selection_auto_scroll_y != 0.0 {
+                let outer_id = ui.id();
+                let hscroll_id = outer_id.with(format!("editable-result-{}-{}", result.columns.len(), result.rows.len()));
+                let inner_id = outer_id.with(hscroll_id);
+                let table_state_id = inner_id.with(format!("editable-result-table-{}", tab_id));
+                let vscroll_id = table_state_id.with("__scroll_area");
+                if let Some(mut ss) = egui::containers::scroll_area::State::load(ui.ctx(), vscroll_id) {
+                    let max_y = (sa_result.content_size.y - sa_result.inner_rect.height()).max(0.0);
+                    let old_y = ss.offset.y;
+                    ss.offset.y = (ss.offset.y + *cell_selection_auto_scroll_y * frame_dt).min(max_y).max(0.0);
+                    if (ss.offset.y - old_y).abs() < 0.5 {
+                        *cell_selection_auto_scroll_y = 0.0;
+                    } else {
+                        ss.store(ui.ctx(), vscroll_id);
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+            // 矩形选区拖拽自动滚动速度计算
             {
-                let scroll_speed = column_drag.as_ref().map_or(0.0, |d| d.scroll_speed_x);
-                if scroll_speed != 0.0 {
-                    let dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
-                    ui.ctx().request_repaint();
-                    sa_result.state.offset[0] += scroll_speed * dt;
-                    sa_result.state.store(ui.ctx(), sa_result.id);
+                let pointer_down = ui.input(|i| i.pointer.any_down());
+                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                if cell_selection_anchor.is_some() && pointer_down && !*cell_selection_typing {
+                    if let Some(pos) = pointer_pos {
+                        let bottom_edge = (clip_rect_for_scroll.bottom() - edge_width).max(clip_rect_for_scroll.top());
+                        let top_edge = (clip_rect_for_scroll.top() + edge_width).min(clip_rect_for_scroll.bottom());
+                        if pos.y > bottom_edge {
+                            let t = ((pos.y - bottom_edge) / edge_width).clamp(0.0, 1.0);
+                            *cell_selection_auto_scroll_y = t * speed_max;
+                        } else if pos.y < top_edge {
+                            let t = ((top_edge - pos.y) / edge_width).clamp(0.0, 1.0);
+                            *cell_selection_auto_scroll_y = -t * speed_max;
+                        } else {
+                            *cell_selection_auto_scroll_y = 0.0;
+                        }
+                    } else {
+                        *cell_selection_auto_scroll_y = 0.0;
+                    }
+                } else {
+                    *cell_selection_auto_scroll_y = 0.0;
                 }
             }
             // 处理复制整列动作
@@ -15090,17 +15154,37 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
             let modifiers = ctx.input(|input| input.modifiers);
             let ctrl_held = modifiers.ctrl || modifiers.command;
             let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(columns.len());
+            let frame_dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
+            // 预计算水平自动滚动速度
+            let column_drag_scroll_x = tab.column_drag.as_ref().map_or(0.0, |d| d.scroll_speed_x);
+            let edge_width = 60.0_f32;
+            let speed_max = 1200.0_f32;
+            let clip_rect_for_scroll = ui.clip_rect();
+            let auto_scroll_x = if tab.cell_selection_anchor.is_some()
+                && ui.input(|i| i.pointer.any_down())
+                && !tab.cell_selection_typing
+            {
+                if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+                    let right_edge = (clip_rect_for_scroll.right() - edge_width).max(clip_rect_for_scroll.left());
+                    let left_edge = (clip_rect_for_scroll.left() + edge_width).min(clip_rect_for_scroll.right());
+                    if pos.x > right_edge {
+                        ((pos.x - right_edge) / edge_width).clamp(0.0, 1.0) * speed_max
+                    } else if pos.x < left_edge {
+                        -((left_edge - pos.x) / edge_width).clamp(0.0, 1.0) * speed_max
+                    } else { 0.0 }
+                } else { 0.0 }
+            } else { 0.0 };
             let mut sa_editable = egui::ScrollArea::horizontal()
                 .id_salt(format!("editable-table-grid-{}", tab.title))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // 保存 clip_rect 供后续边缘检测使用
                     let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     let mut table = TableBuilder::new(ui)
                         .vscroll(true)
                         .striped(true)
                         .resizable(true)
+                        .id_salt(format!("editable-table-body-{}", tab.title))
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
                     if let Some(row_idx) = scroll_target_row {
@@ -16179,15 +16263,57 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             }
                         }
                     }
+                    let table_state_id = ui.id().with(format!("editable-table-body-{}", tab.title));
+                    table_state_id.with("__scroll_area")
                 });
-            // 边缘自动滚动：show() 结束后直接修改 ScrollArea 的内存 state
+            // 水平自动滚动（post-show + clamp 防抖动）
+            if auto_scroll_x != 0.0 || column_drag_scroll_x != 0.0 {
+                let max_x = (sa_editable.content_size.x - sa_editable.inner_rect.width()).max(0.0);
+                sa_editable.state.offset.x = (sa_editable.state.offset.x + (auto_scroll_x + column_drag_scroll_x) * frame_dt).min(max_x).max(0.0);
+                sa_editable.state.store(ui.ctx(), sa_editable.id);
+                ui.ctx().request_repaint();
+            }
+            // 垂直自动滚动（post-show，通过 ID 链访问 table 内部 scroll area）
+            if tab.cell_selection_auto_scroll_y != 0.0 {
+                let outer_id = ui.id();
+                let hscroll_id = outer_id.with(format!("editable-table-grid-{}", tab.title));
+                let inner_id = outer_id.with(hscroll_id);
+                let table_state_id = inner_id.with(format!("editable-table-body-{}", tab.title));
+                let vscroll_id = table_state_id.with("__scroll_area");
+                if let Some(mut ss) = egui::containers::scroll_area::State::load(ui.ctx(), vscroll_id) {
+                    let max_y = (sa_editable.content_size.y - sa_editable.inner_rect.height()).max(0.0);
+                    let old_y = ss.offset.y;
+                    ss.offset.y = (ss.offset.y + tab.cell_selection_auto_scroll_y * frame_dt).min(max_y).max(0.0);
+                    if (ss.offset.y - old_y).abs() < 0.5 {
+                        tab.cell_selection_auto_scroll_y = 0.0;
+                    } else {
+                        ss.store(ui.ctx(), vscroll_id);
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+            // 矩形选区拖拽自动滚动速度计算
             {
-                let scroll_speed = tab.column_drag.as_ref().map_or(0.0, |d| d.scroll_speed_x);
-                if scroll_speed != 0.0 {
-                    let dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
-                    ui.ctx().request_repaint();
-                    sa_editable.state.offset[0] += scroll_speed * dt;
-                    sa_editable.state.store(ui.ctx(), sa_editable.id);
+                let pointer_down = ui.input(|i| i.pointer.any_down());
+                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                if tab.cell_selection_anchor.is_some() && pointer_down && !tab.cell_selection_typing {
+                    if let Some(pos) = pointer_pos {
+                        let bottom_edge = (clip_rect_for_scroll.bottom() - edge_width).max(clip_rect_for_scroll.top());
+                        let top_edge = (clip_rect_for_scroll.top() + edge_width).min(clip_rect_for_scroll.bottom());
+                        if pos.y > bottom_edge {
+                            let t = ((pos.y - bottom_edge) / edge_width).clamp(0.0, 1.0);
+                            tab.cell_selection_auto_scroll_y = t * speed_max;
+                        } else if pos.y < top_edge {
+                            let t = ((top_edge - pos.y) / edge_width).clamp(0.0, 1.0);
+                            tab.cell_selection_auto_scroll_y = -t * speed_max;
+                        } else {
+                            tab.cell_selection_auto_scroll_y = 0.0;
+                        }
+                    } else {
+                        tab.cell_selection_auto_scroll_y = 0.0;
+                    }
+                } else {
+                    tab.cell_selection_auto_scroll_y = 0.0;
                 }
             }
         });
