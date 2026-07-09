@@ -102,16 +102,24 @@ impl HistoryStore {
             )
             .ok();
         let saved_at = Utc::now();
-        let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
-        // 获取当前最大 sort_order
-        let max_sort_order: i32 = connection
-            .query_row(
-                "SELECT COALESCE(MAX(sort_order), -1) FROM saved_queries WHERE connection_id = ?1",
+        let (id, sort_order) = if let Some(existing_id) = existing {
+            // 更新已有查询，保持原排序位置
+            let old_sort: i32 = connection
+                .query_row(
+                    "SELECT sort_order FROM saved_queries WHERE id = ?1",
+                    params![existing_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            (existing_id, old_sort)
+        } else {
+            // 新查询：插入到第一位，现有查询依次后移
+            connection.execute(
+                "UPDATE saved_queries SET sort_order = sort_order + 1 WHERE connection_id = ?1",
                 params![connection_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(-1);
-        let sort_order = max_sort_order + 1;
+            )?;
+            (Uuid::new_v4().to_string(), 0)
+        };
         connection.execute(
             "INSERT INTO saved_queries (id, connection_id, database, title, sql_text, saved_at, sort_order)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
