@@ -1,47 +1,198 @@
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf};
+use aes::Aes128;
+use anyhow::Result;
+use cbc::cipher::block_padding::Pkcs7;
+use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use connection_store::database_path;
+use parking_lot::Mutex;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::{fs, path::PathBuf, sync::Arc};
 
 const SERVICE_NAME: &str = "freedb";
+const ENCRYPTION_KEY: &[u8; 16] = b"fdr6668888\x00\x00\x00\x00\x00\x00";
 
-#[derive(Clone, Default)]
-pub struct SecureStore;
+#[derive(Clone)]
+pub struct SecureStore {
+    connection: Arc<Mutex<Connection>>,
+}
 
 impl SecureStore {
+    pub fn new() -> Result<Self> {
+        let path = database_path()?;
+        let connection = Connection::open(path)?;
+        let store = Self {
+            connection: Arc::new(Mutex::new(connection)),
+        };
+        store.init()?;
+        store.migrate_from_legacy_store()?;
+        store.migrate_legacy_json()?;
+        Ok(store)
+    }
+
     pub fn save_password(&self, connection_id: &str, password: &str) -> Result<()> {
-        let path = store_path()?;
-        let mut store = read_store(&path)?;
-        store.entries.insert(connection_id.to_string(), password.to_string());
-        write_store(&path, &store)
+        let encrypted = encrypt(password.as_bytes());
+        let connection = self.connection.lock();
+        connection.execute(
+            "INSERT OR REPLACE INTO passwords (connection_id, encrypted_password)
+             VALUES (?1, ?2)",
+            params![connection_id, encrypted],
+        )?;
+        Ok(())
     }
 
     pub fn load_password(&self, connection_id: &str) -> Result<Option<String>> {
-        let path = store_path()?;
-        let store = read_store(&path)?;
-        Ok(store.entries.get(connection_id).cloned())
+        let connection = self.connection.lock();
+        let result: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT encrypted_password FROM passwords WHERE connection_id = ?1",
+                params![connection_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match result {
+            Some(encrypted) => {
+                let decrypted = decrypt(&encrypted)?;
+                Ok(Some(String::from_utf8(decrypted)?))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn delete_password(&self, connection_id: &str) -> Result<()> {
-        let path = store_path()?;
-        if !path.exists() {
+        let connection = self.connection.lock();
+        connection.execute(
+            "DELETE FROM passwords WHERE connection_id = ?1",
+            params![connection_id],
+        )?;
+        Ok(())
+    }
+
+    /// 加载加密后的密码（不解密），用于导出
+    pub fn load_encrypted_password(&self, connection_id: &str) -> Result<Option<Vec<u8>>> {
+        let connection = self.connection.lock();
+        let result: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT encrypted_password FROM passwords WHERE connection_id = ?1",
+                params![connection_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
+    /// 保存已加密的密码，用于导入
+    pub fn save_encrypted_password(&self, connection_id: &str, encrypted: &[u8]) -> Result<()> {
+        let connection = self.connection.lock();
+        connection.execute(
+            "INSERT OR REPLACE INTO passwords (connection_id, encrypted_password)
+             VALUES (?1, ?2)",
+            params![connection_id, encrypted],
+        )?;
+        Ok(())
+    }
+
+    fn init(&self) -> Result<()> {
+        let connection = self.connection.lock();
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS passwords (
+                connection_id TEXT PRIMARY KEY,
+                encrypted_password BLOB NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+
+    /// 从旧的 secure-store.sqlite3 迁移数据到新位置
+    fn migrate_from_legacy_store(&self) -> Result<()> {
+        let dir = primary_data_dir()?;
+        let legacy_path = dir.join("secure-store.sqlite3");
+        if !legacy_path.exists() {
             return Ok(());
         }
-        let mut store = read_store(&path)?;
-        store.entries.remove(connection_id);
-        write_store(&path, &store)
+        let legacy_conn = Connection::open(&legacy_path)?;
+        let mut stmt = legacy_conn.prepare(
+            "SELECT connection_id, encrypted_password FROM passwords",
+        )?;
+        let passwords: Vec<(String, Vec<u8>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if passwords.is_empty() {
+            let _ = fs::remove_file(&legacy_path);
+            return Ok(());
+        }
+
+        let connection = self.connection.lock();
+        for (id, encrypted) in passwords {
+            connection.execute(
+                "INSERT OR IGNORE INTO passwords (connection_id, encrypted_password)
+                 VALUES (?1, ?2)",
+                params![id, encrypted],
+            )?;
+        }
+        drop(connection);
+        let _ = fs::remove_file(&legacy_path);
+        Ok(())
+    }
+
+    fn migrate_legacy_json(&self) -> Result<()> {
+        let legacy_path = legacy_json_path()?;
+        if !legacy_path.exists() {
+            return Ok(());
+        }
+        let content = fs::read_to_string(&legacy_path)?;
+        if content.trim().is_empty() {
+            return Ok(());
+        }
+        let store: serde_json::Value = serde_json::from_str(&content)?;
+        let Some(entries) = store.get("entries").and_then(|v| v.as_object()) else {
+            return Ok(());
+        };
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let connection = self.connection.lock();
+        for (id, value) in entries {
+            if let Some(password) = value.as_str() {
+                let encrypted = encrypt(password.as_bytes());
+                connection.execute(
+                    "INSERT OR IGNORE INTO passwords (connection_id, encrypted_password)
+                     VALUES (?1, ?2)",
+                    params![id, encrypted],
+                )?;
+            }
+        }
+        drop(connection);
+        let _ = fs::remove_file(&legacy_path);
+        Ok(())
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct PasswordStore {
-    entries: HashMap<String, String>,
+fn encrypt(data: &[u8]) -> Vec<u8> {
+    let mut iv = [0u8; 16];
+    getrandom::fill(&mut iv).expect("failed to generate random IV");
+    let cipher = cbc::Encryptor::<Aes128>::new(ENCRYPTION_KEY.into(), &iv.into());
+    let encrypted = cipher.encrypt_padded_vec_mut::<Pkcs7>(data);
+    let mut result = Vec::with_capacity(16 + encrypted.len());
+    result.extend_from_slice(&iv);
+    result.extend_from_slice(&encrypted);
+    result
 }
 
-fn store_path() -> Result<PathBuf> {
+fn decrypt(data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() < 32 || data.len() % 16 != 0 {
+        return Err(anyhow::anyhow!("invalid encrypted data length"));
+    }
+    let (iv, ciphertext) = data.split_at(16);
+    let cipher = cbc::Decryptor::<Aes128>::new(ENCRYPTION_KEY.into(), iv.into());
+    cipher
+        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .map_err(|_| anyhow::anyhow!("decryption failed"))
+}
+
+fn legacy_json_path() -> Result<PathBuf> {
     let dir = primary_data_dir()?;
-    let path = dir.join("credentials.json");
-    migrate_legacy_if_needed(&path)?;
-    Ok(path)
+    Ok(dir.join("credentials.json"))
 }
 
 fn primary_data_dir() -> Result<PathBuf> {
@@ -72,63 +223,33 @@ fn ensure_dir_writable(dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn read_store(path: &PathBuf) -> Result<PasswordStore> {
-    if !path.exists() {
-        return Ok(PasswordStore::default());
-    }
-    let content = fs::read_to_string(path)?;
-    if content.trim().is_empty() {
-        return Ok(PasswordStore::default());
-    }
-    serde_json::from_str(&content).context("failed to parse credential store")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn write_store(path: &PathBuf, store: &PasswordStore) -> Result<()> {
-    let content = serde_json::to_string_pretty(store)?;
-    fs::write(path, content).context("failed to write credential store")
-}
-
-fn legacy_dirs(target: &PathBuf) -> Vec<PathBuf> {
-    let mut candidate = candidate_data_dirs()
-        .into_iter()
-        .filter(|d| d.join("credentials.json") != *target)
-        .collect::<Vec<_>>();
-
-    // 从旧 uudb 目录迁移
-    let uudb_legacy: Vec<PathBuf> = [
-        dirs::data_local_dir().map(|p| p.join("uudb")),
-        std::env::current_dir().ok().map(|p| p.join(".uudb-data")),
-        dirs::home_dir().map(|p| p.join(".uudb")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    candidate.extend(uudb_legacy);
-
-    candidate
-}
-
-fn migrate_legacy_if_needed(target: &PathBuf) -> Result<()> {
-    if count_entries(target)? > 0 {
-        return Ok(());
-    }
-    for legacy_dir in legacy_dirs(target) {
-        let legacy = legacy_dir.join("credentials.json");
-        if legacy == *target || !legacy.exists() {
-            continue;
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let passwords = ["", "123456", "dexintest@2024", "B5j9JulWR6in2lnjwY88nnwGc9cuhA"];
+        for password in &passwords {
+            let encrypted = encrypt(password.as_bytes());
+            let decrypted = decrypt(&encrypted).unwrap();
+            assert_eq!(*password, String::from_utf8(decrypted).unwrap());
         }
-        if count_entries(&legacy)? == 0 {
-            continue;
-        }
-        fs::copy(&legacy, target)?;
-        return Ok(());
     }
-    Ok(())
+
+    #[test]
+    fn encrypt_produces_different_ciphertext_each_time() {
+        let password = b"test_password";
+        let enc1 = encrypt(password);
+        let enc2 = encrypt(password);
+        assert_ne!(enc1, enc2); // 不同 IV 产生不同密文
+        assert_eq!(decrypt(&enc1).unwrap(), decrypt(&enc2).unwrap()); // 解密后结果相同
+    }
+
+    #[test]
+    fn decrypt_invalid_data_returns_error() {
+        assert!(decrypt(&[0u8; 16]).is_err());
+        assert!(decrypt(&[0u8; 32]).is_err());
+    }
 }
 
-fn count_entries(path: &PathBuf) -> Result<usize> {
-    if !path.exists() {
-        return Ok(0);
-    }
-    Ok(read_store(path)?.entries.len())
-}

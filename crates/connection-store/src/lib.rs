@@ -259,7 +259,8 @@ impl ConnectionStore {
     }
 }
 
-fn database_path() -> Result<PathBuf> {
+/// 返回主数据库路径，供 SecureStore 复用
+pub fn database_path() -> Result<PathBuf> {
     let primary_dir = primary_data_dir()?;
     let target_path = primary_dir.join("freedb.sqlite3");
     migrate_legacy_database_if_needed(&target_path)?;

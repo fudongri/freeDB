@@ -129,6 +129,7 @@ pub struct DesktopApp {
     native_menu: Option<muda::Menu>,
     native_menu_initialized: bool,
     // 菜单项引用，用于切换语言后动态更新标签
+    menu_file: Option<muda::Submenu>,
     menu_view: Option<muda::Submenu>,
     menu_settings: Option<muda::Submenu>,
     menu_shortcuts: Option<muda::MenuItem>,
@@ -1063,6 +1064,7 @@ impl DesktopApp {
         log_buffer: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         menu_event_rx: Option<Receiver<muda::MenuEvent>>,
         native_menu: Option<muda::Menu>,
+        menu_file: Option<muda::Submenu>,
         menu_view: Option<muda::Submenu>,
         menu_settings: Option<muda::Submenu>,
         menu_shortcuts: Option<muda::MenuItem>,
@@ -1191,6 +1193,7 @@ impl DesktopApp {
             menu_event_rx,
             native_menu,
             native_menu_initialized: false,
+            menu_file,
             menu_view,
             menu_settings,
             menu_shortcuts,
@@ -1392,8 +1395,13 @@ impl DesktopApp {
     }
 
     fn poll_menu_events(&mut self) {
-        let Some(rx) = &self.menu_event_rx else { return };
+        let Some(rx) = self.menu_event_rx.as_ref() else { return };
+        let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        drop(rx);
+        for event in events {
             tracing::info!("收到菜单事件: {:?}", event.id);
             if event.id == "快捷键速查表" {
                 self.is_shortcuts_open = true;
@@ -1401,6 +1409,47 @@ impl DesktopApp {
                 self.is_log_window_open = true;
             } else if event.id == "滚动速度" {
                 self.is_scroll_speed_open = true;
+            } else if event.id == "新建连接" {
+                self.is_connection_dialog_open = true;
+                self.editing_connection_id = None;
+                self.connection_form = ConnectionFormState::default();
+            } else if event.id == "导入配置" {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("FreeDB Config", &["dbx"])
+                    .pick_file()
+                {
+                    match self.services.import_config(&path) {
+                        Ok(result) => {
+                            self.refresh_connections();
+                            self.status_message = tr!(
+                                "导入成功：新增 {} 个连接，{} 条查询",
+                                result.connections_added,
+                                result.queries_added
+                            );
+                            self.status_level = StatusLevel::Success;
+                        }
+                        Err(error) => {
+                            self.status_message = tr!("导入失败: {}", error);
+                            self.status_level = StatusLevel::Error;
+                        }
+                    }
+                }
+            } else if event.id == "导出配置" {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("FreeDB Config", &["dbx"])
+                    .save_file()
+                {
+                    match self.services.export_config(&path) {
+                        Ok(()) => {
+                            self.status_message = tr!("已导出配置到 {}", path.display());
+                            self.status_level = StatusLevel::Success;
+                        }
+                        Err(error) => {
+                            self.status_message = tr!("导出配置失败: {}", error);
+                            self.status_level = StatusLevel::Error;
+                        }
+                    }
+                }
             } else if event.id == "切换语言" {
                 let new_locale = match get_locale() {
                     Locale::ZhCn => Locale::En,
@@ -1410,6 +1459,7 @@ impl DesktopApp {
                 self.locale = new_locale;
                 let _ = self.services.save_ui_state("locale", new_locale.to_code());
                 // 更新原生菜单标签
+                if let Some(m) = &self.menu_file { m.set_text(tr!("文件")); }
                 if let Some(m) = &self.menu_view { m.set_text(tr!("查看")); }
                 if let Some(m) = &self.menu_settings { m.set_text(tr!("设置")); }
                 if let Some(m) = &self.menu_shortcuts { m.set_text(tr!("快捷键速查表")); }
@@ -3541,6 +3591,59 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.create_query_tab(conn_id, database, None);
             }
             ui.separator();
+            // "文件" 菜单：macOS/Windows 使用原生菜单栏，Linux 使用 egui
+            if cfg!(not(any(target_os = "macos", target_os = "windows"))) {
+                ui.menu_button(tr!("文件"), |ui| {
+                    if ui.button(tr!("新建连接")).clicked() {
+                        self.is_connection_dialog_open = true;
+                        self.editing_connection_id = None;
+                        self.connection_form = ConnectionFormState::default();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(tr!("导入配置")).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("FreeDB Config", &["dbx"])
+                            .pick_file()
+                        {
+                            match self.services.import_config(&path) {
+                                Ok(result) => {
+                                    self.refresh_connections();
+                                    self.status_message = tr!(
+                                        "导入成功：新增 {} 个连接，{} 条查询",
+                                        result.connections_added,
+                                        result.queries_added
+                                    );
+                                    self.status_level = StatusLevel::Success;
+                                }
+                                Err(error) => {
+                                    self.status_message = tr!("导入失败: {}", error);
+                                    self.status_level = StatusLevel::Error;
+                                }
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button(tr!("导出配置")).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("FreeDB Config", &["dbx"])
+                            .save_file()
+                        {
+                            match self.services.export_config(&path) {
+                                Ok(()) => {
+                                    self.status_message = tr!("已导出配置到 {}", path.display());
+                                    self.status_level = StatusLevel::Success;
+                                }
+                                Err(error) => {
+                                    self.status_message = tr!("导出配置失败: {}", error);
+                                    self.status_level = StatusLevel::Error;
+                                }
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                });
+            }
             // "查看" 菜单：macOS/Windows 使用原生菜单栏，Linux 使用 egui
             if cfg!(not(any(target_os = "macos", target_os = "windows"))) {
                 ui.menu_button(tr!("查看"), |ui| {

@@ -23,12 +23,16 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
 anyhow = "1.0"
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1.4"
 dirs = "6.0"
 eframe = "0.33"
+getrandom = "0.3"
 hex = "0.4"
 egui = "0.33"
 egui_dock = "0.18"
@@ -39,6 +43,7 @@ mysql_async = { version = "0.36", features = ["native-tls"] }
 parking_lot = "0.12"
 raw-window-handle = "0.6"
 postgres-native-tls = "0.5"
+quick-xml = { version = "0.37", features = ["serialize"] }
 native-tls = "0.2"
 regex = "1"
 regex-syntax = "0.8"

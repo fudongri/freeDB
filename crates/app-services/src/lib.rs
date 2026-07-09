@@ -1,16 +1,21 @@
 use anyhow::{anyhow, Result};
+use base64::Engine;
 use chrono::Utc;
 use connection_store::ConnectionStore;
 use core_domain::{
     AppError, ConnectionProfile, ConnectionProfileInput, DatabaseKind, ExplorerNode,
-    ExplorerNodeType, QueryExecution, QueryResult, SavedQueryEntry, TableChangeSet,
+    ExplorerNodeType, QueryExecution, QueryResult, SavedQueryEntry, SslMode, TableChangeSet,
     TableDefinition, TableRef, UiStateValue,
 };
 use export_service::ExportService;
 use history_store::HistoryStore;
 use i18n::tr;
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::Writer;
 use secure_store::SecureStore;
+use serde::Deserialize;
 use session_manager::{SessionManager, SessionStatus};
+use std::io::Cursor;
 use std::path::Path;
 use tracing::warn;
 use uuid::Uuid;
@@ -29,7 +34,7 @@ impl AppServices {
         Ok(Self {
             connection_store: ConnectionStore::new()?,
             history_store: HistoryStore::new()?,
-            secure_store: SecureStore,
+            secure_store: SecureStore::new()?,
             export_service: ExportService,
             session_manager: SessionManager::default(),
         })
@@ -679,6 +684,152 @@ impl AppServices {
             .load_password(connection_id)?
             .ok_or_else(|| anyhow!("{}", tr!("该连接未保存密码，请重新编辑连接后保存密码")))
     }
+
+    pub fn export_config(&self, path: &Path) -> Result<()> {
+        let connections = self.connection_store.list_connections()?;
+        let all_queries = self.history_store.list_all_saved_queries(10_000)?;
+
+        let mut w = Writer::new(Cursor::new(Vec::new()));
+        w.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))?;
+        write_start(&mut w, "FreeDBConfig")?;
+
+        // Connections（直接作为 FreeDBConfig 的子元素，不使用包装元素）
+        for conn in &connections {
+            let mut tag = BytesStart::new("Connection");
+            tag.push_attribute(("originalId", conn.id.as_str()));
+            w.write_event(Event::Start(tag))?;
+            write_elem(&mut w, "name", &conn.name)?;
+            write_elem(&mut w, "kind", conn.kind.as_str())?;
+            if let Some(ref g) = conn.group_name {
+                write_elem(&mut w, "groupName", g)?;
+            }
+            write_elem(&mut w, "host", &conn.host)?;
+            write_elem(&mut w, "port", &conn.port.to_string())?;
+            write_elem(&mut w, "username", &conn.username)?;
+            if let Ok(Some(encrypted)) = self.secure_store.load_encrypted_password(&conn.id) {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+                write_elem(&mut w, "password", &encoded)?;
+            }
+            if let Some(ref db) = conn.default_database {
+                write_elem(&mut w, "defaultDatabase", db)?;
+            }
+            write_elem(&mut w, "sslMode", conn.ssl_mode.as_str())?;
+            write_elem(&mut w, "directConnection", if conn.direct_connection { "true" } else { "false" })?;
+            if let Some(ref rs) = conn.replica_set {
+                write_elem(&mut w, "replicaSet", rs)?;
+            }
+            if let Some(ref uri) = conn.connection_uri {
+                write_elem(&mut w, "connectionUri", uri)?;
+            }
+            write_end(&mut w, "Connection")?;
+        }
+
+        // SavedQueries（直接作为 FreeDBConfig 的子元素）
+        for q in &all_queries {
+            write_start(&mut w, "Query")?;
+            write_elem(&mut w, "connectionId", &q.connection_id)?;
+            if let Some(ref db) = q.database {
+                write_elem(&mut w, "database", db)?;
+            }
+            write_elem(&mut w, "title", &q.title)?;
+            write_elem(&mut w, "sqlText", &q.sql_text)?;
+            write_end(&mut w, "Query")?;
+        }
+
+        write_end(&mut w, "FreeDBConfig")?;
+
+        let xml = String::from_utf8(w.into_inner().into_inner())
+            .map_err(|e| anyhow!("xml encoding error: {e}"))?;
+        std::fs::write(path, xml)?;
+        Ok(())
+    }
+
+    pub fn import_config(&self, path: &Path) -> Result<ImportResult> {
+        let content = std::fs::read_to_string(path)?;
+        let bundle: ConfigBundle = quick_xml::de::from_str(&content)?;
+
+        if bundle.connections.is_empty() && bundle.saved_queries.is_empty() {
+            return Err(anyhow!("{}", tr!("配置文件中没有数据")));
+        }
+
+        let mut id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+        for conn in &bundle.connections {
+            let new_id = Uuid::new_v4().to_string();
+            let kind = match conn.kind.as_deref() {
+                Some("mysql") => DatabaseKind::MySql,
+                Some("postgres") => DatabaseKind::Postgres,
+                Some("mongodb") => DatabaseKind::MongoDb,
+                _ => DatabaseKind::MySql,
+            };
+            let ssl_mode = match conn.ssl_mode.as_deref() {
+                Some("disable") => SslMode::Disable,
+                Some("require") => SslMode::Require,
+                _ => SslMode::Prefer,
+            };
+            let port: u16 = conn.port.as_deref().unwrap_or("3306").parse().unwrap_or(3306);
+            let profile = ConnectionProfile {
+                id: new_id.clone(),
+                name: conn.name.clone().unwrap_or_default(),
+                kind,
+                group_name: conn.group_name.clone(),
+                host: conn.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
+                port,
+                username: conn.username.clone().unwrap_or_default(),
+                default_database: conn.default_database.clone(),
+                password_saved: conn.password.is_some(),
+                ssl_mode,
+                sort_order: 0,
+                last_used_at: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                direct_connection: conn
+                    .direct_connection
+                    .as_deref()
+                    .map(|s| s == "true")
+                    .unwrap_or(false),
+                replica_set: conn.replica_set.clone(),
+                connection_uri: conn.connection_uri.clone(),
+            };
+            if let Some(ref pw) = conn.password {
+                match base64::engine::general_purpose::STANDARD.decode(pw) {
+                    Ok(encrypted) => {
+                        self.secure_store.save_encrypted_password(&new_id, &encrypted)?;
+                    }
+                    Err(_) => {
+                        // 兼容旧格式（明文密码）
+                        self.secure_store.save_password(&new_id, pw)?;
+                    }
+                }
+            }
+            self.connection_store.save_connection(&profile)?;
+            // 记录旧 ID → 新 ID 映射（savedQueries 引用旧 connectionId）
+            // 由于导出时 connectionId 是原始 ID，需要通过匹配来映射
+            // 这里用顺序索引：第 i 个连接对应原始 ID
+            id_map.insert(conn.original_id.clone().unwrap_or_default(), new_id);
+        }
+
+        // 为保存的查询重新映射 connection_id
+        for q in &bundle.saved_queries {
+            let new_conn_id = id_map
+                .get(q.connection_id.as_deref().unwrap_or(""))
+                .cloned()
+                .or_else(|| id_map.values().next().cloned());
+            if let Some(conn_id) = new_conn_id {
+                self.history_store.save_query(
+                    &conn_id,
+                    q.database.as_deref(),
+                    q.title.as_deref().unwrap_or(""),
+                    q.sql_text.as_deref().unwrap_or(""),
+                )?;
+            }
+        }
+
+        Ok(ImportResult {
+            connections_added: bundle.connections.len(),
+            queries_added: bundle.saved_queries.len(),
+        })
+    }
 }
 
 fn validate_connection_input(input: &ConnectionProfileInput) -> Result<()> {
@@ -713,4 +864,82 @@ fn build_saved_query_title(sql_text: &str) -> String {
     } else {
         compact
     }
+}
+
+// ── 配置导入导出辅助类型 ──
+
+pub struct ImportResult {
+    pub connections_added: usize,
+    pub queries_added: usize,
+}
+
+#[derive(Deserialize)]
+struct ConfigBundle {
+    #[serde(rename = "Connection", default)]
+    connections: Vec<ImportConnection>,
+    #[serde(rename = "Query", default)]
+    saved_queries: Vec<ImportQuery>,
+}
+
+#[derive(Deserialize)]
+#[derive(Debug)]
+struct ImportConnection {
+    #[serde(rename = "@originalId")]
+    original_id: Option<String>,
+    #[serde(rename = "name")]
+    name: Option<String>,
+    #[serde(rename = "kind")]
+    kind: Option<String>,
+    #[serde(rename = "groupName")]
+    group_name: Option<String>,
+    #[serde(rename = "host")]
+    host: Option<String>,
+    #[serde(rename = "port")]
+    port: Option<String>,
+    #[serde(rename = "username")]
+    username: Option<String>,
+    #[serde(rename = "password")]
+    password: Option<String>,
+    #[serde(rename = "defaultDatabase")]
+    default_database: Option<String>,
+    #[serde(rename = "sslMode")]
+    ssl_mode: Option<String>,
+    #[serde(rename = "directConnection")]
+    direct_connection: Option<String>,
+    #[serde(rename = "replicaSet")]
+    replica_set: Option<String>,
+    #[serde(rename = "connectionUri")]
+    connection_uri: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[derive(Debug)]
+struct ImportQuery {
+    #[serde(rename = "connectionId")]
+    connection_id: Option<String>,
+    #[serde(rename = "database")]
+    database: Option<String>,
+    #[serde(rename = "title")]
+    title: Option<String>,
+    #[serde(rename = "sqlText")]
+    sql_text: Option<String>,
+}
+
+// ── XML 写入辅助函数 ──
+
+fn write_start(w: &mut Writer<Cursor<Vec<u8>>>, tag: &str) -> Result<()> {
+    w.write_event(Event::Start(BytesStart::new(tag)))?;
+    Ok(())
+}
+
+fn write_end(w: &mut Writer<Cursor<Vec<u8>>>, tag: &str) -> Result<()> {
+    w.write_event(Event::End(BytesEnd::new(tag)))?;
+    Ok(())
+}
+
+fn write_elem(w: &mut Writer<Cursor<Vec<u8>>>, tag: &str, value: &str) -> Result<()> {
+    w.write_event(Event::Start(BytesStart::new(tag)))?;
+    w.write_event(Event::Text(BytesText::new(value)))?;
+    w.write_event(Event::End(BytesEnd::new(tag)))?;
+    Ok(())
 }
