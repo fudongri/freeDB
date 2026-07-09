@@ -323,6 +323,8 @@ struct QueryTabState {
     column_drag: Option<TableColumnDragState>,
     result_column_widths: Option<Vec<f32>>,
     result_column_resize_drag: Option<(usize, f32)>,
+    result_row_number_width: f32,
+    result_row_num_resize_drag: Option<f32>,
     multi_results: Vec<QueryResult>,
     multi_statements: Vec<String>,
     executed_statements: Vec<String>,
@@ -505,6 +507,8 @@ struct TableTabState {
     column_order: Vec<String>,
     column_drag: Option<TableColumnDragState>,
     column_resize_drag: Option<(usize, f32)>,
+    preview_row_number_width: f32,
+    row_num_resize_drag: Option<f32>,
     show_column_filter: bool,
     search: TableSearchState,
     // MongoDB 游标分页：每页最后一条的 _id
@@ -2454,6 +2458,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             column_order: Vec::new(),
             column_drag: None,
             column_resize_drag: None,
+            preview_row_number_width: 42.0,
+            row_num_resize_drag: None,
             show_column_filter: false,
             search: TableSearchState::default(),
             mongo_page_cursors: Vec::new(),
@@ -7289,13 +7295,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     &mut sel.cell_selection_drag_started,
                                                     &mut tab.result_column_widths,
                                                     &mut tab.result_column_resize_drag,
+                                                    &mut tab.result_row_number_width,
+                                                    &mut tab.result_row_num_resize_drag,
                                                 );
                                                 if !matches!(result_action.action, TabUiAction::None) {
                                                     action = result_action.action;
                                                 }
                                             }
                                         } else {
-                                            let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag, &mut tab.result_column_widths, &mut tab.result_column_resize_drag);
+                                            let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag, &mut tab.result_column_widths, &mut tab.result_column_resize_drag, &mut tab.result_row_number_width, &mut tab.result_row_num_resize_drag);
                                             if !matches!(result_action.action, TabUiAction::None) {
                                                 action = result_action.action;
                                             }
@@ -12929,6 +12937,8 @@ impl QueryTabState {
             column_drag: None,
             result_column_widths: None,
             result_column_resize_drag: None,
+            result_row_number_width: 42.0,
+            result_row_num_resize_drag: None,
             multi_results: Vec::new(),
             multi_statements: Vec::new(),
             executed_statements: Vec::new(),            selected_result_index: 0,
@@ -14006,6 +14016,8 @@ fn render_result_table(
     column_drag: &mut Option<TableColumnDragState>,
     result_column_widths: &mut Option<Vec<f32>>,
     result_column_resize_drag: &mut Option<(usize, f32)>,
+    row_number_width: &mut f32,
+    row_num_resize_drag: &mut Option<f32>,
 ) -> ResultTableActionResult {
     let palette = mac_ui_palette(ui.visuals());
     if result.columns.is_empty() {
@@ -14071,6 +14083,11 @@ fn render_result_table(
             } else {
                 estimate_query_column_widths(&display_columns, &result.rows)
             };
+            // 行号列宽度自适应
+            let auto_rn_width = estimate_row_number_width(result.rows.len()).max(42.0);
+            if (*row_number_width - 42.0).abs() < 0.1 || (*row_number_width - auto_rn_width).abs() < 0.1 {
+                *row_number_width = auto_rn_width;
+            }
             let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
             let mut sort_click_result = None;
             let mut sa_result = egui::ScrollArea::horizontal()
@@ -14097,7 +14114,7 @@ fn render_result_table(
                     }
                     // Row number column
                     table = table.column(
-                        egui_extras::Column::initial(42.0)
+                        egui_extras::Column::initial(*row_number_width)
                             .at_least(42.0)
                             .clip(true),
                     );
@@ -14113,6 +14130,32 @@ fn render_result_table(
                             // Row number header
                             header.col(|ui| {
                                 let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
+                                let cell_rect = ui.max_rect();
+                                let resize_handle_x = cell_rect.right() - 3.0;
+                                let resize_handle_rect = egui::Rect::from_min_max(
+                                    egui::pos2(resize_handle_x, cell_rect.top()),
+                                    cell_rect.right_bottom(),
+                                );
+                                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                if on_resize_handle {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                }
+                                if on_resize_handle && just_pressed {
+                                    *row_num_resize_drag = Some(pointer_pos.unwrap().x);
+                                }
+                                if let Some(start_x) = *row_num_resize_drag {
+                                    if pointer_down {
+                                        if let Some(pos) = pointer_pos {
+                                            let delta = pos.x - start_x;
+                                            *row_number_width = (*row_number_width + delta).max(42.0);
+                                            *row_num_resize_drag = Some(pos.x);
+                                            ctx.request_repaint();
+                                        }
+                                    }
+                                }
                             });
                             for (col_idx, column) in display_columns.iter().enumerate() {
                                 header.col(|ui| {
@@ -14481,6 +14524,9 @@ fn render_result_table(
             if result_column_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
                 *result_column_resize_drag = None;
             }
+            if row_num_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                *row_num_resize_drag = None;
+            }
             sort_click_result
         });
     let action = if let Some(row_act) = pending_row_action.into_inner() {
@@ -14585,6 +14631,8 @@ fn render_editable_result_table(
     cell_selection_drag_started: &mut bool,
     result_column_widths: &mut Option<Vec<f32>>,
     result_column_resize_drag: &mut Option<(usize, f32)>,
+    row_number_width: &mut f32,
+    row_num_resize_drag: &mut Option<f32>,
 ) -> ResultTableActionResult {
     let palette = mac_ui_palette(ui.visuals());
     if result.columns.is_empty() {
@@ -14652,6 +14700,11 @@ fn render_editable_result_table(
             } else {
                 estimate_query_column_widths(&display_columns, &result.rows)
             };
+            // 行号列宽度自适应
+            let auto_rn_width = estimate_row_number_width(result.rows.len()).max(42.0);
+            if (*row_number_width - 42.0).abs() < 0.1 || (*row_number_width - auto_rn_width).abs() < 0.1 {
+                *row_number_width = auto_rn_width;
+            }
             let mut header_cell_rects: Vec<egui::Rect> = Vec::with_capacity(display_columns.len());
             let mut sort_click_result = None;
             let frame_dt = ui.input(|i| i.unstable_dt).min(1.0 / 30.0);
@@ -14700,7 +14753,7 @@ fn render_editable_result_table(
                     }
                     // 行号列
                     table = table.column(
-                        egui_extras::Column::initial(42.0).at_least(42.0).clip(true),
+                        egui_extras::Column::initial(*row_number_width).at_least(42.0).clip(true),
                     );
                     for width in &column_widths {
                         table = table.column(
@@ -14711,6 +14764,32 @@ fn render_editable_result_table(
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
+                                let cell_rect = ui.max_rect();
+                                let resize_handle_x = cell_rect.right() - 3.0;
+                                let resize_handle_rect = egui::Rect::from_min_max(
+                                    egui::pos2(resize_handle_x, cell_rect.top()),
+                                    cell_rect.right_bottom(),
+                                );
+                                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                if on_resize_handle {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                }
+                                if on_resize_handle && just_pressed {
+                                    *row_num_resize_drag = Some(pointer_pos.unwrap().x);
+                                }
+                                if let Some(start_x) = *row_num_resize_drag {
+                                    if pointer_down {
+                                        if let Some(pos) = pointer_pos {
+                                            let delta = pos.x - start_x;
+                                            *row_number_width = (*row_number_width + delta).max(42.0);
+                                            *row_num_resize_drag = Some(pos.x);
+                                            ctx.request_repaint();
+                                        }
+                                    }
+                                }
                             });
                             for (col_idx, column) in display_columns.iter().enumerate() {
                                 header.col(|ui| {
@@ -15557,6 +15636,9 @@ fn render_editable_result_table(
             if result_column_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
                 *result_column_resize_drag = None;
             }
+            if row_num_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                *row_num_resize_drag = None;
+            }
         });
     ResultTableActionResult { sort_click: None, action: action.take().unwrap_or(TabUiAction::None) }
 }
@@ -15618,6 +15700,11 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
         tab.preview_column_widths = widths.clone();
         widths
     };
+    // 行号列宽度自适应
+    let auto_rn_width = estimate_row_number_width(preview.rows.len()).max(42.0);
+    if (tab.preview_row_number_width - 42.0).abs() < 0.1 || (tab.preview_row_number_width - auto_rn_width).abs() < 0.1 {
+        tab.preview_row_number_width = auto_rn_width;
+    }
     let editable_columns = table_editable_columns(tab);
     // 列类型映射（用于按类型决定对齐方式）
     let col_type_map: std::collections::HashMap<String, String> = tab.definition.as_ref()
@@ -15692,7 +15779,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                     let show_row_number = tab.pending_insert_row.is_none();
                     if show_row_number {
                         table = table.column(
-                            egui_extras::Column::initial(42.0)
+                            egui_extras::Column::initial(tab.preview_row_number_width)
                                 .at_least(42.0)
                                 .clip(true),
                         );
@@ -15710,6 +15797,32 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             if show_row_number {
                                 header.col(|ui| {
                                     let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
+                                    let cell_rect = ui.max_rect();
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(
+                                        egui::pos2(resize_handle_x, cell_rect.top()),
+                                        cell_rect.right_bottom(),
+                                    );
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    if on_resize_handle {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        tab.row_num_resize_drag = Some(pointer_pos.unwrap().x);
+                                    }
+                                    if let Some(start_x) = tab.row_num_resize_drag {
+                                        if pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                tab.preview_row_number_width = (tab.preview_row_number_width + delta).max(42.0);
+                                                tab.row_num_resize_drag = Some(pos.x);
+                                                ctx.request_repaint();
+                                            }
+                                        }
+                                    }
                                 });
                             }
                             for (col_idx, column) in columns.iter().enumerate() {
@@ -15798,6 +15911,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                     // 指针释放时清除列宽调整状态
                     if tab.column_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
                         tab.column_resize_drag = None;
+                    }
+                    if tab.row_num_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                        tab.row_num_resize_drag = None;
                     }
                     // 列宽调整后写回
                     tab.preview_column_widths = column_widths;
@@ -21876,6 +21992,11 @@ fn estimate_table_text_width(text: &str) -> f32 {
             _ => 9.0,
         })
         .sum()
+}
+
+fn estimate_row_number_width(total_rows: usize) -> f32 {
+    let digits = if total_rows == 0 { 1 } else { (total_rows as f64).log10().floor() as usize + 1 };
+    (digits as f32) * 7.0 + 20.0
 }
 
 #[derive(Clone, Copy)]
