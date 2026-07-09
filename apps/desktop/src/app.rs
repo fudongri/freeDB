@@ -2013,6 +2013,90 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.status_message = tr!("已清除选择").into();
     }
 
+    /// 当前活动页签是否有矩形选区
+    fn has_cell_selection(&self) -> bool {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Query(q)) => {
+                let sel = &q.result_selections[q.selected_result_index];
+                sel.cell_selection_anchor.is_some() && sel.cell_selection_current.is_some()
+            }
+            Some(WorkspaceTab::Table(t)) => {
+                t.cell_selection_anchor.is_some() && t.cell_selection_current.is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// 将矩形选区的内容复制到剪贴板（TSV 格式）
+    fn copy_cells_to_clipboard(&mut self, ctx: &egui::Context) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        match tab {
+            WorkspaceTab::Query(query_tab) => {
+                let sel = &query_tab.result_selections[query_tab.selected_result_index];
+                let (Some((ar, ac)), Some((cr, cc))) = (sel.cell_selection_anchor, sel.cell_selection_current) else { return };
+                let (min_r, max_r) = (ar.min(cr), ar.max(cr));
+                let (min_c, max_c) = (ac.min(cc), ac.max(cc));
+                let Some(ref result) = query_tab.result else { return };
+                let display_columns = if query_tab.column_order.is_empty() {
+                    result.columns.clone()
+                } else {
+                    let all_set: std::collections::BTreeSet<&String> = result.columns.iter().collect();
+                    let mut ordered: Vec<String> = query_tab.column_order
+                        .iter()
+                        .filter(|c| all_set.contains(c))
+                        .cloned()
+                        .collect();
+                    for col in &result.columns {
+                        if !query_tab.column_order.contains(col) {
+                            ordered.push(col.clone());
+                        }
+                    }
+                    ordered
+                };
+                let mut lines = Vec::new();
+                for row_idx in min_r..=max_r {
+                    let line: Vec<String> = (min_c..=max_c)
+                        .map(|col_idx| {
+                            display_columns.get(col_idx)
+                                .and_then(|col| result.rows.get(row_idx).and_then(|row| row.get(col)))
+                                .map(|v| v.as_text().unwrap_or_default().to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    lines.push(line.join("\t"));
+                }
+                let row_count = lines.len();
+                let col_count = max_c - min_c + 1;
+                ctx.copy_text(lines.join("\n"));
+                self.status_message = tr!("已复制 {} 行, {} 列", row_count, col_count);
+            }
+            WorkspaceTab::Table(table_tab) => {
+                let (Some((ar, ac)), Some((cr, cc))) = (table_tab.cell_selection_anchor, table_tab.cell_selection_current) else { return };
+                let (min_r, max_r) = (ar.min(cr), ar.max(cr));
+                let (min_c, max_c) = (ac.min(cc), ac.max(cc));
+                let Some(ref preview) = table_tab.preview else { return };
+                let columns = table_visible_columns(table_tab);
+                let mut lines = Vec::new();
+                for row_idx in min_r..=max_r {
+                    let line: Vec<String> = (min_c..=max_c)
+                        .map(|col_idx| {
+                            columns.get(col_idx)
+                                .and_then(|col| preview.rows.get(row_idx).and_then(|row| row.get(col)))
+                                .map(|v| v.as_text().unwrap_or_default().to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    lines.push(line.join("\t"));
+                }
+                let row_count = lines.len();
+                let col_count = max_c - min_c + 1;
+                ctx.copy_text(lines.join("\n"));
+                self.status_message = tr!("已复制 {} 行, {} 列", row_count, col_count);
+            }
+            _ => {}
+        }
+    }
+
     fn copy_selected_columns(&mut self, ctx: &egui::Context) {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
@@ -12082,7 +12166,12 @@ impl eframe::App for DesktopApp {
             if self.sidebar_has_focus && self.selected_tree_item.is_some() {
                 let _ = self.copy_selected_sidebar_item(ctx);
             } else if !self.sidebar_has_focus {
-                self.copy_selected_columns(ctx);
+                // 矩形选区优先
+                if self.has_cell_selection() {
+                    self.copy_cells_to_clipboard(ctx);
+                } else {
+                    self.copy_selected_columns(ctx);
+                }
             }
         }
 
@@ -20577,8 +20666,8 @@ fn build_mongo_preview_cmd(
 ) -> String {
     let filter_doc = build_mongo_filter_doc(filter, definition);
     let effective_filter = match cursor_id {
-        Some(oid) if filter_doc == "{}" => format!("{{_id: ObjectId(\"{}\")}}", oid),
-        Some(oid) => format!("{{$and: [{}, {{_id: ObjectId(\"{}\")}}]}}", filter_doc, oid),
+        Some(oid) if filter_doc == "{}" => format!("{{_id: {{$gt: ObjectId(\"{}\")}}}}", oid),
+        Some(oid) => format!("{{$and: [{}, {{_id: {{$gt: ObjectId(\"{}\")}}}}]}}", filter_doc, oid),
         None => filter_doc,
     };
     let mut cmd = format!("db.{collection}.find({effective_filter})");

@@ -255,6 +255,7 @@ fn en(key: &'static str) -> &'static str {
         "已复制 {}" => "Copied {}",
         "已清除选择" => "Selection cleared",
         "已复制 {} 列, {} 行" => "Copied {} cols, {} rows",
+        "已复制 {} 行, {} 列" => "Copied {} rows, {} cols",
         "操作成功" => "Operation succeeded",
         "操作失败: {}" => "Operation failed: {}",
         "已切换为 {}" => "Switched to {}",
