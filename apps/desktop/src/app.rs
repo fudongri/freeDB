@@ -3950,6 +3950,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                         if !dragging {
                             response.context_menu(|ui| {
+                                ctx_menu_style(ui);
                                 // 新建数据库（仅已打开的连接可用）
                                 let kind = connection.kind;
                                 let is_connected = matches!(
@@ -4003,10 +4004,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.close();
                                 }
                                 ui.separator();
-                                let del_btn = egui::Button::new(
-                                    RichText::new(tr!("删除连接")).color(Color32::from_rgb(220, 53, 69))
-                                );
-                                if ui.add(del_btn).clicked() {
+                                if ui.button(tr!("删除连接")).clicked() {
                                     self.pending_delete_connection = Some((connection.id.clone(), false));
                                     ui.close();
                                 }
@@ -4373,6 +4371,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ui.add(egui::Spinner::new().size(14.0));
             }
             response.context_menu(|ui| {
+                ctx_menu_style(ui);
                 // Connection 节点：新建数据库（仅已打开的连接可用）
                 if matches!(node.node_type, ExplorerNodeType::Connection) {
                     let kind = self.database_kind_for_connection(&node.connection_id);
@@ -4462,7 +4461,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             } else {
                                 tr!("转储 ▸")
                             };
-                            ui.menu_button(dump_label, |ui| {
+                            ctx_menu_button(ui, dump_label, |ui| {
                                 if ui.button(tr!("仅结构")).clicked() {
                                     let conn_id = node.connection_id.clone();
                                     let k = self.database_kind_for_connection(&conn_id);
@@ -4493,10 +4492,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                             });
                             ui.separator();
-                            let delete_btn = egui::Button::new(
-                                RichText::new(tr!("删除数据库")).color(Color32::from_rgb(220, 53, 69))
-                            );
-                            if ui.add(delete_btn).clicked() {
+                            if ui.button(tr!("删除数据库")).clicked() {
                                 actions.push(SidebarAction::DdlDelete(DdlPendingDelete {
                                     title: tr!("删除数据库").into(),
                                     name: node.name.clone(),
@@ -4538,10 +4534,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.close();
                             }
                             ui.separator();
-                            let delete_btn = egui::Button::new(
-                                RichText::new(tr!("删除 Schema")).color(Color32::from_rgb(220, 53, 69))
-                            );
-                            if ui.add(delete_btn).clicked() {
+                            if ui.button(tr!("删除 Schema")).clicked() {
                                 actions.push(SidebarAction::DdlDelete(DdlPendingDelete {
                                     title: tr!("删除 Schema").into(),
                                     name: node.name.clone(),
@@ -4627,6 +4620,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             actions.push(SidebarAction::StartTreeRename(node.clone()));
                             ui.close();
                         }
+                        ui.separator();
                         let node_kind = self.database_kind_for_connection(&node.connection_id);
                         let dump_label = if node_kind == DatabaseKind::MongoDb {
                             tr!("转储数据 ▸")
@@ -4634,7 +4628,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             tr!("转储 ▸")
                         };
                         // 转储子菜单
-                        ui.menu_button(dump_label, |ui| {
+                        ctx_menu_button(ui, dump_label, |ui| {
                             if ui.button(tr!("仅结构")).clicked() {
                                 let conn_id = node.connection_id.clone();
                                 let kind = self.database_kind_for_connection(&conn_id);
@@ -4671,7 +4665,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         } else {
                             tr!("复制表 ▸")
                         };
-                        ui.menu_button(copy_label, |ui| {
+                        ctx_menu_button(ui, copy_label, |ui| {
                             if ui.button(tr!("仅结构")).clicked() {
                                 self.execute_copy_table(node, false);
                                 ui.close_menu();
@@ -4682,6 +4676,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             }
                         });
                         let is_view = matches!(node.node_type, ExplorerNodeType::View);
+                        ui.separator();
                         // 清空表/集合（视图不支持清空）
                         if !is_view {
                             let truncate_label = if kind == DatabaseKind::MongoDb {
@@ -4714,10 +4709,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         } else {
                             tr!("删除表")
                         };
-                        let delete_btn = egui::Button::new(
-                            RichText::new(del_label).color(Color32::from_rgb(220, 53, 69))
-                        );
-                        if ui.add(delete_btn).clicked() {
+                        if ui.button(del_label).clicked() {
                             let kind = self.database_kind_for_connection(&node.connection_id);
                             actions.push(SidebarAction::DdlDelete(DdlPendingDelete {
                                 title: del_label.into(),
@@ -4938,6 +4930,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                 }
                                                 interaction.tab_response.context_menu(|ui| {
+                                                    ctx_menu_style(ui);
                                                     if menu_button_with_shortcut(ui, tr!("关闭"), &format!("{}+W", MOD_KEY)) {
                                                         pending_close_tab = Some(index);
                                                         ui.close();
@@ -8200,7 +8193,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if mini_button(ui, tr!("新建查询"), MiniButtonKind::Accent).clicked() {
+                                        if toolbar_button(ui, tr!("新建查询"), ToolbarButtonKind::Accent).clicked() {
                                             action = TabUiAction::NewQueryFromTable {
                                                 connection_id: tab.table.connection_id.clone(),
                                                 database: tab.table.database.clone(),
@@ -8259,7 +8252,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         let mut column_btn_rect: Option<egui::Rect> = None;
                                         let mut gen_data_btn_rect: Option<egui::Rect> = None;
                                         ui.horizontal(|ui| {
-                                            if mini_button(ui, tr!("刷新"), MiniButtonKind::Subtle)
+                                            if toolbar_button(ui, tr!("刷新"), ToolbarButtonKind::Subtle)
                                                 .on_hover_text(tr!("刷新 ({}+R)", MOD_KEY))
                                                 .clicked()
                                             {
@@ -8268,7 +8261,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 action =
                                                     TabUiAction::RefreshActiveTable { reload_definition: true };
                                             }
-                                            if mini_button(ui, tr!("新增"), MiniButtonKind::Subtle).clicked() {
+                                            if toolbar_button(ui, tr!("新增"), ToolbarButtonKind::Subtle).clicked() {
                                                 let columns = table_editable_columns(tab);
                                                 tab.pending_insert_row =
                                                     Some(create_empty_insert_row(&columns));
@@ -8292,11 +8285,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_filter_summary(&tab.preview_filter)
                                                     .is_some();
                                             let filter_kind = if filter_active {
-                                                MiniButtonKind::Accent
+                                                ToolbarButtonKind::Accent
                                             } else {
-                                                MiniButtonKind::Subtle
+                                                ToolbarButtonKind::Subtle
                                             };
-                                            if mini_button(ui, tr!("筛选"), filter_kind).clicked() {
+                                            if toolbar_button(ui, tr!("筛选"), filter_kind).clicked() {
                                                 tab.show_preview_filter = !tab.show_preview_filter;
                                                 if tab.show_preview_filter {
                                                     tab.show_preview_sort = false;
@@ -8306,18 +8299,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_sort_summary(&tab.preview_sort)
                                                     .is_some();
                                             let sort_kind = if sort_active {
-                                                MiniButtonKind::Accent
+                                                ToolbarButtonKind::Accent
                                             } else {
-                                                MiniButtonKind::Subtle
+                                                ToolbarButtonKind::Subtle
                                             };
-                                            if mini_button(ui, tr!("排序"), sort_kind).clicked() {
+                                            if toolbar_button(ui, tr!("排序"), sort_kind).clicked() {
                                                 tab.show_preview_sort = !tab.show_preview_sort;
                                                 if tab.show_preview_sort {
                                                     tab.show_preview_filter = false;
                                                 }
                                             }
                                             let export_popup_id = egui::Id::new(("export-popup", &tab.id));
-                                            let export_btn = mini_button(ui, tr!("导出 ▾"), MiniButtonKind::Subtle);
+                                            let export_btn = toolbar_button(ui, tr!("导出 ▾"), ToolbarButtonKind::Subtle);
                                             if export_btn.clicked() {
                                                 let is_open = ui.memory(|m| m.is_popup_open(export_popup_id));
                                                 if is_open {
@@ -8350,11 +8343,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             );
                                             let all_columns = table_editable_columns(tab);
                                             let column_filter_kind = if !tab.hidden_columns.is_empty() {
-                                                MiniButtonKind::Accent
+                                                ToolbarButtonKind::Accent
                                             } else {
-                                                MiniButtonKind::Subtle
+                                                ToolbarButtonKind::Subtle
                                             };
-                                            let column_btn_response = mini_button(ui, tr!("列"), column_filter_kind);
+                                            let column_btn_response = toolbar_button(ui, tr!("列"), column_filter_kind);
                                             if column_btn_response.clicked() {
                                                 tab.show_column_filter = !tab.show_column_filter;
                                                 if tab.show_column_filter && tab.column_order.is_empty() {
@@ -8363,7 +8356,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                             column_btn_rect = Some(column_btn_response.rect);
                                             // 生成数据按钮
-                                            let gen_data_btn_response = mini_button(ui, tr!("生成数据"), MiniButtonKind::Subtle);
+                                            let gen_data_btn_response = toolbar_button(ui, tr!("生成数据"), ToolbarButtonKind::Subtle);
                                             gen_data_btn_rect = Some(gen_data_btn_response.rect);
                                             if gen_data_btn_response.clicked() {
                                                 tab.show_generate_data_popup = !tab.show_generate_data_popup;
@@ -8426,13 +8419,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                             if tab.pending_insert_row.is_some() {
                                                 ui.separator();
-                                                if mini_button(ui, tr!("取消新增"), MiniButtonKind::Danger)
+                                                if toolbar_button(ui, tr!("取消新增"), ToolbarButtonKind::Danger)
                                                     .clicked()
                                                 {
                                                     tab.pending_insert_row = None;
                                                     tab.editing_cell = None;
                                                 }
-                                                if mini_button(ui, tr!("保存新增"), MiniButtonKind::Accent).clicked()
+                                                if toolbar_button(ui, tr!("保存新增"), ToolbarButtonKind::Accent).clicked()
                                                 {
                                                     action = TabUiAction::SavePendingInsertRow;
                                                 }
@@ -14502,6 +14495,7 @@ fn render_result_table(
                                         ui.ctx().request_repaint();
                                     }
                                     response.context_menu(|ui| {
+                                        ctx_menu_style(ui);
                                         if !query_row_is_selected(selected_rows, selected_row, index) {
                                             set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
                                         } else {
@@ -14516,7 +14510,7 @@ fn render_result_table(
                                         } else {
                                             tr!("复制数据").into()
                                         };
-                                        ui.menu_button(copy_label, |ui| {
+                                        ctx_menu_button(ui, copy_label, |ui| {
                                             if ui.button(tr!("带表头复制")).clicked() {
                                                 pending_row_action.set(Some(TabUiAction::CopyQueryRowsAsTsv(selected_indices.clone(), display_columns.clone(), true)));
                                                 ui.close();
@@ -15158,6 +15152,7 @@ fn render_editable_result_table(
                                         ui.ctx().request_repaint();
                                     }
                                     response.context_menu(|ui| {
+                                        ctx_menu_style(ui);
                                         if !query_row_is_selected(selected_rows, selected_row, row_index) {
                                             set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
                                         } else {
@@ -15178,7 +15173,7 @@ fn render_editable_result_table(
                                         } else {
                                             tr!("复制数据").into()
                                         };
-                                        ui.menu_button(copy_label, |ui| {
+                                        ctx_menu_button(ui, copy_label, |ui| {
                                             if ui.button(tr!("带表头复制")).clicked() {
                                                 action.set(Some(TabUiAction::CopyQueryRowsAsTsv(selected_indices.clone(), display_columns.clone(), true)));
                                                 ui.close();
@@ -15523,6 +15518,7 @@ fn render_editable_result_table(
                                         }
                                         // 右键菜单
                                         response.context_menu(|ui| {
+                                            ctx_menu_style(ui);
                                             let has_cell_selection = cell_selection_anchor.is_some();
                                             if has_cell_selection {
                                                 let (ar, ac) = cell_selection_anchor.unwrap();
@@ -16279,6 +16275,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             ui.ctx().request_repaint();
                                         }
                                         response.context_menu(|ui| {
+                                            ctx_menu_style(ui);
                                             if !table_row_is_selected(tab, row_index) {
                                                 set_single_preview_selection(tab, row_index);
                                             } else {
@@ -16324,12 +16321,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 );
                                                 ui.close();
                                             }
+                                            ui.separator();
                                             let copy_tsv_label = if selected_count > 1 {
                                                 tr!("复制选中 {} 条数据", selected_count)
                                             } else {
                                                 tr!("复制数据").into()
                                             };
-                                            ui.menu_button(copy_tsv_label, |ui| {
+                                            ctx_menu_button(ui, copy_tsv_label, |ui| {
                                                 if ui.button(tr!("带表头复制")).clicked() {
                                                     action = TabUiAction::CopyActiveTableRowsAsTsv(selected_row_indices.clone(), true);
                                                     ui.close();
@@ -16344,7 +16342,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             } else {
                                                 tr!("复制为 INSERT 语句")
                                             };
-                                            ui.menu_button(copy_label, |ui| {
+                                            ctx_menu_button(ui, copy_label, |ui| {
                                                 if ui.button(tr!("完整复制")).clicked() {
                                                     action =
                                                         TabUiAction::CopyActiveTableRowsAsInsert(
@@ -16693,6 +16691,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             }
                                         }
                                         response.context_menu(|ui| {
+                                            ctx_menu_style(ui);
                                             if !table_row_is_selected(tab, row_index) {
                                                 set_single_preview_selection(tab, row_index);
                                             } else {
@@ -16806,6 +16805,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     ui.close();
                                                 }
                                             }
+                                            ui.separator();
                                                 if ui
                                                     .add_enabled(
                                                         !tab.table.is_view,
@@ -16822,12 +16822,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     );
                                                     ui.close();
                                                 }
+                                                ui.separator();
                                                 let copy_tsv_label = if selected_count > 1 {
                                                     tr!("复制选中 {} 条数据", selected_count)
                                                 } else {
                                                     tr!("复制数据").into()
                                                 };
-                                                ui.menu_button(copy_tsv_label, |ui| {
+                                                ctx_menu_button(ui, copy_tsv_label, |ui| {
                                                     if ui.button(tr!("带表头复制")).clicked() {
                                                         action = TabUiAction::CopyActiveTableRowsAsTsv(selected_row_indices.clone(), true);
                                                         ui.close();
@@ -16842,7 +16843,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 } else {
                                                     tr!("复制为 INSERT 语句")
                                                 };
-                                                ui.menu_button(copy_label, |ui| {
+                                                ctx_menu_button(ui, copy_label, |ui| {
                                                     if ui.button(tr!("完整复制")).clicked() {
                                                         action =
                                                             TabUiAction::CopyActiveTableRowsAsInsert(
@@ -16985,6 +16986,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     }
                                                 }
                                                 response.context_menu(|ui| {
+                                                    ctx_menu_style(ui);
                                                     if ui.button(tr!("保存新增")).clicked() {
                                                         action = TabUiAction::SavePendingInsertRow;
                                                         ui.close();
@@ -17023,6 +17025,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         }
                                                         ui.close();
                                                     }
+                                                    ui.separator();
                                                     if ui.button(tr!("取消新增")).clicked() {
                                                         should_cancel_pending_insert = true;
                                                         ui.close();
@@ -20013,14 +20016,14 @@ fn table_header_cell(
         column_clicked = true;
     }
     cell_response.context_menu(|ui| {
+        ctx_menu_style(ui);
         ui.set_min_width(120.0);
-        ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
         if ui.button(tr!("📋 复制字段名")).clicked() {
             ui.ctx().copy_text(text.to_string());
             ui.close();
         }
         if has_column_values {
-            ui.menu_button(tr!("复制整列为"), |ui| {
+            ctx_menu_button(ui, tr!("复制整列为"), |ui| {
                 if ui.button(tr!("复制列值")).clicked() {
                     copy_action = Some(TableHeaderCopyAction::CopyData);
                     ui.close();
@@ -23482,13 +23485,55 @@ struct TabButtonOutput {
 /// 渲染菜单项，右侧显示浅色快捷键提示
 fn menu_button_with_shortcut(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
     let chrome = mac_ui_palette(ui.visuals());
-    let weak = chrome.weak_text;
-    let font_id = FontId::new(13.0, FontFamily::Proportional);
-    let mut job = egui::text::LayoutJob::default();
-    job.append(label, 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
-    job.append("    ", 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
-    job.append(shortcut, 0.0, TextFormat { font_id, color: weak, ..Default::default() });
-    ui.button(job).clicked()
+    let font_id = FontId::new(14.0, FontFamily::Proportional);
+    let resp = ui.scope(|ui| {
+        let mut job = egui::text::LayoutJob::default();
+        job.append(label, 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
+        job.append("    ", 0.0, TextFormat { font_id: font_id.clone(), ..Default::default() });
+        job.append(shortcut, 0.0, TextFormat { font_id, color: chrome.weak_text, ..Default::default() });
+        ui.button(job)
+    });
+    resp.inner.clicked()
+}
+
+/// 设置右键菜单样式：加大字号，选中/悬停背景改为蓝色，增大间距和内边距
+fn ctx_menu_style(ui: &mut egui::Ui) {
+    let palette = mac_ui_palette(ui.visuals());
+    let font_id = FontId::new(14.0, FontFamily::Proportional);
+    ui.style_mut().text_styles.insert(egui::TextStyle::Body, font_id.clone());
+    ui.style_mut().text_styles.insert(egui::TextStyle::Button, font_id);
+    ui.style_mut().spacing.button_padding = egui::vec2(10.0, 5.0);
+    ui.spacing_mut().window_margin = egui::Margin::symmetric(6, 4);
+    ui.style_mut().visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, palette.text);
+    ui.style_mut().visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(0, 120, 215);
+    ui.style_mut().visuals.widgets.hovered.bg_fill = Color32::from_rgb(0, 120, 215);
+    ui.style_mut().visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+    ui.style_mut().visuals.widgets.active.weak_bg_fill = Color32::from_rgb(0, 96, 172);
+    ui.style_mut().visuals.widgets.active.bg_fill = Color32::from_rgb(0, 96, 172);
+    ui.style_mut().visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
+}
+
+/// 带蓝色高亮的子菜单按钮：当子菜单展开时父项保持蓝色背景，文字变为白色
+fn ctx_menu_button(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let label: egui::WidgetText = label.into();
+    let resp = ui.menu_button(label.clone(), |ui| {
+        ctx_menu_style(ui);
+        add_contents(ui);
+    });
+    if resp.inner.is_some() {
+        let rect = resp.response.rect;
+        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(0, 120, 215));
+        let text = label.text();
+        if !text.is_empty() {
+            let galley = ui.painter().layout_no_wrap(
+                text.to_string(),
+                FontId::new(14.0, FontFamily::Proportional),
+                Color32::WHITE,
+            );
+            let text_pos = rect.left_top() + egui::vec2(10.0, 5.0);
+            ui.painter().galley(text_pos, galley, Color32::WHITE);
+        }
+    }
 }
 
 fn tab_button(
@@ -25079,15 +25124,15 @@ fn render_query_editor(
                                 // 右键菜单：执行选中SQL
                                 let is_executing = tab.abort_sender.is_some();
                                 output.response.context_menu(|ui| {
+                                    ctx_menu_style(ui);
                                     let has_selection = tab.cursor_range
                                         .is_some_and(|r| !r.is_empty());
                                     let can_execute = has_selection && !is_executing;
                                     let chrome = mac_ui_palette(ui.visuals());
-                                    let weak = chrome.weak_text;
-                                    let font_id = FontId::new(13.0, FontFamily::Proportional);
+                                    let font_id = FontId::new(14.0, FontFamily::Proportional);
                                     let mut job = egui::text::LayoutJob::default();
                                     job.append(tr!("▶ 执行选中语句"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
-                                    job.append(&format!("    {}+R", MOD_KEY), 0.0, TextFormat { font_id: font_id.clone(), color: weak, ..Default::default() });
+                                    job.append(&format!("    {}+R", MOD_KEY), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.weak_text, ..Default::default() });
                                     if ui.add_enabled(can_execute, egui::Button::new(job)).clicked() {
                                         let selected = tab.cursor_range
                                             .and_then(|r| if !r.is_empty() { Some(r.slice_str(&tab.sql).to_string()) } else { None });
@@ -25098,7 +25143,7 @@ fn render_query_editor(
                                     let can_explain = !is_executing && (!tab.sql.trim().is_empty());
                                     let mut explain_job = egui::text::LayoutJob::default();
                                     explain_job.append(tr!("🔍 EXPLAIN 执行计划"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
-                                    explain_job.append(&format!("    {}+E", MOD_KEY), 0.0, TextFormat { font_id: font_id.clone(), color: weak, ..Default::default() });
+                                    explain_job.append(&format!("    {}+E", MOD_KEY), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.weak_text, ..Default::default() });
                                     if ui.add_enabled(can_explain, egui::Button::new(explain_job)).clicked() {
                                         let selected = tab.cursor_range
                                             .and_then(|r| if !r.is_empty() { Some(r.slice_str(&tab.sql).to_string()) } else { None });
@@ -25623,6 +25668,7 @@ fn render_saved_queries_panel(
                                 // 右键菜单
                                 if !is_dragging {
                                     item_response.context_menu(|ui| {
+                                        ctx_menu_style(ui);
                                         if ui.button(tr!("重命名")).clicked() {
                                             *action = TabUiAction::OpenRenameSavedQueryDialog((*entry).clone());
                                             ui.close();
