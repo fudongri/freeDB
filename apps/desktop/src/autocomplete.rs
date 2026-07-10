@@ -1330,20 +1330,20 @@ pub(crate) struct AutocompletePalette {
 pub(crate) fn autocomplete_palette(dark_mode: bool) -> AutocompletePalette {
     if dark_mode {
         AutocompletePalette {
-            popup_bg: Color32::from_rgb(40, 43, 48),
-            border: Color32::from_rgb(80, 85, 94),
-            text: Color32::from_rgb(214, 222, 235),
-            weak_text: Color32::from_rgb(108, 121, 145),
-            selected_bg: Color32::from_rgb(9, 71, 143),
-            selected_text: Color32::from_rgb(243, 247, 252),
+            popup_bg: Color32::from_rgb(40, 40, 42),
+            border: Color32::from_rgb(80, 80, 83),
+            text: Color32::from_rgb(220, 220, 220),
+            weak_text: Color32::from_rgb(110, 110, 112),
+            selected_bg: Color32::from_rgb(8, 68, 140),
+            selected_text: Color32::from_rgb(255, 255, 255),
         }
     } else {
         AutocompletePalette {
-            popup_bg: Color32::from_rgb(248, 249, 251),
-            border: Color32::from_rgb(200, 205, 215),
-            text: Color32::from_rgb(34, 42, 56),
-            weak_text: Color32::from_rgb(120, 132, 148),
-            selected_bg: Color32::from_rgb(9, 97, 215),
+            popup_bg: Color32::from_rgb(248, 248, 248),
+            border: Color32::from_rgb(205, 205, 205),
+            text: Color32::from_rgb(36, 36, 36),
+            weak_text: Color32::from_rgb(125, 125, 125),
+            selected_bg: Color32::from_rgb(8, 95, 212),
             selected_text: Color32::WHITE,
         }
     }

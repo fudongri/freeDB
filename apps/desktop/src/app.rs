@@ -22395,45 +22395,45 @@ struct MacDialogPalette {
 fn mac_dialog_palette(dark_mode: bool) -> MacDialogPalette {
     if dark_mode {
         MacDialogPalette {
-            window_bg: Color32::from_rgb(50, 53, 59),
-            border: Color32::from_rgb(84, 89, 98),
-            section_bg: Color32::from_rgb(60, 64, 71),
-            section_border: Color32::from_rgb(96, 101, 110),
-            input_bg: Color32::from_rgb(74, 79, 87),
-            input_hover_bg: Color32::from_rgb(82, 87, 96),
-            input_active_bg: Color32::from_rgb(88, 94, 103),
-            input_border: Color32::from_rgb(106, 112, 123),
-            title: Color32::from_rgb(248, 249, 251),
-            subtitle: Color32::from_rgb(194, 199, 208),
-            text: Color32::from_rgb(238, 241, 246),
-            weak_text: Color32::from_rgb(188, 194, 203),
+            window_bg: Color32::from_rgb(50, 50, 52),
+            border: Color32::from_rgb(84, 84, 86),
+            section_bg: Color32::from_rgb(58, 58, 60),
+            section_border: Color32::from_rgb(92, 92, 95),
+            input_bg: Color32::from_rgb(72, 72, 75),
+            input_hover_bg: Color32::from_rgb(80, 80, 83),
+            input_active_bg: Color32::from_rgb(86, 86, 89),
+            input_border: Color32::from_rgb(100, 100, 103),
+            title: Color32::from_rgb(255, 255, 255),
+            subtitle: Color32::from_rgb(190, 190, 190),
+            text: Color32::from_rgb(245, 245, 245),
+            weak_text: Color32::from_rgb(180, 180, 180),
             primary_button_bg: Color32::from_rgb(10, 132, 255),
-            primary_button_stroke: Color32::from_rgb(64, 157, 255),
+            primary_button_stroke: Color32::from_rgb(60, 150, 255),
             primary_button_text: Color32::WHITE,
-            secondary_button_bg: Color32::from_rgb(90, 96, 105),
-            secondary_button_stroke: Color32::from_rgb(117, 123, 133),
-            secondary_button_text: Color32::from_rgb(246, 247, 249),
+            secondary_button_bg: Color32::from_rgb(88, 88, 90),
+            secondary_button_stroke: Color32::from_rgb(110, 110, 112),
+            secondary_button_text: Color32::from_rgb(250, 250, 250),
         }
     } else {
         MacDialogPalette {
-            window_bg: Color32::from_rgb(246, 247, 249),
-            border: Color32::from_rgb(217, 222, 229),
-            section_bg: Color32::from_rgb(252, 252, 253),
-            section_border: Color32::from_rgb(226, 229, 235),
+            window_bg: Color32::from_rgb(246, 246, 246),
+            border: Color32::from_rgb(218, 218, 218),
+            section_bg: Color32::from_rgb(252, 252, 252),
+            section_border: Color32::from_rgb(226, 226, 226),
             input_bg: Color32::from_rgb(255, 255, 255),
             input_hover_bg: Color32::from_rgb(252, 253, 255),
             input_active_bg: Color32::from_rgb(255, 255, 255),
-            input_border: Color32::from_rgb(208, 214, 223),
-            title: Color32::from_rgb(35, 39, 46),
-            subtitle: Color32::from_rgb(103, 111, 122),
-            text: Color32::from_rgb(48, 54, 64),
+            input_border: Color32::from_rgb(210, 210, 210),
+            title: Color32::from_rgb(30, 30, 30),
+            subtitle: Color32::from_rgb(100, 100, 100),
+            text: Color32::from_rgb(40, 40, 40),
             weak_text: Color32::from_rgb(109, 118, 130),
             primary_button_bg: Color32::from_rgb(0, 122, 255),
             primary_button_stroke: Color32::from_rgb(0, 114, 240),
             primary_button_text: Color32::WHITE,
-            secondary_button_bg: Color32::from_rgb(238, 241, 245),
-            secondary_button_stroke: Color32::from_rgb(214, 220, 228),
-            secondary_button_text: Color32::from_rgb(57, 63, 74),
+            secondary_button_bg: Color32::from_rgb(240, 240, 240),
+            secondary_button_stroke: Color32::from_rgb(216, 216, 216),
+            secondary_button_text: Color32::from_rgb(50, 50, 50),
         }
     }
 }
@@ -22445,36 +22445,35 @@ fn app_visuals(use_dark_theme: bool) -> egui::Visuals {
         egui::Visuals::light()
     };
     if use_dark_theme {
-        visuals.panel_fill = Color32::from_rgb(56, 59, 66);
-        visuals.window_fill = Color32::from_rgb(52, 55, 61);
-        visuals.extreme_bg_color = Color32::from_rgb(74, 79, 87);
-        visuals.faint_bg_color = Color32::from_rgb(58, 62, 68);
-        visuals.code_bg_color = Color32::from_rgb(70, 75, 82);
-        visuals.override_text_color = Some(Color32::from_rgb(236, 239, 244));
-        visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(88, 94, 103));
-        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(60, 64, 70);
+        visuals.panel_fill = Color32::from_rgb(54, 54, 56);
+        visuals.window_fill = Color32::from_rgb(50, 50, 52);
+        visuals.extreme_bg_color = Color32::from_rgb(72, 72, 75);
+        visuals.faint_bg_color = Color32::from_rgb(58, 58, 60);
+        visuals.code_bg_color = Color32::from_rgb(68, 68, 70);
+        visuals.override_text_color = Some(Color32::from_rgb(245, 245, 245));
+        visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(86, 86, 89));
+        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(58, 58, 60);
         visuals.widgets.noninteractive.bg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(88, 94, 103));
+            Stroke::new(1.0, Color32::from_rgb(86, 86, 89));
         visuals.widgets.noninteractive.fg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(196, 201, 210));
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(74, 79, 87);
+            Stroke::new(1.0, Color32::from_rgb(190, 190, 190));
+        visuals.widgets.inactive.bg_fill = Color32::from_rgb(72, 72, 75);
         visuals.widgets.inactive.bg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(105, 111, 122));
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(82, 87, 95);
+            Stroke::new(1.0, Color32::from_rgb(100, 100, 103));
+        visuals.widgets.hovered.bg_fill = Color32::from_rgb(78, 78, 81);
         visuals.widgets.hovered.bg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(120, 146, 191));
-        visuals.widgets.active.bg_fill = Color32::from_rgb(88, 94, 103);
+            Stroke::new(1.0, Color32::from_rgb(100, 130, 170));
+        visuals.widgets.active.bg_fill = Color32::from_rgb(74, 74, 77);
         visuals.widgets.active.bg_stroke =
-            Stroke::new(1.2, Color32::from_rgb(124, 153, 200));
-        visuals.widgets.open.bg_fill = Color32::from_rgb(82, 87, 95);
+            Stroke::new(1.2, Color32::from_rgb(105, 135, 175));
+        visuals.widgets.open.bg_fill = Color32::from_rgb(78, 78, 81);
         visuals.widgets.open.bg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(110, 117, 127));
+            Stroke::new(1.0, Color32::from_rgb(100, 100, 103));
         visuals.selection.bg_fill = Color32::from_rgba_premultiplied(80, 138, 205, 100);
         visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgba_premultiplied(140, 175, 230, 130));
     } else {
-        // Light mode: use a transparent selection background so text remains readable
-        visuals.selection.bg_fill = Color32::from_rgba_premultiplied(144, 209, 255, 100);
-        visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 83, 125, 130));
+        visuals.selection.bg_fill = Color32::from_rgba_premultiplied(140, 200, 255, 100);
+        visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 80, 120, 130));
     }
     visuals
 }
@@ -24401,14 +24400,14 @@ fn tree_row_button(
 
 fn mac_sidebar_palette_dark() -> MacUiPalette {
     MacUiPalette {
-        sidebar_bg: Color32::from_rgb(40, 43, 48),
+        sidebar_bg: Color32::from_rgb(36, 36, 38),
         ..mac_ui_palette(&egui::Visuals::dark())
     }
 }
 
 fn mac_sidebar_palette_light() -> MacUiPalette {
     MacUiPalette {
-        sidebar_bg: Color32::from_rgb(230, 232, 235),
+        sidebar_bg: Color32::from_rgb(237, 237, 239),
         ..mac_ui_palette(&egui::Visuals::light())
     }
 }
@@ -24416,94 +24415,94 @@ fn mac_sidebar_palette_light() -> MacUiPalette {
 fn mac_ui_palette(visuals: &egui::Visuals) -> MacUiPalette {
     if visuals.dark_mode {
         MacUiPalette {
-            toolbar_bg: Color32::from_rgb(46, 49, 55),
-            sidebar_bg: Color32::from_rgb(40, 43, 49),
-            workspace_bg: Color32::from_rgb(58, 61, 68),
-            card_bg: Color32::from_rgb(55, 59, 65),
-            table_header_bg: Color32::from_rgb(61, 65, 72),
-            table_alt_bg: Color32::from_rgb(49, 52, 58),
-            search_bg: Color32::from_rgb(58, 62, 68),
-            border: Color32::from_rgb(91, 96, 106),
-            soft_border: Color32::from_rgb(72, 77, 86),
-            table_grid: Color32::from_rgb(75, 80, 88),
-            selection_bg: Color32::from_rgb(65, 115, 180),
-            selection_stroke: Color32::from_rgb(135, 170, 225),
-            selection_text: Color32::from_rgb(243, 247, 252),
-            expand_arrow: Color32::from_rgb(65, 115, 180),
-            text: Color32::from_rgb(236, 239, 244),
-            weak_text: Color32::from_rgb(188, 194, 203),
-            muted_dot: Color32::from_rgb(131, 137, 148),
-            success: Color32::from_rgb(70, 191, 128),
-            danger: Color32::from_rgb(255, 117, 117),
-            warning: Color32::from_rgb(255, 191, 71),
-            tab_idle_bg: Color32::from_rgb(54, 58, 64),
+            toolbar_bg: Color32::from_rgb(44, 44, 46),
+            sidebar_bg: Color32::from_rgb(38, 38, 40),
+            workspace_bg: Color32::from_rgb(56, 56, 58),
+            card_bg: Color32::from_rgb(54, 54, 56),
+            table_header_bg: Color32::from_rgb(62, 62, 64),
+            table_alt_bg: Color32::from_rgb(50, 50, 52),
+            search_bg: Color32::from_rgb(58, 58, 60),
+            border: Color32::from_rgb(86, 86, 89),
+            soft_border: Color32::from_rgb(70, 70, 73),
+            table_grid: Color32::from_rgb(74, 74, 77),
+            selection_bg: Color32::from_rgb(60, 110, 175),
+            selection_stroke: Color32::from_rgb(130, 165, 220),
+            selection_text: Color32::from_rgb(255, 255, 255),
+            expand_arrow: Color32::from_rgb(60, 110, 175),
+            text: Color32::from_rgb(245, 245, 245),
+            weak_text: Color32::from_rgb(180, 180, 180),
+            muted_dot: Color32::from_rgb(130, 130, 132),
+            success: Color32::from_rgb(68, 188, 125),
+            danger: Color32::from_rgb(255, 115, 115),
+            warning: Color32::from_rgb(255, 190, 70),
+            tab_idle_bg: Color32::from_rgb(52, 52, 54),
             primary_button_bg: Color32::from_rgb(10, 132, 255),
-            primary_button_stroke: Color32::from_rgb(70, 158, 255),
+            primary_button_stroke: Color32::from_rgb(65, 155, 255),
             primary_button_text: Color32::WHITE,
-            secondary_button_bg: Color32::from_rgb(72, 77, 85),
-            secondary_button_stroke: Color32::from_rgb(98, 104, 115),
-            secondary_button_text: Color32::from_rgb(240, 242, 246),
-            accent_button_bg: Color32::from_rgb(46, 138, 222),
-            accent_button_stroke: Color32::from_rgb(78, 170, 245),
+            secondary_button_bg: Color32::from_rgb(72, 72, 74),
+            secondary_button_stroke: Color32::from_rgb(92, 92, 95),
+            secondary_button_text: Color32::from_rgb(245, 245, 245),
+            accent_button_bg: Color32::from_rgb(45, 135, 220),
+            accent_button_stroke: Color32::from_rgb(75, 168, 242),
             accent_button_text: Color32::WHITE,
-            modified_button_bg: Color32::from_rgb(168, 142, 48),
-            modified_button_stroke: Color32::from_rgb(198, 172, 78),
+            modified_button_bg: Color32::from_rgb(165, 140, 46),
+            modified_button_stroke: Color32::from_rgb(195, 170, 75),
             modified_button_text: Color32::WHITE,
-            subtle_button_bg: Color32::from_rgb(54, 57, 63),
-            subtle_button_stroke: Color32::from_rgb(76, 81, 90),
-            subtle_button_text: Color32::from_rgb(206, 211, 220),
-            danger_button_bg: Color32::from_rgb(92, 58, 58),
-            danger_button_stroke: Color32::from_rgb(126, 74, 74),
-            danger_button_text: Color32::from_rgb(255, 229, 229),
-            hide_button_bg: Color32::from_rgb(45, 95, 95),
-            hide_button_stroke: Color32::from_rgb(70, 130, 130),
-            hide_button_text: Color32::from_rgb(210, 245, 245),
-            index_badge: Color32::from_rgb(70, 191, 128),
+            subtle_button_bg: Color32::from_rgb(52, 52, 54),
+            subtle_button_stroke: Color32::from_rgb(72, 72, 75),
+            subtle_button_text: Color32::from_rgb(200, 200, 200),
+            danger_button_bg: Color32::from_rgb(90, 56, 56),
+            danger_button_stroke: Color32::from_rgb(124, 72, 72),
+            danger_button_text: Color32::from_rgb(255, 230, 230),
+            hide_button_bg: Color32::from_rgb(43, 92, 92),
+            hide_button_stroke: Color32::from_rgb(68, 128, 128),
+            hide_button_text: Color32::from_rgb(210, 240, 240),
+            index_badge: Color32::from_rgb(68, 188, 125),
             new_row_bg: Color32::from_rgba_premultiplied(40, 80, 40, 60),
         }
     } else {
         MacUiPalette {
-            toolbar_bg: Color32::from_rgb(249, 250, 252),
-            sidebar_bg: Color32::from_rgb(238, 239, 241),
-            workspace_bg: Color32::from_rgb(250, 250, 251),
+            toolbar_bg: Color32::from_rgb(246, 246, 246),
+            sidebar_bg: Color32::from_rgb(237, 237, 239),
+            workspace_bg: Color32::from_rgb(249, 249, 249),
             card_bg: Color32::from_rgb(255, 255, 255),
-            table_header_bg: Color32::from_rgb(242, 244, 247),
-            table_alt_bg: Color32::from_rgb(249, 250, 252),
+            table_header_bg: Color32::from_rgb(243, 243, 243),
+            table_alt_bg: Color32::from_rgb(248, 248, 248),
             search_bg: Color32::from_rgb(255, 255, 255),
-            border: Color32::from_rgb(212, 216, 224),
-            soft_border: Color32::from_rgb(233, 236, 240),
-            table_grid: Color32::from_rgb(228, 232, 238),
-            selection_bg: Color32::from_rgb(205, 225, 252),
-            selection_stroke: Color32::from_rgb(127, 167, 226),
-            selection_text: Color32::from_rgb(22, 63, 126),
-            expand_arrow: Color32::from_rgb(70, 130, 200),
-            text: Color32::from_rgb(44, 52, 64),
-            weak_text: Color32::from_rgb(109, 118, 130),
-            muted_dot: Color32::from_rgb(150, 156, 166),
+            border: Color32::from_rgb(218, 218, 218),
+            soft_border: Color32::from_rgb(232, 232, 232),
+            table_grid: Color32::from_rgb(224, 224, 224),
+            selection_bg: Color32::from_rgb(200, 220, 250),
+            selection_stroke: Color32::from_rgb(125, 165, 225),
+            selection_text: Color32::from_rgb(20, 60, 120),
+            expand_arrow: Color32::from_rgb(68, 128, 200),
+            text: Color32::from_rgb(40, 40, 40),
+            weak_text: Color32::from_rgb(105, 105, 105),
+            muted_dot: Color32::from_rgb(152, 152, 152),
             success: Color32::from_rgb(48, 167, 104),
             danger: Color32::from_rgb(220, 86, 86),
             warning: Color32::from_rgb(255, 179, 25),
-            tab_idle_bg: Color32::from_rgb(244, 246, 249),
+            tab_idle_bg: Color32::from_rgb(245, 245, 245),
             primary_button_bg: Color32::from_rgb(0, 122, 255),
-            primary_button_stroke: Color32::from_rgb(0, 115, 239),
+            primary_button_stroke: Color32::from_rgb(0, 114, 238),
             primary_button_text: Color32::WHITE,
-            secondary_button_bg: Color32::from_rgb(242, 244, 247),
-            secondary_button_stroke: Color32::from_rgb(219, 224, 231),
-            secondary_button_text: Color32::from_rgb(58, 67, 79),
-            accent_button_bg: Color32::from_rgb(180, 210, 240),
-            accent_button_stroke: Color32::from_rgb(140, 185, 225),
-            accent_button_text: Color32::from_rgb(25, 90, 160),
+            secondary_button_bg: Color32::from_rgb(243, 243, 243),
+            secondary_button_stroke: Color32::from_rgb(220, 220, 220),
+            secondary_button_text: Color32::from_rgb(50, 50, 50),
+            accent_button_bg: Color32::from_rgb(178, 208, 238),
+            accent_button_stroke: Color32::from_rgb(138, 183, 222),
+            accent_button_text: Color32::from_rgb(24, 88, 158),
             modified_button_bg: Color32::from_rgb(255, 243, 176),
-            modified_button_stroke: Color32::from_rgb(230, 213, 120),
+            modified_button_stroke: Color32::from_rgb(228, 212, 118),
             modified_button_text: Color32::from_rgb(120, 100, 20),
-            subtle_button_bg: Color32::from_rgb(248, 249, 251),
-            subtle_button_stroke: Color32::from_rgb(228, 232, 238),
-            subtle_button_text: Color32::from_rgb(97, 106, 118),
+            subtle_button_bg: Color32::from_rgb(248, 248, 248),
+            subtle_button_stroke: Color32::from_rgb(228, 228, 228),
+            subtle_button_text: Color32::from_rgb(95, 95, 95),
             danger_button_bg: Color32::from_rgb(255, 225, 225),
-            danger_button_stroke: Color32::from_rgb(240, 186, 186),
+            danger_button_stroke: Color32::from_rgb(238, 185, 185),
             danger_button_text: Color32::from_rgb(180, 44, 44),
-            hide_button_bg: Color32::from_rgb(210, 240, 235),
-            hide_button_stroke: Color32::from_rgb(165, 210, 200),
+            hide_button_bg: Color32::from_rgb(208, 238, 233),
+            hide_button_stroke: Color32::from_rgb(163, 208, 198),
             hide_button_text: Color32::from_rgb(30, 100, 90),
             index_badge: Color32::from_rgb(48, 167, 104),
             new_row_bg: Color32::from_rgba_premultiplied(40, 80, 40, 45),
@@ -24686,31 +24685,31 @@ struct EditorPalette {
 fn editor_palette(visuals: &egui::Visuals) -> EditorPalette {
     if visuals.dark_mode {
         EditorPalette {
-            panel_bg: Color32::from_rgb(38, 42, 50),
-            editor_bg: Color32::from_rgb(44, 48, 54),
-            gutter_bg: Color32::from_rgb(41, 45, 51),
-            current_line_bg: Color32::from_rgb(38, 53, 75),
-            text: Color32::from_rgb(214, 222, 235),
-            line_number: Color32::from_rgb(108, 121, 145),
-            line_number_active: Color32::from_rgb(220, 228, 240),
-            keyword: Color32::from_rgb(86, 156, 214),
-            string: Color32::from_rgb(206, 145, 120),
-            number: Color32::from_rgb(181, 206, 168),
-            comment: Color32::from_rgb(106, 153, 85),
+            panel_bg: Color32::from_rgb(36, 36, 38),
+            editor_bg: Color32::from_rgb(42, 42, 44),
+            gutter_bg: Color32::from_rgb(40, 40, 42),
+            current_line_bg: Color32::from_rgb(36, 50, 72),
+            text: Color32::from_rgb(220, 220, 220),
+            line_number: Color32::from_rgb(110, 110, 112),
+            line_number_active: Color32::from_rgb(225, 225, 225),
+            keyword: Color32::from_rgb(85, 155, 212),
+            string: Color32::from_rgb(205, 143, 118),
+            number: Color32::from_rgb(180, 205, 166),
+            comment: Color32::from_rgb(105, 152, 84),
         }
     } else {
         EditorPalette {
-            panel_bg: Color32::from_rgb(248, 249, 251),
-            editor_bg: Color32::from_rgb(250, 251, 253),
-            gutter_bg: Color32::from_rgb(244, 246, 249),
+            panel_bg: Color32::from_rgb(248, 248, 248),
+            editor_bg: Color32::from_rgb(250, 250, 250),
+            gutter_bg: Color32::from_rgb(244, 244, 244),
             current_line_bg: Color32::from_rgb(228, 238, 252),
-            text: Color32::from_rgb(34, 42, 56),
-            line_number: Color32::from_rgb(120, 132, 148),
-            line_number_active: Color32::from_rgb(44, 72, 116),
-            keyword: Color32::from_rgb(0, 92, 197),
-            string: Color32::from_rgb(166, 88, 49),
-            number: Color32::from_rgb(56, 130, 84),
-            comment: Color32::from_rgb(105, 120, 105),
+            text: Color32::from_rgb(36, 36, 36),
+            line_number: Color32::from_rgb(125, 125, 125),
+            line_number_active: Color32::from_rgb(42, 70, 115),
+            keyword: Color32::from_rgb(0, 90, 195),
+            string: Color32::from_rgb(165, 86, 48),
+            number: Color32::from_rgb(55, 128, 82),
+            comment: Color32::from_rgb(108, 118, 108),
         }
     }
 }
