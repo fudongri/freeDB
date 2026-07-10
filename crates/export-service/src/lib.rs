@@ -21,7 +21,13 @@ impl ExportService {
                 .iter()
                 .map(|column| {
                     row.get(column)
-                        .map(|value| value.display_text().to_string())
+                        .map(|value| {
+                            if value.is_null() {
+                                String::new()
+                            } else {
+                                value.display_text().to_string()
+                            }
+                        })
                         .unwrap_or_default()
                 })
                 .collect::<Vec<_>>();

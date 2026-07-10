@@ -40,6 +40,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 unicode-width = "0.2"
+ui-theme = { path = "../../crates/ui-theme" }
 
 [build-dependencies]
 winres.workspace = true

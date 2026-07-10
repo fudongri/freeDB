@@ -1321,6 +1321,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ui-theme",
  "unicode-width",
  "uuid",
  "winres",
@@ -6044,6 +6045,13 @@ dependencies = [
  "memoffset",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ui-theme"
+version = "1.0.5"
+dependencies = [
+ "egui",
 ]
 
 [[package]]

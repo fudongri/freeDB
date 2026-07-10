@@ -1232,9 +1232,9 @@ pub(crate) fn render_autocomplete_popup(
                                 // Main label with matched character highlighting
                                 let label_font = FontId::new(13.0, FontFamily::Monospace);
                                 let highlight_color = if is_selected {
-                                    Color32::from_rgb(255, 255, 120) // bright yellow on dark selected bg
+                                    palette.match_yellow
                                 } else {
-                                    Color32::from_rgb(86, 156, 214) // VS Code-like blue for matches
+                                    palette.match_blue
                                 };
                                 let matched_set: std::collections::HashSet<usize> =
                                     suggestion.matched_indices.iter().copied().collect();
@@ -1324,29 +1324,28 @@ pub(crate) struct AutocompletePalette {
     pub weak_text: Color32,
     pub selected_bg: Color32,
     pub selected_text: Color32,
+    pub match_blue: Color32,
+    pub match_yellow: Color32,
+}
+
+impl From<&ui_theme::ThemeColors> for AutocompletePalette {
+    fn from(c: &ui_theme::ThemeColors) -> Self {
+        Self {
+            popup_bg: c.autocomplete_popup_bg,
+            border: c.autocomplete_border,
+            text: c.autocomplete_text,
+            weak_text: c.autocomplete_weak_text,
+            selected_bg: c.autocomplete_selected_bg,
+            selected_text: c.autocomplete_selected_text,
+            match_blue: c.autocomplete_match_blue,
+            match_yellow: c.autocomplete_match_yellow,
+        }
+    }
 }
 
 /// Derive autocomplete palette from the application theme.
 pub(crate) fn autocomplete_palette(dark_mode: bool) -> AutocompletePalette {
-    if dark_mode {
-        AutocompletePalette {
-            popup_bg: Color32::from_rgb(40, 40, 42),
-            border: Color32::from_rgb(80, 80, 83),
-            text: Color32::from_rgb(220, 220, 220),
-            weak_text: Color32::from_rgb(110, 110, 112),
-            selected_bg: Color32::from_rgb(8, 68, 140),
-            selected_text: Color32::from_rgb(255, 255, 255),
-        }
-    } else {
-        AutocompletePalette {
-            popup_bg: Color32::from_rgb(248, 248, 248),
-            border: Color32::from_rgb(205, 205, 205),
-            text: Color32::from_rgb(36, 36, 36),
-            weak_text: Color32::from_rgb(125, 125, 125),
-            selected_bg: Color32::from_rgb(8, 95, 212),
-            selected_text: Color32::WHITE,
-        }
-    }
+    AutocompletePalette::from(&ui_theme::Theme::new(dark_mode).colors)
 }
 
 #[cfg(test)]

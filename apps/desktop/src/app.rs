@@ -3772,7 +3772,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(4.0); // 右侧间距
                 let kind = if self.sidebar_active_only {
-                    MiniButtonKind::Accent
+                    MiniButtonKind::AccentActive
                 } else {
                     MiniButtonKind::Subtle
                 };
@@ -8288,7 +8288,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_filter_summary(&tab.preview_filter)
                                                     .is_some();
                                             let filter_kind = if filter_active {
-                                                ToolbarButtonKind::Accent
+                                                ToolbarButtonKind::AccentActive
                                             } else {
                                                 ToolbarButtonKind::Subtle
                                             };
@@ -8302,7 +8302,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_sort_summary(&tab.preview_sort)
                                                     .is_some();
                                             let sort_kind = if sort_active {
-                                                ToolbarButtonKind::Accent
+                                                ToolbarButtonKind::AccentActive
                                             } else {
                                                 ToolbarButtonKind::Subtle
                                             };
@@ -8346,7 +8346,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             );
                                             let all_columns = table_editable_columns(tab);
                                             let column_filter_kind = if !tab.hidden_columns.is_empty() {
-                                                ToolbarButtonKind::Accent
+                                                ToolbarButtonKind::AccentActive
                                             } else {
                                                 ToolbarButtonKind::Subtle
                                             };
@@ -8958,24 +8958,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                let btn_width = 60.0;
-                                                                if ui.add(
-                                                                    egui::Button::new(RichText::new(tr!("隐藏面板")).size(11.5).color(palette.hide_button_text))
-                                                                        .fill(palette.hide_button_bg)
-                                                                        .stroke(Stroke::new(1.0, palette.hide_button_stroke))
-                                                                        .corner_radius(4.0)
-                                                                        .min_size(Vec2::new(btn_width, 22.0)),
-                                                                ).clicked()
+                                                                if mini_button(ui, tr!("隐藏面板"), MiniButtonKind::Hide).clicked()
                                                                 {
                                                                     tab.show_preview_filter = false;
                                                                 }
-                                                                if ui.add(
-                                                                    egui::Button::new(RichText::new(tr!("清空")).size(11.5).color(palette.danger_button_text))
-                                                                        .fill(palette.danger_button_bg)
-                                                                        .stroke(Stroke::new(1.0, palette.danger_button_stroke))
-                                                                        .corner_radius(4.0)
-                                                                        .min_size(Vec2::new(btn_width, 22.0)),
-                                                                ).clicked()
+                                                                if mini_button(ui, tr!("清空"), MiniButtonKind::Danger).clicked()
                                                                 {
                                                                     tab.preview_filter =
                                                                         TableFilterState::default();
@@ -8990,14 +8977,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             reload_definition: false,
                                                                         };
                                                                 }
-                                                                if ui.add(
-                                                                    egui::Button::new(RichText::new(tr!("应用")).size(11.5).color(palette.accent_button_text))
-                                                                        .fill(palette.accent_button_bg)
-                                                                        .stroke(Stroke::new(1.0, palette.accent_button_stroke))
-                                                                        .corner_radius(4.0)
-                                                                        .min_size(Vec2::new(btn_width, 22.0)),
-                                                                ).on_hover_text(tr!("应用筛选 ({}+R)", MOD_KEY))
-                                                                .clicked()
+                                                                if mini_button(ui, tr!("应用"), MiniButtonKind::Accent)
+                                                                    .on_hover_text(tr!("应用筛选 ({}+R)", MOD_KEY))
+                                                                    .clicked()
                                                                 {
                                                                     tab.current_page = 0;
                                                                     tab.mongo_page_cursors.clear();
@@ -9188,7 +9170,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                if mini_button(ui, tr!("复制"), MiniButtonKind::Accent).clicked()
+                                                                if mini_button(ui, tr!("📋 复制"), MiniButtonKind::Subtle).clicked()
                                                                 {
                                                                     action =
                                                                         TabUiAction::CopyTextToClipboard {
@@ -9255,14 +9237,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                let btn_width = 60.0;
-                                                                if ui.add(
-                                                                    egui::Button::new(RichText::new(tr!("隐藏面板")).size(11.5).color(palette.hide_button_text))
-                                                                        .fill(palette.hide_button_bg)
-                                                                        .stroke(Stroke::new(1.0, palette.hide_button_stroke))
-                                                                        .corner_radius(4.0)
-                                                                        .min_size(Vec2::new(btn_width, 22.0)),
-                                                                ).clicked()
+                                                                if mini_button(ui, tr!("隐藏面板"), MiniButtonKind::Hide).clicked()
                                                                 {
                                                                     tab.show_preview_sort = false;
                                                                 }
@@ -9388,7 +9363,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                if mini_button(ui, tr!("复制"), MiniButtonKind::Accent).clicked()
+                                                                if mini_button(ui, tr!("📋 复制"), MiniButtonKind::Subtle).clicked()
                                                                 {
                                                                     action =
                                                                         TabUiAction::CopyTextToClipboard {
@@ -13384,6 +13359,7 @@ enum ToolbarButtonKind {
     Primary,
     Secondary,
     Accent,
+    AccentActive,
     AccentMuted,
     Subtle,
     Danger,
@@ -13394,6 +13370,8 @@ enum MiniButtonKind {
     Subtle,
     Danger,
     Accent,
+    AccentActive,
+    Hide,
 }
 
 #[derive(Clone, Copy)]
@@ -13436,6 +13414,9 @@ struct MacUiPalette {
     accent_button_bg: Color32,
     accent_button_stroke: Color32,
     accent_button_text: Color32,
+    accent_active_button_bg: Color32,
+    accent_active_button_stroke: Color32,
+    accent_active_button_text: Color32,
     modified_button_bg: Color32,
     modified_button_stroke: Color32,
     modified_button_text: Color32,
@@ -13485,6 +13466,9 @@ impl From<&ui_theme::ThemeColors> for MacUiPalette {
             accent_button_bg: c.accent_button_bg,
             accent_button_stroke: c.accent_button_stroke,
             accent_button_text: c.accent_button_text,
+            accent_active_button_bg: c.accent_active_button_bg,
+            accent_active_button_stroke: c.accent_active_button_stroke,
+            accent_active_button_text: c.accent_active_button_text,
             modified_button_bg: c.modified_button_bg,
             modified_button_stroke: c.modified_button_stroke,
             modified_button_text: c.modified_button_text,
@@ -18008,7 +17992,7 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
                         ui.separator();
                         ui.label(RichText::new(title).size(13.0).color(palette.weak_text));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if mini_button(ui, tr!("📋 复制"), MiniButtonKind::Accent).clicked() {
+                            if mini_button(ui, tr!("📋 复制"), MiniButtonKind::Subtle).clicked() {
                                 ui.ctx().copy_text(formatted_sql.clone());
                             }
                         });
@@ -23288,11 +23272,19 @@ fn toolbar_button_sized(
             palette.accent_button_text,
             Stroke::new(1.0, palette.accent_button_stroke),
         ),
-        ToolbarButtonKind::AccentMuted => (
-            blend_color(palette.accent_button_bg, palette.toolbar_bg, 0.40),
-            palette.accent_button_text,
-            Stroke::new(1.0, blend_color(palette.accent_button_stroke, palette.toolbar_bg, 0.40)),
+        ToolbarButtonKind::AccentActive => (
+            palette.accent_active_button_bg,
+            palette.accent_active_button_text,
+            Stroke::new(1.0, palette.accent_active_button_stroke),
         ),
+        ToolbarButtonKind::AccentMuted => {
+            let is_dark = ui.visuals().dark_mode;
+            if is_dark {
+                (Color32::from_rgb(35, 52, 58), Color32::from_rgb(100, 210, 255), Stroke::new(1.0, Color32::from_rgb(50, 80, 90)))
+            } else {
+                (Color32::from_rgb(230, 244, 250), Color32::from_rgb(55, 155, 200), Stroke::new(1.0, Color32::from_rgb(180, 220, 238)))
+            }
+        }
         ToolbarButtonKind::Subtle => (
             palette.subtle_button_bg,
             palette.subtle_button_text,
@@ -23459,6 +23451,19 @@ fn mini_button(ui: &mut egui::Ui, label: &str, kind: MiniButtonKind) -> egui::Re
             palette.accent_button_text,
             Stroke::new(1.0, palette.accent_button_stroke),
         ),
+        MiniButtonKind::AccentActive => (
+            palette.accent_active_button_bg,
+            palette.accent_active_button_text,
+            Stroke::new(1.0, palette.accent_active_button_stroke),
+        ),
+        MiniButtonKind::Hide => {
+            let is_dark = ui.visuals().dark_mode;
+            if is_dark {
+                (Color32::from_rgb(44, 44, 46), Color32::from_rgb(130, 155, 175), Stroke::new(1.0, Color32::from_rgb(130, 155, 175)))
+            } else {
+                (Color32::from_rgb(246, 246, 246), Color32::from_rgb(90, 120, 145), Stroke::new(1.0, Color32::from_rgb(90, 120, 145)))
+            }
+        }
     };
 
     ui.add(
