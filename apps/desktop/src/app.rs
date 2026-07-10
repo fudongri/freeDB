@@ -15301,6 +15301,7 @@ fn render_editable_result_table(
                                             // 拖拽开始：指针按下且在当前单元格内，无已有选区或点击了不同单元格
                                             if response.is_pointer_button_down_on()
                                                 && ui.input(|i| i.pointer.primary_pressed())
+                                                && !is_editing
                                                 && !*cell_selection_typing
                                                 && !*cell_selection_drag_started
                                                 && result_column_resize_drag.is_none()
@@ -16470,6 +16471,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 // 拖拽开始：指针按下且在当前单元格内，无已有选区或点击了不同单元格
                                                 if response.is_pointer_button_down_on()
                                                     && ui.input(|i| i.pointer.primary_pressed())
+                                                    && !is_editing
                                                     && !tab.cell_selection_typing
                                                     && !tab.cell_selection_drag_started
                                                     && tab.column_resize_drag.is_none()
@@ -20068,20 +20070,26 @@ fn table_body_cell(
         if display.monospace { FontFamily::Monospace } else { FontFamily::Proportional },
     );
     if !keyword.is_empty() && search_highlight {
+        let halign = match display.align {
+            TableCellAlign::Left => egui::Align::LEFT,
+            TableCellAlign::Center => egui::Align::Center,
+            TableCellAlign::Right => egui::Align::RIGHT,
+        };
         let job = highlight_search_text(
             &display.text,
             keyword,
             font_id,
             display_color,
             clipped_rect.width(),
-            egui::Align::LEFT,
+            halign,
         );
         let galley = ui.painter().layout_job(job);
-        ui.painter().galley(
-            egui::pos2(clipped_rect.left(), rect.center().y - galley.size().y * 0.5),
-            galley,
-            Color32::TRANSPARENT,
-        );
+        let pos = match display.align {
+            TableCellAlign::Left => egui::pos2(clipped_rect.left(), rect.center().y - galley.size().y * 0.5),
+            TableCellAlign::Center => egui::pos2(clipped_rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
+            TableCellAlign::Right => egui::pos2(clipped_rect.right() - galley.size().x, rect.center().y - galley.size().y * 0.5),
+        };
+        ui.painter().with_clip_rect(clipped_rect).galley(pos, galley, Color32::TRANSPARENT);
     } else {
         // 可选中的 Label，替换原来的 painter().text()
         let label = egui::Label::new(
@@ -20371,16 +20379,11 @@ fn highlight_search_text(
     keyword: &str,
     font_id: FontId,
     color: Color32,
-    available_width: f32,
-    halign: egui::Align,
+    _available_width: f32,
+    _halign: egui::Align,
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
-    job.halign = halign;
-    if available_width > 0.0 {
-        job.wrap.max_width = available_width;
-        job.wrap.max_rows = 1;
-        job.first_row_min_height = font_id.size;
-    }
+    // 不设 max_width / halign，让文本自然布局，由调用方根据 galley 尺寸手动计算位置
 
     if let Some((before, matched, after, _range)) = split_by_keyword(text, keyword) {
         let highlight_bg = Color32::from_rgb(255, 230, 0);
