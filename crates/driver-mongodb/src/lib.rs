@@ -633,7 +633,7 @@ async fn execute_mongo_command(
             }
             "insertOne" => {
                 let doc = parse_single_doc(&parsed.args)
-                    .ok_or_else(|| AppError::Validation("insertOne 需要一个文档参数".into()))?;
+                    .ok_or_else(|| AppError::Validation(tr!("insertOne 需要一个文档参数").into()))?;
                 let result = coll
                     .insert_one(doc)
                     .await
@@ -701,7 +701,7 @@ async fn execute_mongo_command(
             "updateOne" => {
                 let parts: Vec<_> = split_top_level_args(&parsed.args);
                 if parts.len() < 2 {
-                    return Err(AppError::Validation("updateOne 需要 filter 和 update 两个参数".into()));
+                    return Err(AppError::Validation(tr!("updateOne 需要 filter 和 update 两个参数").into()));
                 }
                 let filter = parse_jsonish_doc(parts[0])?;
                 let update = parse_jsonish_doc(parts[1])?;
@@ -720,7 +720,7 @@ async fn execute_mongo_command(
             "updateMany" => {
                 let parts: Vec<_> = split_top_level_args(&parsed.args);
                 if parts.len() < 2 {
-                    return Err(AppError::Validation("updateMany 需要 filter 和 update 两个参数".into()));
+                    return Err(AppError::Validation(tr!("updateMany 需要 filter 和 update 两个参数").into()));
                 }
                 let filter = parse_jsonish_doc(parts[0])?;
                 let update = parse_jsonish_doc(parts[1])?;
@@ -763,7 +763,7 @@ async fn execute_mongo_command(
         let name_part = inner.trim_start().trim_end_matches(')').trim();
         let name = name_part.trim_matches(|c| c == '"' || c == '\'');
         if name.is_empty() {
-            return Err(AppError::Validation("createCollection 需要集合名称".into()));
+            return Err(AppError::Validation(tr!("createCollection 需要集合名称").into()));
         }
         let db = client.database(db_name);
         db.create_collection(name)
@@ -1013,7 +1013,7 @@ fn split_top_level_args(s: &str) -> Vec<&str> {
 fn parse_jsonish_doc(input: &str) -> AppResult<Document> {
     let preprocessed = preprocess_mongo_json(input);
     let value: serde_json::Value = serde_json::from_str(&preprocessed)
-        .map_err(|e| AppError::Query(format!("JSON 解析错误: {e}")))?;
+        .map_err(|e| AppError::Query(tr!("JSON 解析错误: {}").replace("{}", &e.to_string())))?;
     match json_value_to_bson(value) {
         Bson::Document(doc) => Ok(doc),
         other => Ok(doc! { "_value": other }),

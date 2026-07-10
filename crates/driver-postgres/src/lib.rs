@@ -26,9 +26,7 @@ impl ConnectionProvider for PostgresDriver {
         password: &str,
         database: Option<&str>,
     ) -> AppResult<ConnectionHandle> {
-        let db = database
-            .or(profile.default_database.as_deref())
-            .unwrap_or("postgres");
+        let db = profile.default_database.as_deref().unwrap_or("postgres");
         let conn_str = format!(
             "host={} port={} user={} password={} dbname={}",
             profile.host, profile.port, profile.username, password, db
@@ -588,8 +586,18 @@ fn quote_pg(s: &str) -> String {
 }
 
 fn map_pg_error(e: tokio_postgres::Error) -> AppError {
-    if e.as_db_error().is_some() {
-        AppError::Query(e.to_string())
+    if let Some(db_err) = e.as_db_error() {
+        let mut msg = format!("{}: {}", db_err.severity(), db_err.message());
+        if let Some(detail) = db_err.detail() {
+            msg.push_str(&format!("\n{}: {}", tr!("详细"), detail));
+        }
+        if let Some(hint) = db_err.hint() {
+            msg.push_str(&format!("\n{}: {}", tr!("提示"), hint));
+        }
+        if let Some(position) = db_err.position() {
+            msg.push_str(&format!("\n{}: {:?}", tr!("位置"), position));
+        }
+        AppError::Query(msg)
     } else {
         AppError::Connection(e.to_string())
     }

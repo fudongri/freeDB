@@ -381,6 +381,11 @@ fn en(key: &'static str) -> &'static str {
         "查询完成，返回 {} 条记录" => "Query returned {} record(s)",
         "EXPLAIN 不支持的方法: {}" => "EXPLAIN does not support method: {}",
         "无法解析 MongoDB 命令。支持的语法: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])" => "Cannot parse MongoDB command. Supported syntax: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])",
+        "insertOne 需要一个文档参数" => "insertOne requires a document parameter",
+        "updateOne 需要 filter 和 update 两个参数" => "updateOne requires both filter and update parameters",
+        "updateMany 需要 filter 和 update 两个参数" => "updateMany requires both filter and update parameters",
+        "createCollection 需要集合名称" => "createCollection requires a collection name",
+        "JSON 解析错误: {}" => "JSON parse error: {}",
 
         // ── app-services.rs ──
         "测试连接需要密码" => "Password is required to test the connection",
@@ -718,6 +723,10 @@ fn en(key: &'static str) -> &'static str {
         "复制应用失败" => "Failed to copy application",
         "启动安装程序失败: {}" => "Failed to launch installer: {}",
         "自动更新暂不支持此平台" => "Auto-update is not supported on this platform",
+
+        "详细" => "Detail",
+        "提示" => "Hint",
+        "位置" => "Position",
 
         _ => key,
     }
