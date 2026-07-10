@@ -205,6 +205,7 @@ dependencies = [
  "export-service",
  "history-store",
  "i18n",
+ "metadata-cache",
  "parking_lot",
  "quick-xml 0.37.5",
  "secure-store",
@@ -1306,6 +1307,7 @@ dependencies = [
  "futures-util",
  "i18n",
  "image",
+ "metadata-cache",
  "muda",
  "open",
  "raw-window-handle",
@@ -3298,6 +3300,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "metadata-cache"
+version = "1.0.4"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "core-domain",
+ "parking_lot",
+ "rusqlite",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -1,5 +1,6 @@
 use app_services::AppServices;
 use i18n::{self, tr, Locale, get_locale, set_locale};
+use metadata_cache::CachedEntry;
 use core_domain::{
     ColumnDefinition, ConnectionProfile, ConnectionProfileInput, DatabaseKind, ExplorerNode,
     ExplorerNodeType, MongoValue, QueryCellValue, QueryExecution, QueryResult, SavedQueryEntry, SslMode,
@@ -105,6 +106,7 @@ pub struct DesktopApp {
     pending_query_edit_context: Option<QueryEditContextTrigger>,
     pending_schema_load: Option<Receiver<SchemaLoadResult>>,
     schema_cache: SchemaCache,
+    cache_loaded_connections: HashSet<String>,
     connection_test_result: Option<(bool, String)>,
     loading_connections: HashSet<String>,
     loading_nodes: HashSet<String>,
@@ -143,7 +145,7 @@ pub struct DesktopApp {
 
 struct SchemaLoadResult {
     connection_id: String,
-    tables: Result<Vec<(String, bool)>, String>,
+    tables: Result<Vec<ExplorerNode>, String>,
 }
 
 struct ConnectionTreeLoadResult {
@@ -1169,6 +1171,7 @@ impl DesktopApp {
             pending_query_edit_context: None,
             pending_schema_load: None,
             schema_cache: SchemaCache::new(),
+            cache_loaded_connections: HashSet::new(),
             connection_test_result: None,
             pending_database_list: None,
             loading_connections: HashSet::new(),
@@ -1344,6 +1347,26 @@ impl DesktopApp {
         });
     }
 
+    /// 确保指定连接的元数据缓存已加载到 schema_cache（仅首次加载）
+    fn ensure_metadata_cache(&mut self, connection_id: &str) {
+        if self.cache_loaded_connections.contains(connection_id) {
+            return;
+        }
+        self.cache_loaded_connections.insert(connection_id.to_string());
+        let cached = self.services.load_cached_metadata(connection_id);
+        for entry in &cached {
+            self.schema_cache.add_table(entry.table.clone(), entry.is_view);
+            if let Some(ref db) = entry.database {
+                self.schema_cache.add_table_to_database(db, entry.table.clone(), entry.is_view);
+                self.schema_cache.add_database(connection_id, db.clone());
+            }
+            if let Some(ref schema) = entry.schema {
+                self.schema_cache.add_table_to_schema(schema, entry.table.clone(), entry.is_view);
+                self.schema_cache.add_schema(connection_id, schema.clone());
+            }
+        }
+    }
+
     fn spawn_schema_load(&mut self, connection_id: String) {
         if self.pending_schema_load.is_some() {
             return;
@@ -1355,11 +1378,26 @@ impl DesktopApp {
         handle.spawn(async move {
             let tables = services
                 .load_all_schema_tables(&connection_id)
-                .await
-                .map_err(|error| error.to_string());
+                .await;
+
+            // 异步回写缓存（在后台线程，不阻塞 UI）
+            if let Ok(ref nodes) = tables {
+                let entries: Vec<CachedEntry> = nodes
+                    .iter()
+                    .map(|n| CachedEntry {
+                        database: n.database.clone(),
+                        schema: n.schema.clone(),
+                        table: n.name.clone(),
+                        is_view: matches!(n.node_type, ExplorerNodeType::View),
+                        columns: vec![],
+                    })
+                    .collect();
+                services.save_metadata_cache(&connection_id, &entries);
+            }
+
             let _ = sender.send(SchemaLoadResult {
                 connection_id,
-                tables,
+                tables: tables.map_err(|error| error.to_string()),
             });
         });
     }
@@ -1480,9 +1518,16 @@ impl DesktopApp {
         if let Some(receiver) = self.pending_schema_load.take() {
             match receiver.try_recv() {
                 Ok(message) => match message.tables {
-                    Ok(tables) => {
-                        for (name, is_view) in tables {
-                            self.schema_cache.add_table(name, is_view);
+                    Ok(nodes) => {
+                        for node in &nodes {
+                            let is_view = matches!(node.node_type, ExplorerNodeType::View);
+                            self.schema_cache.add_table(node.name.clone(), is_view);
+                            if let Some(ref db) = node.database {
+                                self.schema_cache.add_table_to_database(db, node.name.clone(), is_view);
+                            }
+                            if let Some(ref schema) = node.schema {
+                                self.schema_cache.add_table_to_schema(schema, node.name.clone(), is_view);
+                            }
                         }
                     }
                     Err(error) => {
@@ -1539,14 +1584,11 @@ impl DesktopApp {
                             self.selected_tree_item = Some(message.connection_id.clone());
                             // 双击打开连接后，数据库默认展开并加载子节点
                             self.expanded_nodes.insert(message.connection_id.clone());
-                            // 不自动展开数据库节点，等用户双击时再展开加载
+                            self.ensure_metadata_cache(&message.connection_id);
                             self.spawn_schema_load(message.connection_id.clone());
                             let name = self.connection_name(&message.connection_id);
                             self.status_message = tr!("已刷新连接 {}", name);
-                            // Also fetch database list for this connection
                             self.request_list_databases(Some(message.connection_id.clone()));
-                            // Async load all table/view names into schema cache (recursive)
-                            self.spawn_schema_load(message.connection_id.clone());
                         }
                         Err(error) => {
                             self.status_message = tr!("加载连接失败: {}", error);
@@ -2439,6 +2481,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             "connection_id={conn_id};node_id={node_id};elapsed_ms={elapsed_ms};error={error}"
                         ),
                     );
+                }
+            }
+            // 异步追加到缓存
+            if let Ok(ref children) = result {
+                let entries: Vec<CachedEntry> = children
+                    .iter()
+                    .filter(|n| matches!(n.node_type, ExplorerNodeType::Table | ExplorerNodeType::View))
+                    .map(|n| CachedEntry {
+                        database: n.database.clone(),
+                        schema: n.schema.clone(),
+                        table: n.name.clone(),
+                        is_view: matches!(n.node_type, ExplorerNodeType::View),
+                        columns: vec![],
+                    })
+                    .collect();
+                if !entries.is_empty() {
+                    services.merge_metadata_cache(&conn_id, &entries);
                 }
             }
             let _ = sender.send(NodeChildrenResult { node_id, result });
@@ -5028,6 +5087,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             _ => {}
         }
         ui.add_space(8.0);
+        // 在渲染前确保当前查询页的元数据缓存已加载
+        if let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) {
+            if let Some(ref cid) = tab.connection_id {
+                let cid = cid.clone();
+                self.ensure_metadata_cache(&cid);
+            }
+        }
         egui::Frame::new()
             .fill(palette.workspace_bg)
             .stroke(Stroke::NONE)
@@ -5121,12 +5187,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::ConnectionChanged {
                 connection_id,
             } => {
-                // 仅加载数据库列表以激活连接（不展开侧边栏）
                 if let Some(ref cid) = connection_id {
                     self.services.clear_user_disconnect(cid);
                     self.active_connections.entry(cid.clone()).or_default();
-                    if !self.database_cache.contains_key(cid) {
-                        self.request_list_databases(Some(cid.clone()));
+                    self.ensure_metadata_cache(cid);
+                    // 仅在连接已建立时发起网络请求，避免未连接时报错
+                    let connected = self.services.connection_status(cid).state
+                        == core_domain::ConnectionState::Connected;
+                    if connected {
+                        if !self.database_cache.contains_key(cid) {
+                            self.request_list_databases(Some(cid.clone()));
+                        }
+                        self.spawn_schema_load(cid.clone());
                     }
                 }
                 // Update active query tab
@@ -5469,11 +5541,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
             }
             TabUiAction::LoadSavedQuery(connection_id) => {
-                // 为查询页激活连接（不展开侧边栏）
                 self.services.clear_user_disconnect(&connection_id);
                 self.active_connections.entry(connection_id.clone()).or_default();
-                if !self.database_cache.contains_key(&connection_id) {
-                    self.request_list_databases(Some(connection_id.clone()));
+                self.ensure_metadata_cache(&connection_id);
+                let connected = self.services.connection_status(&connection_id).state
+                    == core_domain::ConnectionState::Connected;
+                if connected {
+                    if !self.database_cache.contains_key(&connection_id) {
+                        self.request_list_databases(Some(connection_id.clone()));
+                    }
+                    self.spawn_schema_load(connection_id.clone());
                 }
                 // 重新加载该连接的保存查询列表
                 let (history, saved_queries, all_saved_queries) =
@@ -12546,11 +12623,13 @@ impl eframe::App for DesktopApp {
                         tab.autocomplete.selected_index =
                             tab.autocomplete.selected_index.saturating_sub(1);
                         tab.autocomplete.clicked_index = None;
+                        tab.autocomplete.need_scroll_to_selected = true;
                     }
                     if arrow_down {
                         tab.autocomplete.selected_index = (tab.autocomplete.selected_index + 1)
                             .min(suggestion_count.saturating_sub(1));
                         tab.autocomplete.clicked_index = None;
+                        tab.autocomplete.need_scroll_to_selected = true;
                     }
                 }
             }
@@ -24562,6 +24641,12 @@ fn check_autocomplete_triggers(
         return;
     }
 
+    // 编辑器内容为空时关闭智能提示
+    if tab.sql.is_empty() {
+        tab.autocomplete.dismiss();
+        return;
+    }
+
     let ctx = ui.ctx();
 
     // Cmd+, shortcut
@@ -24600,20 +24685,19 @@ fn check_autocomplete_triggers(
     // Check debounced auto-trigger
     if let Some(last) = tab.autocomplete.last_keystroke {
         if last.elapsed() >= Duration::from_millis(300) {
-            let prefix = editor_output
+            let cursor = editor_output
                 .cursor_range
-                .map(|r| {
-                    SqlContextParser::current_token_prefix(
-                        &tab.sql,
-                        r.primary.index,
-                    )
-                })
-                .unwrap_or_default();
+                .map(|r| r.primary.index)
+                .unwrap_or(0);
+            // 刚输入 `.` 时不 dismiss，让 dot trigger 生效
+            let just_typed_dot = cursor > 0
+                && tab.sql.as_bytes().get(cursor.saturating_sub(1)) == Some(&b'.');
+            let prefix = SqlContextParser::current_token_prefix(&tab.sql, cursor);
             if prefix.len() >= 2 {
                 tab.autocomplete.trigger_requested = true;
                 tab.autocomplete.last_keystroke = None; // reset
-            } else {
-                tab.autocomplete.last_keystroke = None; // reset on too-short prefix too
+            } else if !just_typed_dot {
+                tab.autocomplete.dismiss();
             }
         }
     }

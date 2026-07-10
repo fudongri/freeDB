@@ -21,6 +21,11 @@ impl ConnectionStore {
         Ok(store)
     }
 
+    /// 返回共享的 SQLite 连接，供其他持久化模块复用
+    pub fn shared_conn(&self) -> Arc<Mutex<Connection>> {
+        self.connection.clone()
+    }
+
     pub fn list_connections(&self) -> Result<Vec<ConnectionProfile>> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(

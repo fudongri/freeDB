@@ -13,6 +13,7 @@ core-domain = { path = "../core-domain" }
 export-service = { path = "../export-service" }
 history-store = { path = "../history-store" }
 i18n = { path = "../i18n" }
+metadata-cache = { path = "../metadata-cache" }
 parking_lot.workspace = true
 quick-xml.workspace = true
 secure-store = { path = "../secure-store" }

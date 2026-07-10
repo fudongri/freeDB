@@ -1052,6 +1052,8 @@ pub(crate) struct AutocompleteState {
     pub trigger_requested: bool,
     /// Screen rect of the popup (for click-outside-to-dismiss).
     pub popup_rect: Option<egui::Rect>,
+    /// Set to true when selected_index changes via keyboard, triggers scroll_to_me once.
+    pub need_scroll_to_selected: bool,
 }
 
 impl AutocompleteState {
@@ -1062,6 +1064,7 @@ impl AutocompleteState {
         self.anchor_pos = None;
         self.popup_rect = None;
         self.trigger_requested = false;
+        self.need_scroll_to_selected = false;
     }
 }
 
@@ -1203,7 +1206,7 @@ pub(crate) fn render_autocomplete_popup(
                             let row_response = ui.interact(row_rect, row_id, Sense::click());
 
                             // Keep selected row visible when navigating with keyboard
-                            if is_selected {
+                            if is_selected && state.need_scroll_to_selected {
                                 row_response.scroll_to_me(None);
                             }
 
@@ -1297,6 +1300,8 @@ pub(crate) fn render_autocomplete_popup(
                             }
                         }
                     });
+                // Consume the flag after one frame so it only triggers once
+                state.need_scroll_to_selected = false;
             });
         });
 

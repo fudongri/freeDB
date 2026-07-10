@@ -10,6 +10,7 @@ use core_domain::{
 use export_service::ExportService;
 use history_store::HistoryStore;
 use i18n::tr;
+use metadata_cache::{CachedEntry, MetadataCache};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
 use secure_store::SecureStore;
@@ -25,14 +26,18 @@ pub struct AppServices {
     connection_store: ConnectionStore,
     history_store: HistoryStore,
     secure_store: SecureStore,
+    metadata_cache: MetadataCache,
     export_service: ExportService,
     session_manager: SessionManager,
 }
 
 impl AppServices {
     pub fn new() -> Result<Self> {
+        let connection_store = ConnectionStore::new()?;
+        let shared_conn = connection_store.shared_conn();
         Ok(Self {
-            connection_store: ConnectionStore::new()?,
+            metadata_cache: MetadataCache::new(shared_conn)?,
+            connection_store,
             history_store: HistoryStore::new()?,
             secure_store: SecureStore::new()?,
             export_service: ExportService,
@@ -167,7 +172,7 @@ impl AppServices {
     pub async fn load_all_schema_tables(
         &self,
         connection_id: &str,
-    ) -> Result<Vec<(String, bool)>> {
+    ) -> Result<Vec<ExplorerNode>> {
         let roots = self.load_connection_tree(connection_id).await?;
         let mut result = Vec::new();
         // BFS: Database → Schema (PG) → Table/View
@@ -175,8 +180,7 @@ impl AppServices {
         while let Some(node) = queue.pop() {
             match node.node_type {
                 core_domain::ExplorerNodeType::Table | core_domain::ExplorerNodeType::View => {
-                    let is_view = matches!(node.node_type, core_domain::ExplorerNodeType::View);
-                    result.push((node.name, is_view));
+                    result.push(node);
                 }
                 _ => {
                     let children = self
@@ -201,6 +205,24 @@ impl AppServices {
             .load_node_children(&profile, &password, node)
             .await
             .map_err(into_anyhow)
+    }
+
+    pub fn load_cached_metadata(&self, connection_id: &str) -> Vec<CachedEntry> {
+        self.metadata_cache
+            .load_for_connection(connection_id)
+            .unwrap_or_default()
+    }
+
+    pub fn save_metadata_cache(&self, connection_id: &str, entries: &[CachedEntry]) {
+        if let Err(error) = self.metadata_cache.save_for_connection(connection_id, entries) {
+            warn!(error = %error, "failed to save metadata cache");
+        }
+    }
+
+    pub fn merge_metadata_cache(&self, connection_id: &str, entries: &[CachedEntry]) {
+        if let Err(error) = self.metadata_cache.merge_for_connection(connection_id, entries) {
+            warn!(error = %error, "failed to merge metadata cache");
+        }
     }
 
     pub async fn search_objects(

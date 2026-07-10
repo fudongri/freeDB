@@ -12,6 +12,7 @@ members = [
     "crates/export-service",
     "crates/history-store",
     "crates/i18n",
+    "crates/metadata-cache",
     "crates/secure-store",
     "crates/session-manager",
 ]
