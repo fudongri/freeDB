@@ -70,6 +70,7 @@ pub struct DesktopApp {
     editing_connection_id: Option<String>,
     connection_form: ConnectionFormState,
     use_dark_theme: bool,
+    theme: ui_theme::Theme,
     zoom_factor: f32,
     icon_texture: Option<egui::TextureHandle>,
     pending_connection_tree: Option<Receiver<ConnectionTreeLoadResult>>,
@@ -1137,6 +1138,7 @@ impl DesktopApp {
             editing_connection_id: None,
             connection_form: ConnectionFormState::default(),
             use_dark_theme,
+            theme: if use_dark_theme { ui_theme::Theme::dark() } else { ui_theme::Theme::light() },
             zoom_factor,
             icon_texture: None,
             pending_connection_tree: None,
@@ -3625,7 +3627,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn render_toolbar(&mut self, ui: &mut egui::Ui) {
-        let palette = mac_ui_palette(ui.visuals());
+        let palette = MacUiPalette::from(&self.theme.colors);
         ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
         ui.horizontal(|ui| {
@@ -3733,6 +3735,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let theme_label = if self.use_dark_theme { tr!("切换浅色") } else { tr!("切换深色") };
                 if toolbar_button(ui, theme_label, ToolbarButtonKind::Subtle).clicked() {
                     self.use_dark_theme = !self.use_dark_theme;
+                    self.theme = if self.use_dark_theme { ui_theme::Theme::dark() } else { ui_theme::Theme::light() };
                     let _ = self
                         .services
                         .save_ui_state("theme", if self.use_dark_theme { "dark" } else { "light" });
@@ -3759,7 +3762,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn render_sidebar(&mut self, ui: &mut egui::Ui) {
-        let palette = mac_ui_palette(ui.visuals());
+        let palette = MacUiPalette::from(&self.theme.colors);
         let mut pending_actions = Vec::new();
         ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 3.0);
@@ -4253,7 +4256,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         actions: &mut Vec<SidebarAction>,
         under_user_expanded: bool,
     ) {
-        let palette = mac_ui_palette(ui.visuals());
+        let palette = MacUiPalette::from(&self.theme.colors);
         let keyword = self.committed_search.to_ascii_lowercase();
         let is_searching = !keyword.is_empty();
         let node_matches = node.name.to_ascii_lowercase().contains(&keyword);
@@ -4816,7 +4819,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn render_tabs(&mut self, ui: &mut egui::Ui) {
-        let palette = mac_ui_palette(ui.visuals());
+        let palette = MacUiPalette::from(&self.theme.colors);
         let mut pending_active_tab = None;
         let mut pending_close_tab = None;
         let mut drag_source = self.tab_drag_source;
@@ -5154,7 +5157,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn render_dashboard_tab(&self, ui: &mut egui::Ui) {
         let visuals = ui.visuals();
-        let palette = mac_ui_palette(visuals);
+        let palette = MacUiPalette::from(&self.theme.colors);
         let bg = palette.workspace_bg;
         let text_color = palette.text;
         let sub_color = palette.weak_text;
@@ -7635,7 +7638,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 });
                                                                 row.col(|ui| {
                                                                     let sql_clone = sql_text.clone();
-                                                                    if toolbar_button(ui, tr!("查看"), ToolbarButtonKind::Subtle).clicked() {
+                                                                    if mini_button(ui, tr!("查看"), MiniButtonKind::Subtle).clicked() {
                                                                         tab.sql = sql_clone;
                                                                     }
                                                                 });
@@ -8498,14 +8501,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                         let mut visible = !tab.hidden_columns.contains(&col_name);
                                                                         ui.horizontal(|ui| {
                                                                             let up_clicked = if i > 0 {
-                                                                                ui.small_button("▲").clicked()
+                                                                                mini_button(ui, "▲", MiniButtonKind::Subtle).clicked()
                                                                             } else {
-                                                                                ui.add_enabled(false, egui::Button::new(RichText::new("▲").size(10.0))).clicked()
+                                                                                ui.add_enabled(false, egui::Button::new(RichText::new("▲").size(11.5).color(palette.weak_text)).fill(palette.subtle_button_bg).stroke(Stroke::new(1.0, palette.subtle_button_stroke)).corner_radius(4.0).min_size(Vec2::new(34.0, 22.0))).clicked()
                                                                             };
                                                                             let down_clicked = if i + 1 < order_len {
-                                                                                ui.small_button("▼").clicked()
+                                                                                mini_button(ui, "▼", MiniButtonKind::Subtle).clicked()
                                                                             } else {
-                                                                                ui.add_enabled(false, egui::Button::new(RichText::new("▼").size(10.0))).clicked()
+                                                                                ui.add_enabled(false, egui::Button::new(RichText::new("▼").size(11.5).color(palette.weak_text)).fill(palette.subtle_button_bg).stroke(Stroke::new(1.0, palette.subtle_button_stroke)).corner_radius(4.0).min_size(Vec2::new(34.0, 22.0))).clicked()
                                                                             };
                                                                             if up_clicked {
                                                                                 reorder_request = Some((i, -1));
@@ -9185,14 +9188,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                let btn_width = 50.0;
-                                                                if ui.add(
-                                                                    egui::Button::new(RichText::new(tr!("复制")).size(11.5).color(Color32::WHITE))
-                                                                        .fill(Color32::from_rgb(56, 108, 176))
-                                                                        .stroke(Stroke::new(1.0, Color32::from_rgb(76, 128, 196)))
-                                                                        .corner_radius(4.0)
-                                                                        .min_size(Vec2::new(btn_width, 22.0)),
-                                                                ).clicked()
+                                                                if mini_button(ui, tr!("复制"), MiniButtonKind::Accent).clicked()
                                                                 {
                                                                     action =
                                                                         TabUiAction::CopyTextToClipboard {
@@ -9270,13 +9266,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 {
                                                                     tab.show_preview_sort = false;
                                                                 }
-                                                                if ui.add(
-                                                                    egui::Button::new(RichText::new(tr!("清空")).size(11.5).color(palette.danger_button_text))
-                                                                        .fill(palette.danger_button_bg)
-                                                                        .stroke(Stroke::new(1.0, palette.danger_button_stroke))
-                                                                        .corner_radius(4.0)
-                                                                        .min_size(Vec2::new(btn_width, 22.0)),
-                                                                ).clicked()
+                                                                if mini_button(ui, tr!("清空"), MiniButtonKind::Danger).clicked()
                                                                 {
                                                                     clear_table_sort_state(&mut tab.preview_sort);
                                                                     tab.current_page = 0;
@@ -9286,13 +9276,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             reload_definition: false,
                                                                         };
                                                                 }
-                                                                if ui.add(
-                                                                    egui::Button::new(RichText::new(tr!("应用")).size(11.5).color(palette.accent_button_text))
-                                                                        .fill(palette.accent_button_bg)
-                                                                        .stroke(Stroke::new(1.0, palette.accent_button_stroke))
-                                                                        .corner_radius(4.0)
-                                                                        .min_size(Vec2::new(btn_width, 22.0)),
-                                                                ).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
+                                                                if mini_button(ui, tr!("应用"), MiniButtonKind::Accent).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
                                                                 .clicked()
                                                                 {
                                                                     tab.current_page = 0;
@@ -9404,14 +9388,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                let btn_width = 50.0;
-                                                                if ui.add(
-                                                                    egui::Button::new(RichText::new(tr!("复制")).size(11.5).color(Color32::WHITE))
-                                                                        .fill(Color32::from_rgb(56, 108, 176))
-                                                                        .stroke(Stroke::new(1.0, Color32::from_rgb(76, 128, 196)))
-                                                                        .corner_radius(4.0)
-                                                                        .min_size(Vec2::new(btn_width, 22.0)),
-                                                                ).clicked()
+                                                                if mini_button(ui, tr!("复制"), MiniButtonKind::Accent).clicked()
                                                                 {
                                                                     action =
                                                                         TabUiAction::CopyTextToClipboard {
@@ -9682,7 +9659,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn render_status_bar(&mut self, ui: &mut egui::Ui) {
-        let palette = mac_ui_palette(ui.visuals());
+        let palette = MacUiPalette::from(&self.theme.colors);
         ui.horizontal_wrapped(|ui| {
             let color = match self.status_level {
                 StatusLevel::Pending => palette.selection_text,
@@ -9710,7 +9687,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         } else {
             tr!("新建连接")
         };
-        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let palette = MacDialogPalette::from(&self.theme.colors);
         egui::Window::new(if self.editing_connection_id.is_some() {
             tr!("编辑连接")
         } else {
@@ -9881,7 +9858,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                 ui.add_space(12.0);
                 if let Some((success, msg)) = &self.connection_test_result {
-                    let ui_palette = mac_ui_palette(&ctx.style().visuals);
+                    let ui_palette = MacUiPalette::from(&self.theme.colors);
                     let color = if *success {
                         ui_palette.success
                     } else {
@@ -9979,7 +9956,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
         }
 
-        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let palette = MacDialogPalette::from(&self.theme.colors);
         let is_dark = ctx.style().visuals.dark_mode;
         let mut should_close = false;
         let mut should_confirm = false;
@@ -10176,7 +10153,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let Some(dialog) = self.pending_saved_query_dialog.as_mut() else {
             return;
         };
-        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let palette = MacDialogPalette::from(&self.theme.colors);
         let mut should_close = false;
         let mut confirmed = false;
 
@@ -10395,7 +10372,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             has_current_edit = false;
         }
 
-        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let palette = MacDialogPalette::from(&self.theme.colors);
         let is_dark = ctx.style().visuals.dark_mode;
         let saving = self.batch_save_saving;
         let mut should_close = false;
@@ -10730,7 +10707,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
         }
         let total_sql = sql_statements.len();
-        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let palette = MacDialogPalette::from(&self.theme.colors);
         let is_dark = ctx.style().visuals.dark_mode;
         let mut should_close = false;
         let mut should_confirm = false;
@@ -10909,7 +10886,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 .unwrap_or(DatabaseKind::MySql);
             (is_create_db, db_kind, dialog.title.clone(), dialog.placeholder.clone(), dialog.confirm_on_enter, dialog.action.clone())
         };
-        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let palette = MacDialogPalette::from(&self.theme.colors);
         let is_dark = ctx.style().visuals.dark_mode;
         let mut should_close = false;
         let mut should_confirm = false;
@@ -11090,7 +11067,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn render_ddl_delete_dialog(&mut self, ctx: &egui::Context) {
         let Some(ref pending) = self.ddl_pending_delete else { return };
-        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let palette = MacDialogPalette::from(&self.theme.colors);
         let is_dark = ctx.style().visuals.dark_mode;
         let mut should_close = false;
         let mut should_confirm = false;
@@ -11181,7 +11158,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let Some((ref conn_id, confirm_on_enter)) = self.pending_delete_connection else { return };
         let conn_name = self.connection_name(conn_id);
         let conn_id = conn_id.clone();
-        let palette = mac_dialog_palette(ctx.style().visuals.dark_mode);
+        let palette = MacDialogPalette::from(&self.theme.colors);
         let is_dark = ctx.style().visuals.dark_mode;
         let mut should_close = false;
         let mut should_confirm = false;
@@ -11794,7 +11771,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{:.1}x", self.scroll_speed)).size(11.0));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button(tr!("默认")).clicked() {
+                                if mini_button(ui, tr!("默认"), MiniButtonKind::Subtle).clicked() {
                                     self.scroll_speed = if cfg!(target_os = "macos") { 5.0 } else { 7.0 };
                                 }
                             });
@@ -12238,7 +12215,7 @@ impl eframe::App for DesktopApp {
             .exact_height(40.0)
             .frame(
                 egui::Frame::NONE
-                    .fill(mac_ui_palette(&ctx.style().visuals).toolbar_bg)
+                    .fill(MacUiPalette::from(&self.theme.colors).toolbar_bg)
                     .inner_margin(egui::vec2(0.0, 7.0)),
             )
             .show(ctx, |ui| self.render_toolbar(ui));
@@ -12303,7 +12280,7 @@ impl eframe::App for DesktopApp {
                                 }
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("✕").clicked() {
+                                if mini_button(ui, "✕", MiniButtonKind::Subtle).clicked() {
                                     pending_update_action = Some(UpdateAction::Dismiss);
                                 }
                             });
@@ -12332,11 +12309,7 @@ impl eframe::App for DesktopApp {
             None => {}
         }
 
-        let palette = if ctx.style().visuals.dark_mode {
-            mac_sidebar_palette_dark()
-        } else {
-            mac_sidebar_palette_light()
-        };
+        let palette = mac_sidebar_palette(ctx.style().visuals.dark_mode);
         let half_screen = ctx.viewport_rect().width() / 2.0;
         // 全局预消费 Enter/Esc：仅在侧边栏持有焦点（且搜索框无焦点）时才预消费，
         // 否则让 TextEdit (如 SQL 编辑器、侧边栏搜索框) 正常接收 Enter。
@@ -12823,7 +12796,7 @@ impl eframe::App for DesktopApp {
         if let Some(ref dragged_node) = self.node_drag_source.clone() {
             let pointer_pos = ctx.input(|i| i.pointer.hover_pos()).unwrap_or_default();
             let node_name = &dragged_node.name;
-            let palette = mac_ui_palette(&ctx.style().visuals);
+            let palette = MacUiPalette::from(&self.theme.colors);
 
             // 幽灵名称跟随鼠标
             egui::Area::new("node-drag-ghost".into())
@@ -12898,7 +12871,7 @@ impl eframe::App for DesktopApp {
         // 连接拖拽幽灵名称渲染
         if let Some(ref drag_id) = self.sidebar_drag_source.clone() {
             let pointer_pos = ctx.input(|i| i.pointer.hover_pos()).unwrap_or_default();
-            let palette = mac_ui_palette(&ctx.style().visuals);
+            let palette = MacUiPalette::from(&self.theme.colors);
             // 从连接列表中获取连接名称
             let conn_name = self.connections.iter()
                 .find(|c| &c.id == drag_id)
@@ -12940,7 +12913,7 @@ impl eframe::App for DesktopApp {
         };
         if let Some((_, ref query_title)) = saved_query_ghost {
             let pointer_pos = ctx.input(|i| i.pointer.hover_pos()).unwrap_or_default();
-            let palette = mac_ui_palette(&ctx.style().visuals);
+            let palette = MacUiPalette::from(&self.theme.colors);
             egui::Area::new("saved-query-drag-ghost".into())
                 .order(egui::Order::Foreground)
                 .fixed_pos(pointer_pos + egui::vec2(12.0, -12.0))
@@ -13477,6 +13450,57 @@ struct MacUiPalette {
     hide_button_text: Color32,
     index_badge: Color32,
     new_row_bg: Color32,
+}
+
+impl From<&ui_theme::ThemeColors> for MacUiPalette {
+    fn from(c: &ui_theme::ThemeColors) -> Self {
+        Self {
+            toolbar_bg: c.toolbar_bg,
+            sidebar_bg: c.sidebar_bg,
+            workspace_bg: c.workspace_bg,
+            card_bg: c.card_bg,
+            table_header_bg: c.table_header_bg,
+            table_alt_bg: c.table_alt_bg,
+            search_bg: c.search_bg,
+            border: c.border,
+            soft_border: c.soft_border,
+            table_grid: c.table_grid,
+            selection_bg: c.selection_bg,
+            selection_stroke: c.selection_stroke,
+            selection_text: c.selection_text,
+            expand_arrow: c.expand_arrow,
+            text: c.text,
+            weak_text: c.weak_text,
+            muted_dot: c.muted_dot,
+            success: c.success,
+            danger: c.danger,
+            warning: c.warning,
+            tab_idle_bg: c.tab_idle_bg,
+            primary_button_bg: c.primary_button_bg,
+            primary_button_stroke: c.primary_button_stroke,
+            primary_button_text: c.primary_button_text,
+            secondary_button_bg: c.secondary_button_bg,
+            secondary_button_stroke: c.secondary_button_stroke,
+            secondary_button_text: c.secondary_button_text,
+            accent_button_bg: c.accent_button_bg,
+            accent_button_stroke: c.accent_button_stroke,
+            accent_button_text: c.accent_button_text,
+            modified_button_bg: c.modified_button_bg,
+            modified_button_stroke: c.modified_button_stroke,
+            modified_button_text: c.modified_button_text,
+            subtle_button_bg: c.subtle_button_bg,
+            subtle_button_stroke: c.subtle_button_stroke,
+            subtle_button_text: c.subtle_button_text,
+            danger_button_bg: c.danger_button_bg,
+            danger_button_stroke: c.danger_button_stroke,
+            danger_button_text: c.danger_button_text,
+            hide_button_bg: c.hide_button_bg,
+            hide_button_stroke: c.hide_button_stroke,
+            hide_button_text: c.hide_button_text,
+            index_badge: c.index_badge,
+            new_row_bg: c.new_row_bg,
+        }
+    }
 }
 
 impl QueryBottomTab {
@@ -17959,7 +17983,7 @@ fn table_cell_content_rect(rect: egui::Rect) -> egui::Rect {
 
 fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) {
     let palette = mac_ui_palette(ui.visuals());
-    let editor = definition_editor_palette(ui.visuals());
+    let editor = editor_palette(ui.visuals());
     let code_font_size = 13.0;
     let line_number_font_size = 11.0;
     let formatted_sql = format_definition_sql(create_sql);
@@ -18934,7 +18958,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                 RichText::new(tr!("💾 保存")).size(12.5).color(palette.weak_text),
             )
             .fill(palette.subtle_button_bg)
-            .stroke(Stroke::new(1.0, palette.soft_border))
+            .stroke(Stroke::new(1.0, palette.subtle_button_stroke))
             .corner_radius(5.0)
             .min_size(Vec2::new(0.0, 26.0));
             ui.add_enabled(false, btn);
@@ -19699,7 +19723,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
                 RichText::new(tr!("💾 保存")).size(12.5).color(palette.weak_text),
             )
             .fill(palette.subtle_button_bg)
-            .stroke(Stroke::new(1.0, palette.soft_border))
+            .stroke(Stroke::new(1.0, palette.subtle_button_stroke))
             .corner_radius(5.0)
             .min_size(Vec2::new(0.0, 26.0));
             ui.add_enabled(false, btn);
@@ -20567,12 +20591,12 @@ fn render_editor_find_bar(
 
                     // 展开/收起替换
                     let repl_btn_label = if tab.find.show_replace { tr!("替换▲") } else { tr!("替换▼") };
-                    if ui.button(RichText::new(repl_btn_label).size(12.0)).clicked() {
+                    if mini_button(ui, &repl_btn_label, MiniButtonKind::Subtle).clicked() {
                         tab.find.show_replace = !tab.find.show_replace;
                     }
 
                     // 关闭
-                    if ui.button(RichText::new("✕").size(12.0)).clicked() {
+                    if mini_button(ui, "✕", MiniButtonKind::Subtle).clicked() {
                         tab.find.open = false;
                         tab.find.find_text.clear();
                         tab.find.replace_text.clear();
@@ -22392,104 +22416,79 @@ struct MacDialogPalette {
     secondary_button_text: Color32,
 }
 
-fn mac_dialog_palette(dark_mode: bool) -> MacDialogPalette {
-    if dark_mode {
-        MacDialogPalette {
-            window_bg: Color32::from_rgb(50, 50, 52),
-            border: Color32::from_rgb(84, 84, 86),
-            section_bg: Color32::from_rgb(58, 58, 60),
-            section_border: Color32::from_rgb(92, 92, 95),
-            input_bg: Color32::from_rgb(72, 72, 75),
-            input_hover_bg: Color32::from_rgb(80, 80, 83),
-            input_active_bg: Color32::from_rgb(86, 86, 89),
-            input_border: Color32::from_rgb(100, 100, 103),
-            title: Color32::from_rgb(255, 255, 255),
-            subtitle: Color32::from_rgb(190, 190, 190),
-            text: Color32::from_rgb(245, 245, 245),
-            weak_text: Color32::from_rgb(180, 180, 180),
-            primary_button_bg: Color32::from_rgb(10, 132, 255),
-            primary_button_stroke: Color32::from_rgb(60, 150, 255),
-            primary_button_text: Color32::WHITE,
-            secondary_button_bg: Color32::from_rgb(88, 88, 90),
-            secondary_button_stroke: Color32::from_rgb(110, 110, 112),
-            secondary_button_text: Color32::from_rgb(250, 250, 250),
-        }
-    } else {
-        MacDialogPalette {
-            window_bg: Color32::from_rgb(246, 246, 246),
-            border: Color32::from_rgb(218, 218, 218),
-            section_bg: Color32::from_rgb(252, 252, 252),
-            section_border: Color32::from_rgb(226, 226, 226),
-            input_bg: Color32::from_rgb(255, 255, 255),
-            input_hover_bg: Color32::from_rgb(252, 253, 255),
-            input_active_bg: Color32::from_rgb(255, 255, 255),
-            input_border: Color32::from_rgb(210, 210, 210),
-            title: Color32::from_rgb(30, 30, 30),
-            subtitle: Color32::from_rgb(100, 100, 100),
-            text: Color32::from_rgb(40, 40, 40),
-            weak_text: Color32::from_rgb(109, 118, 130),
-            primary_button_bg: Color32::from_rgb(0, 122, 255),
-            primary_button_stroke: Color32::from_rgb(0, 114, 240),
-            primary_button_text: Color32::WHITE,
-            secondary_button_bg: Color32::from_rgb(240, 240, 240),
-            secondary_button_stroke: Color32::from_rgb(216, 216, 216),
-            secondary_button_text: Color32::from_rgb(50, 50, 50),
+impl From<&ui_theme::ThemeColors> for MacDialogPalette {
+    fn from(c: &ui_theme::ThemeColors) -> Self {
+        Self {
+            window_bg: c.dialog_window_bg,
+            border: c.dialog_border,
+            section_bg: c.dialog_section_bg,
+            section_border: c.dialog_section_border,
+            input_bg: c.dialog_input_bg,
+            input_hover_bg: c.dialog_input_hover_bg,
+            input_active_bg: c.dialog_input_active_bg,
+            input_border: c.dialog_input_border,
+            title: c.dialog_title,
+            subtitle: c.dialog_subtitle,
+            text: c.dialog_text,
+            weak_text: c.dialog_weak_text,
+            primary_button_bg: c.dialog_primary_button_bg,
+            primary_button_stroke: c.dialog_primary_button_stroke,
+            primary_button_text: c.dialog_primary_button_text,
+            secondary_button_bg: c.dialog_secondary_button_bg,
+            secondary_button_stroke: c.dialog_secondary_button_stroke,
+            secondary_button_text: c.dialog_secondary_button_text,
         }
     }
 }
 
+fn mac_dialog_palette(dark_mode: bool) -> MacDialogPalette {
+    MacDialogPalette::from(&ui_theme::Theme::new(dark_mode).colors)
+}
+
 fn app_visuals(use_dark_theme: bool) -> egui::Visuals {
+    let theme = ui_theme::Theme::new(use_dark_theme);
+    let c = &theme.colors;
     let mut visuals = if use_dark_theme {
         egui::Visuals::dark()
     } else {
         egui::Visuals::light()
     };
-    if use_dark_theme {
-        visuals.panel_fill = Color32::from_rgb(54, 54, 56);
-        visuals.window_fill = Color32::from_rgb(50, 50, 52);
-        visuals.extreme_bg_color = Color32::from_rgb(72, 72, 75);
-        visuals.faint_bg_color = Color32::from_rgb(58, 58, 60);
-        visuals.code_bg_color = Color32::from_rgb(68, 68, 70);
-        visuals.override_text_color = Some(Color32::from_rgb(245, 245, 245));
-        visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(86, 86, 89));
-        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(58, 58, 60);
-        visuals.widgets.noninteractive.bg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(86, 86, 89));
-        visuals.widgets.noninteractive.fg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(190, 190, 190));
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(72, 72, 75);
-        visuals.widgets.inactive.bg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(100, 100, 103));
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(78, 78, 81);
-        visuals.widgets.hovered.bg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(100, 130, 170));
-        visuals.widgets.active.bg_fill = Color32::from_rgb(74, 74, 77);
-        visuals.widgets.active.bg_stroke =
-            Stroke::new(1.2, Color32::from_rgb(105, 135, 175));
-        visuals.widgets.open.bg_fill = Color32::from_rgb(78, 78, 81);
-        visuals.widgets.open.bg_stroke =
-            Stroke::new(1.0, Color32::from_rgb(100, 100, 103));
-        visuals.selection.bg_fill = Color32::from_rgba_premultiplied(80, 138, 205, 100);
-        visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgba_premultiplied(140, 175, 230, 130));
-    } else {
-        visuals.selection.bg_fill = Color32::from_rgba_premultiplied(140, 200, 255, 100);
-        visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgba_premultiplied(0, 80, 120, 130));
-    }
+    visuals.panel_fill = c.panel_fill;
+    visuals.window_fill = c.window_fill;
+    visuals.extreme_bg_color = c.extreme_bg;
+    visuals.faint_bg_color = c.faint_bg;
+    visuals.code_bg_color = c.code_bg;
+    visuals.override_text_color = Some(c.text);
+    visuals.window_stroke = Stroke::new(1.0, c.window_stroke);
+    visuals.widgets.noninteractive.bg_fill = c.widget_noninteractive_bg;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c.widget_noninteractive_stroke);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, c.widget_noninteractive_fg);
+    visuals.widgets.inactive.bg_fill = c.widget_inactive_bg;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, c.widget_inactive_stroke);
+    visuals.widgets.hovered.bg_fill = c.widget_hovered_bg;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, c.widget_hovered_stroke);
+    visuals.widgets.active.bg_fill = c.widget_active_bg;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.2, c.widget_active_stroke);
+    visuals.widgets.open.bg_fill = c.widget_open_bg;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0, c.widget_open_stroke);
+    visuals.selection.bg_fill = c.egui_selection_bg;
+    visuals.selection.stroke = Stroke::new(1.0, c.egui_selection_stroke);
     visuals
 }
 
 fn app_style(base_style: &egui::Style) -> egui::Style {
+    let theme = ui_theme::Theme::from_visuals(&base_style.visuals);
+    let c = &theme.colors;
     let mut style = base_style.clone();
-    let dark = base_style.visuals.dark_mode;
     style.spacing.scroll = egui::style::ScrollStyle::solid();
     style.spacing.scroll.bar_width = 8.0;
     style.spacing.scroll.floating_width = 6.0;
     style.spacing.scroll.floating_allocated_width = 6.0;
     style.spacing.scroll.handle_min_length = 28.0;
     style.spacing.scroll.foreground_color = true;
-    style.spacing.scroll.dormant_handle_opacity = if dark { 0.35 } else { 0.30 };
-    style.spacing.scroll.active_handle_opacity = if dark { 0.55 } else { 0.50 };
-    style.spacing.scroll.interact_handle_opacity = if dark { 0.75 } else { 0.70 };
+    style.spacing.scroll.dormant_handle_opacity = c.scrollbar_dormant_opacity;
+    style.spacing.scroll.active_handle_opacity = c.scrollbar_active_opacity;
+    style.spacing.scroll.interact_handle_opacity = c.scrollbar_interact_opacity;
     style
 }
 
@@ -23242,10 +23241,6 @@ fn format_mongo_command(cmd: &str) -> String {
     }
 
     format_mongo_impl(cmd)
-}
-
-fn definition_editor_palette(visuals: &egui::Visuals) -> EditorPalette {
-    editor_palette(visuals)
 }
 
 fn blend_color(left: Color32, right: Color32, right_weight: f32) -> Color32 {
@@ -24398,116 +24393,12 @@ fn tree_row_button(
     response
 }
 
-fn mac_sidebar_palette_dark() -> MacUiPalette {
-    MacUiPalette {
-        sidebar_bg: Color32::from_rgb(36, 36, 38),
-        ..mac_ui_palette(&egui::Visuals::dark())
-    }
-}
-
-fn mac_sidebar_palette_light() -> MacUiPalette {
-    MacUiPalette {
-        sidebar_bg: Color32::from_rgb(237, 237, 239),
-        ..mac_ui_palette(&egui::Visuals::light())
-    }
+fn mac_sidebar_palette(dark_mode: bool) -> MacUiPalette {
+    MacUiPalette::from(&ui_theme::Theme::new(dark_mode).colors)
 }
 
 fn mac_ui_palette(visuals: &egui::Visuals) -> MacUiPalette {
-    if visuals.dark_mode {
-        MacUiPalette {
-            toolbar_bg: Color32::from_rgb(44, 44, 46),
-            sidebar_bg: Color32::from_rgb(38, 38, 40),
-            workspace_bg: Color32::from_rgb(56, 56, 58),
-            card_bg: Color32::from_rgb(54, 54, 56),
-            table_header_bg: Color32::from_rgb(62, 62, 64),
-            table_alt_bg: Color32::from_rgb(50, 50, 52),
-            search_bg: Color32::from_rgb(58, 58, 60),
-            border: Color32::from_rgb(86, 86, 89),
-            soft_border: Color32::from_rgb(70, 70, 73),
-            table_grid: Color32::from_rgb(74, 74, 77),
-            selection_bg: Color32::from_rgb(60, 110, 175),
-            selection_stroke: Color32::from_rgb(130, 165, 220),
-            selection_text: Color32::from_rgb(255, 255, 255),
-            expand_arrow: Color32::from_rgb(60, 110, 175),
-            text: Color32::from_rgb(245, 245, 245),
-            weak_text: Color32::from_rgb(180, 180, 180),
-            muted_dot: Color32::from_rgb(130, 130, 132),
-            success: Color32::from_rgb(68, 188, 125),
-            danger: Color32::from_rgb(255, 115, 115),
-            warning: Color32::from_rgb(255, 190, 70),
-            tab_idle_bg: Color32::from_rgb(52, 52, 54),
-            primary_button_bg: Color32::from_rgb(10, 132, 255),
-            primary_button_stroke: Color32::from_rgb(65, 155, 255),
-            primary_button_text: Color32::WHITE,
-            secondary_button_bg: Color32::from_rgb(72, 72, 74),
-            secondary_button_stroke: Color32::from_rgb(92, 92, 95),
-            secondary_button_text: Color32::from_rgb(245, 245, 245),
-            accent_button_bg: Color32::from_rgb(45, 135, 220),
-            accent_button_stroke: Color32::from_rgb(75, 168, 242),
-            accent_button_text: Color32::WHITE,
-            modified_button_bg: Color32::from_rgb(165, 140, 46),
-            modified_button_stroke: Color32::from_rgb(195, 170, 75),
-            modified_button_text: Color32::WHITE,
-            subtle_button_bg: Color32::from_rgb(52, 52, 54),
-            subtle_button_stroke: Color32::from_rgb(72, 72, 75),
-            subtle_button_text: Color32::from_rgb(200, 200, 200),
-            danger_button_bg: Color32::from_rgb(90, 56, 56),
-            danger_button_stroke: Color32::from_rgb(124, 72, 72),
-            danger_button_text: Color32::from_rgb(255, 230, 230),
-            hide_button_bg: Color32::from_rgb(43, 92, 92),
-            hide_button_stroke: Color32::from_rgb(68, 128, 128),
-            hide_button_text: Color32::from_rgb(210, 240, 240),
-            index_badge: Color32::from_rgb(68, 188, 125),
-            new_row_bg: Color32::from_rgba_premultiplied(40, 80, 40, 60),
-        }
-    } else {
-        MacUiPalette {
-            toolbar_bg: Color32::from_rgb(246, 246, 246),
-            sidebar_bg: Color32::from_rgb(237, 237, 239),
-            workspace_bg: Color32::from_rgb(249, 249, 249),
-            card_bg: Color32::from_rgb(255, 255, 255),
-            table_header_bg: Color32::from_rgb(243, 243, 243),
-            table_alt_bg: Color32::from_rgb(248, 248, 248),
-            search_bg: Color32::from_rgb(255, 255, 255),
-            border: Color32::from_rgb(218, 218, 218),
-            soft_border: Color32::from_rgb(232, 232, 232),
-            table_grid: Color32::from_rgb(224, 224, 224),
-            selection_bg: Color32::from_rgb(200, 220, 250),
-            selection_stroke: Color32::from_rgb(125, 165, 225),
-            selection_text: Color32::from_rgb(20, 60, 120),
-            expand_arrow: Color32::from_rgb(68, 128, 200),
-            text: Color32::from_rgb(40, 40, 40),
-            weak_text: Color32::from_rgb(105, 105, 105),
-            muted_dot: Color32::from_rgb(152, 152, 152),
-            success: Color32::from_rgb(48, 167, 104),
-            danger: Color32::from_rgb(220, 86, 86),
-            warning: Color32::from_rgb(255, 179, 25),
-            tab_idle_bg: Color32::from_rgb(245, 245, 245),
-            primary_button_bg: Color32::from_rgb(0, 122, 255),
-            primary_button_stroke: Color32::from_rgb(0, 114, 238),
-            primary_button_text: Color32::WHITE,
-            secondary_button_bg: Color32::from_rgb(243, 243, 243),
-            secondary_button_stroke: Color32::from_rgb(220, 220, 220),
-            secondary_button_text: Color32::from_rgb(50, 50, 50),
-            accent_button_bg: Color32::from_rgb(178, 208, 238),
-            accent_button_stroke: Color32::from_rgb(138, 183, 222),
-            accent_button_text: Color32::from_rgb(24, 88, 158),
-            modified_button_bg: Color32::from_rgb(255, 243, 176),
-            modified_button_stroke: Color32::from_rgb(228, 212, 118),
-            modified_button_text: Color32::from_rgb(120, 100, 20),
-            subtle_button_bg: Color32::from_rgb(248, 248, 248),
-            subtle_button_stroke: Color32::from_rgb(228, 228, 228),
-            subtle_button_text: Color32::from_rgb(95, 95, 95),
-            danger_button_bg: Color32::from_rgb(255, 225, 225),
-            danger_button_stroke: Color32::from_rgb(238, 185, 185),
-            danger_button_text: Color32::from_rgb(180, 44, 44),
-            hide_button_bg: Color32::from_rgb(208, 238, 233),
-            hide_button_stroke: Color32::from_rgb(163, 208, 198),
-            hide_button_text: Color32::from_rgb(30, 100, 90),
-            index_badge: Color32::from_rgb(48, 167, 104),
-            new_row_bg: Color32::from_rgba_premultiplied(40, 80, 40, 45),
-        }
-    }
+    MacUiPalette::from(&ui_theme::Theme::from_visuals(visuals).colors)
 }
 
 fn sql_highlight_job(sql: &str, visuals: &egui::Visuals) -> egui::text::LayoutJob {
@@ -24682,36 +24573,26 @@ struct EditorPalette {
     comment: Color32,
 }
 
-fn editor_palette(visuals: &egui::Visuals) -> EditorPalette {
-    if visuals.dark_mode {
-        EditorPalette {
-            panel_bg: Color32::from_rgb(36, 36, 38),
-            editor_bg: Color32::from_rgb(42, 42, 44),
-            gutter_bg: Color32::from_rgb(40, 40, 42),
-            current_line_bg: Color32::from_rgb(36, 50, 72),
-            text: Color32::from_rgb(220, 220, 220),
-            line_number: Color32::from_rgb(110, 110, 112),
-            line_number_active: Color32::from_rgb(225, 225, 225),
-            keyword: Color32::from_rgb(85, 155, 212),
-            string: Color32::from_rgb(205, 143, 118),
-            number: Color32::from_rgb(180, 205, 166),
-            comment: Color32::from_rgb(105, 152, 84),
-        }
-    } else {
-        EditorPalette {
-            panel_bg: Color32::from_rgb(248, 248, 248),
-            editor_bg: Color32::from_rgb(250, 250, 250),
-            gutter_bg: Color32::from_rgb(244, 244, 244),
-            current_line_bg: Color32::from_rgb(228, 238, 252),
-            text: Color32::from_rgb(36, 36, 36),
-            line_number: Color32::from_rgb(125, 125, 125),
-            line_number_active: Color32::from_rgb(42, 70, 115),
-            keyword: Color32::from_rgb(0, 90, 195),
-            string: Color32::from_rgb(165, 86, 48),
-            number: Color32::from_rgb(55, 128, 82),
-            comment: Color32::from_rgb(108, 118, 108),
+impl From<&ui_theme::ThemeColors> for EditorPalette {
+    fn from(c: &ui_theme::ThemeColors) -> Self {
+        Self {
+            panel_bg: c.editor_panel_bg,
+            editor_bg: c.editor_bg,
+            gutter_bg: c.editor_gutter_bg,
+            current_line_bg: c.editor_current_line_bg,
+            text: c.editor_text,
+            line_number: c.editor_line_number,
+            line_number_active: c.editor_line_number_active,
+            keyword: c.editor_keyword,
+            string: c.editor_string,
+            number: c.editor_number,
+            comment: c.editor_comment,
         }
     }
+}
+
+fn editor_palette(visuals: &egui::Visuals) -> EditorPalette {
+    EditorPalette::from(&ui_theme::Theme::from_visuals(visuals).colors)
 }
 
 fn check_autocomplete_triggers(
