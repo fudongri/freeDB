@@ -125,6 +125,7 @@ fn en(key: &'static str) -> &'static str {
         "连接列表" => "Connections",
         "仅活跃" => "Active",
         "搜索" => "Search",
+        "回车搜索" => "Press Enter to search",
         "新建数据库" => "New Database",
         "数据库名称" => "Database Name",
         "编辑连接" => "Edit Connection",

@@ -3786,29 +3786,50 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .inner_margin(egui::Margin::symmetric(8, 5))
             .outer_margin(egui::Margin::symmetric(10, 0))
             .show(ui, |ui| {
-                let search_response = ui.add(
-                    TextEdit::singleline(&mut self.search_keyword)
-                        .hint_text(tr!("搜索"))
-                        .desired_width(f32::INFINITY)
-                        .frame(false),
-                );
-                if search_response.clicked() || search_response.has_focus() {
-                    self.sidebar_has_focus = true;
-                }
-                // 搜索框失焦 → 确认搜索
-                let was_focused = self.search_field_focused;
-                self.search_field_focused = search_response.has_focus();
-                if was_focused && !search_response.has_focus() {
-                    self.committed_search = self.search_keyword.clone();
-                    // Enter 提交后保持焦点
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        search_response.request_focus();
+                ui.horizontal(|ui| {
+                    let text_width = if self.search_keyword.is_empty() {
+                        ui.available_width()
+                    } else {
+                        ui.available_width() - 20.0
+                    };
+                    let search_response = ui.add(
+                        TextEdit::singleline(&mut self.search_keyword)
+                            .hint_text(RichText::new(tr!("回车搜索")).color(ui.visuals().weak_text_color()))
+                            .desired_width(text_width)
+                            .frame(false),
+                    );
+                    if search_response.clicked() || search_response.has_focus() {
+                        self.sidebar_has_focus = true;
                     }
-                }
-                // 用户主动清空 → 清除搜索
-                if search_response.changed() && self.search_keyword.is_empty() {
-                    self.committed_search.clear();
-                }
+                    // 搜索框失焦 → 确认搜索
+                    let was_focused = self.search_field_focused;
+                    self.search_field_focused = search_response.has_focus();
+                    if was_focused && !search_response.has_focus() {
+                        self.committed_search = self.search_keyword.clone();
+                        // Enter 提交后保持焦点
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            search_response.request_focus();
+                        }
+                    }
+                    // 用户主动清空 → 清除搜索
+                    if search_response.changed() && self.search_keyword.is_empty() {
+                        self.committed_search.clear();
+                    }
+                    // 清空按钮
+                    if !self.search_keyword.is_empty() {
+                        let clear_btn = ui.add(
+                            egui::Button::new(
+                                RichText::new("✕").size(11.0).color(ui.visuals().weak_text_color()),
+                            )
+                            .frame(false),
+                        );
+                        if clear_btn.clicked() {
+                            self.search_keyword.clear();
+                            self.committed_search.clear();
+                            search_response.request_focus();
+                        }
+                    }
+                });
             });
         ui.add_space(6.0);
 
@@ -12324,9 +12345,10 @@ impl eframe::App for DesktopApp {
             mac_sidebar_palette_light()
         };
         let half_screen = ctx.viewport_rect().width() / 2.0;
-        // 全局预消费 Enter/Esc：仅在侧边栏持有焦点时才预消费，
-        // 否则让 TextEdit (如 SQL 编辑器) 正常接收 Enter 换行。
-        let sidebar_focused = self.sidebar_has_focus || self.tree_rename.is_some();
+        // 全局预消费 Enter/Esc：仅在侧边栏持有焦点（且搜索框无焦点）时才预消费，
+        // 否则让 TextEdit (如 SQL 编辑器、侧边栏搜索框) 正常接收 Enter。
+        let sidebar_focused = (self.sidebar_has_focus && !self.search_field_focused)
+            || self.tree_rename.is_some();
         if sidebar_focused {
             self.sidebar_enter_pressed = ctx.input_mut(|i| {
                 i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
