@@ -2296,7 +2296,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     fn open_selected_sidebar_item(&mut self) -> bool {
         if let Some(node) = self.selected_sidebar_node() {
             if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View) {
-                self.open_table_tab(&node);
+                self.open_table_tab(&node, true);
                 return true;
             }
         }
@@ -2504,7 +2504,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
     }
 
-    fn open_table_tab(&mut self, node: &ExplorerNode) {
+    fn open_table_tab(&mut self, node: &ExplorerNode, load_data: bool) {
         let table = TableRef {
             connection_id: node.connection_id.clone(),
             database: node.database.clone(),
@@ -2524,7 +2524,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             preview: None,
             preview_column_widths: Vec::new(),
             error: None,
-            active_view: TableViewMode::Data,
+            active_view: if load_data { TableViewMode::Data } else { TableViewMode::Definition },
             preview_sort: TableSortState::default(),
             preview_filter: TableFilterState::default(),
             show_preview_filter: false,
@@ -2588,50 +2588,52 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.scroll_tabs_to_end = true;
 
-        // Spawn async background task to load definition and preview data
+        // Spawn async background task to load definition (and optionally preview data)
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
         let (sender, receiver) = mpsc::channel();
         self.pending_table_preview = Some(receiver);
-        let display_sql = build_table_preview_display_sql(
-            database_kind,
-            &table,
-            &TableFilterState::default(),
-            &TableSortState::default(),
-            Some(1000),
-            Some(0),
-            None,
-            None,
-        );
-        let preview_sql = build_table_preview_sql(
-            database_kind,
-            &table,
-            &TableFilterState::default(),
-            &TableSortState::default(),
-            Some(1000),
-            Some(0),
-            None,
-            None,
-        );
         handle.spawn(async move {
             let t_ui = std::time::Instant::now();
-            let execution = QueryExecution {
-                connection_id: table.connection_id.clone(),
-                database: table.database.clone(),
-                sql: preview_sql,
-            };
-            let (definition, preview) = tokio::join!(
-                services.load_table_definition(&table),
-                services.execute_sql(execution),
-            );
-            tracing::info!("[UI] open_table_tab 整体耗时: {}ms", t_ui.elapsed().as_millis());
-            let _ = sender.send(TablePreviewLoadResult {
-                tab_id,
-                table_name: table.table.clone(),
-                definition: Some(definition.map_err(|error| error.to_string())),
-                preview: preview.map_err(|error| error.to_string()),
-                reloaded_definition: true,
-            });
+            if load_data {
+                let preview_sql = build_table_preview_sql(
+                    database_kind,
+                    &table,
+                    &TableFilterState::default(),
+                    &TableSortState::default(),
+                    Some(1000),
+                    Some(0),
+                    None,
+                    None,
+                );
+                let execution = QueryExecution {
+                    connection_id: table.connection_id.clone(),
+                    database: table.database.clone(),
+                    sql: preview_sql,
+                };
+                let (definition, preview) = tokio::join!(
+                    services.load_table_definition(&table),
+                    services.execute_sql(execution),
+                );
+                tracing::info!("[UI] open_table_tab 整体耗时: {}ms", t_ui.elapsed().as_millis());
+                let _ = sender.send(TablePreviewLoadResult {
+                    tab_id,
+                    table_name: table.table.clone(),
+                    definition: Some(definition.map_err(|error| error.to_string())),
+                    preview: preview.map_err(|error| error.to_string()),
+                    reloaded_definition: true,
+                });
+            } else {
+                let definition = services.load_table_definition(&table).await;
+                tracing::info!("[UI] open_table_tab (definition only) 耗时: {}ms", t_ui.elapsed().as_millis());
+                let _ = sender.send(TablePreviewLoadResult {
+                    tab_id,
+                    table_name: table.table.clone(),
+                    definition: Some(definition.map_err(|error| error.to_string())),
+                    preview: Err(tr!("仅查看定义，未加载数据。点击刷新可获取数据").to_string()),
+                    reloaded_definition: true,
+                });
+            }
         });
     }
 
@@ -4103,7 +4105,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                     }
                 }
-                SidebarAction::OpenTable(node) => self.open_table_tab(&node),
+                SidebarAction::OpenTable { node, load_data } => self.open_table_tab(&node, load_data),
                 SidebarAction::RefreshConnection(connection_id) => {
                     self.collapse_connection_tree(&connection_id);
                     self.load_connection_tree(&connection_id);
@@ -4551,6 +4553,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                     ExplorerNodeType::Table | ExplorerNodeType::View => {
                         let kind = self.database_kind_for_connection(&node.connection_id);
+                        // 查看定义（不加载数据）
+                        let def_label = if matches!(node.node_type, ExplorerNodeType::View) {
+                            tr!("查看视图定义")
+                        } else if kind == DatabaseKind::MongoDb {
+                            tr!("查看集合定义")
+                        } else {
+                            tr!("查看表定义")
+                        };
+                        if ui.button(def_label).clicked() {
+                            actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: false });
+                            ui.close();
+                        }
+                        ui.separator();
                         let (label, shortcut) = match node.node_type {
                             ExplorerNodeType::View => (tr!("在视图上新建查询"), format!("{}+D", MOD_KEY)),
                             _ if kind == DatabaseKind::MongoDb => (tr!("在集合上新建查询"), format!("{}+D", MOD_KEY)),
@@ -4723,7 +4738,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             if response.double_clicked() && !is_node_loading {
                 if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View) {
-                    actions.push(SidebarAction::OpenTable(node.clone()));
+                    actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: true });
                 } else if node.expandable {
                     actions.push(SidebarAction::ToggleNode(
                         node.connection_id.clone(),
@@ -13283,7 +13298,7 @@ impl ConnectionFormState {
 enum SidebarAction {
     OpenConnection(String),
     ToggleNode(String, ExplorerNode),
-    OpenTable(ExplorerNode),
+    OpenTable { node: ExplorerNode, load_data: bool },
     RefreshConnection(String),
     RefreshNode(String, ExplorerNode),
     DdlInput(DdlInputDialog),
