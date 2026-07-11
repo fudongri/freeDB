@@ -674,6 +674,8 @@ fn en(key: &'static str) -> &'static str {
         "查找+替换" => "Find + Replace",
         "关闭标签页" => "Close Tab",
         "关闭所有标签页" => "Close All Tabs",
+        "标签页后退" => "Tab Back",
+        "标签页前进" => "Tab Forward",
         "执行查询" => "Execute Query",
         "Explain 查询" => "Explain Query",
         "切换行注释" => "Toggle Line Comment",

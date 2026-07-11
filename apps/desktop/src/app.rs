@@ -106,6 +106,8 @@ pub struct DesktopApp {
     scroll_tabs_to_end: bool,
     is_scrolling_tabs: bool, // 跟踪是否正在拖动滚动条
     tab_scroll_offset: f32, // 标签栏滚动偏移量
+    tab_back_stack: Vec<usize>,
+    tab_forward_stack: Vec<usize>,
     database_cache: HashMap<String, Vec<String>>,
     pending_database_list: Option<Receiver<DatabaseListResult>>,
     pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
@@ -1180,6 +1182,8 @@ impl DesktopApp {
             scroll_tabs_to_end: false,
             is_scrolling_tabs: false,
             tab_scroll_offset: 0.0,
+            tab_back_stack: Vec::new(),
+            tab_forward_stack: Vec::new(),
             database_cache: HashMap::new(),
             pending_table_preview: None,
             generate_data_receiver: None,
@@ -3292,12 +3296,43 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.scroll_tabs_to_end = true;
     }
 
+    fn navigate_to_tab(&mut self, new_tab: usize) {
+        if new_tab >= self.tabs.len() || new_tab == self.active_tab {
+            return;
+        }
+        self.tab_back_stack.push(self.active_tab);
+        self.tab_forward_stack.clear();
+        self.active_tab = new_tab;
+    }
+
+    fn tab_back(&mut self) {
+        if let Some(prev) = self.tab_back_stack.pop() {
+            if prev < self.tabs.len() {
+                self.tab_forward_stack.push(self.active_tab);
+                self.active_tab = prev;
+            }
+        }
+    }
+
+    fn tab_forward(&mut self) {
+        if let Some(next) = self.tab_forward_stack.pop() {
+            if next < self.tabs.len() {
+                self.tab_back_stack.push(self.active_tab);
+                self.active_tab = next;
+            }
+        }
+    }
+
     fn close_workspace_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
 
         self.tabs.remove(index);
+        self.tab_back_stack.retain(|i| *i != index);
+        self.tab_back_stack.iter_mut().for_each(|i| { if *i > index { *i -= 1; } });
+        self.tab_forward_stack.retain(|i| *i != index);
+        self.tab_forward_stack.iter_mut().for_each(|i| { if *i > index { *i -= 1; } });
 
         if self.tabs.is_empty() {
             self.tabs.push(WorkspaceTab::Dashboard);
@@ -5319,7 +5354,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.close_workspace_tab(pending_close_tab);
             }
             (_, Some(index)) if index != usize::MAX => {
-                self.active_tab = index;
+                self.navigate_to_tab(index);
             }
             _ => {}
         }
@@ -5384,6 +5419,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             (format!("{} + R", MOD_KEY), tr!("执行查询")),
             (format!("{} + S", MOD_KEY), tr!("保存查询")),
             (format!("{} + W", MOD_KEY), tr!("关闭标签页")),
+            (format!("{} + [", MOD_KEY), tr!("标签页后退")),
+            (format!("{} + ]", MOD_KEY), tr!("标签页前进")),
             (format!("{} + /", MOD_KEY), tr!("切换注释")),
             (format!("{} + ,", MOD_KEY), tr!("自动补全")),
         ];
@@ -11784,6 +11821,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             (format!("{}+Shift+H", MOD_KEY), tr!("查找+替换")),
                             (format!("{}+W", MOD_KEY), tr!("关闭标签页")),
                             (format!("{}+Shift+W", MOD_KEY), tr!("关闭所有标签页")),
+                            (format!("{}+[", MOD_KEY), tr!("标签页后退")),
+                            (format!("{}+]", MOD_KEY), tr!("标签页前进")),
                             (format!("{}+R", MOD_KEY), tr!("执行查询")),
                             (format!("{}+E", MOD_KEY), tr!("Explain 查询")),
                             (format!("{}+S", MOD_KEY), tr!("保存查询")),
@@ -13116,6 +13155,26 @@ impl eframe::App for DesktopApp {
         });
         if close_tab {
             self.close_workspace_tab(self.active_tab);
+        }
+
+        // Keyboard shortcut: Cmd+[ / Cmd+] tab history navigation
+        let tab_back = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::OpenBracket,
+            )) || (input.modifiers.command && input.key_pressed(egui::Key::OpenBracket))
+        });
+        if tab_back {
+            self.tab_back();
+        }
+        let tab_forward = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::CloseBracket,
+            )) || (input.modifiers.command && input.key_pressed(egui::Key::CloseBracket))
+        });
+        if tab_forward {
+            self.tab_forward();
         }
 
         // Keyboard shortcut: Cmd+/ toggle line comment
