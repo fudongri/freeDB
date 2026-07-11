@@ -100,7 +100,7 @@ fn main() -> eframe::Result<()> {
         let lang_label = if locale == Locale::En { "中文" } else { "English" };
         let mi_lang = muda::MenuItem::with_id("切换语言", lang_label, true, None::<muda::accelerator::Accelerator>);
         let mi_scroll_speed = muda::MenuItem::with_id("滚动速度", &tr!("滚动速度"), true, None::<muda::accelerator::Accelerator>);
-        let mi_theme = muda::MenuItem::with_id("切换主题", &tr!("切换主题"), true, None::<muda::accelerator::Accelerator>);
+        let theme_submenu = muda::Submenu::new(&tr!("主题"), true);
 
         let view_menu = muda::Submenu::with_items(
             &tr!("查看"),
@@ -115,7 +115,7 @@ fn main() -> eframe::Result<()> {
 
         let settings_menu = muda::Submenu::new(&tr!("设置"), true);
         settings_menu.append(&mi_lang).unwrap();
-        settings_menu.append(&mi_theme).unwrap();
+        settings_menu.append(&theme_submenu).unwrap();
         settings_menu.append(&mi_scroll_speed).unwrap();
         if !cfg!(target_os = "macos") {
             let about_meta = muda::AboutMetadata { name: Some("FreeDB".into()), ..muda::from_cargo_metadata!() };
@@ -123,7 +123,7 @@ fn main() -> eframe::Result<()> {
         }
         menu.append(&settings_menu).unwrap();
 
-        (Some(rx), Some(menu), Some(file_menu), Some(view_menu), Some(settings_menu), Some(mi_shortcuts), Some(mi_log), Some(mi_lang), Some(mi_scroll_speed), Some(mi_theme))
+        (Some(rx), Some(menu), Some(file_menu), Some(view_menu), Some(settings_menu), Some(mi_shortcuts), Some(mi_log), Some(mi_lang), Some(mi_scroll_speed), Some(theme_submenu))
     } else {
         (None, None, None, None, None, None, None, None, None, None)
     };

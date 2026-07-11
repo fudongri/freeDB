@@ -187,26 +187,106 @@ pub struct ThemeColors {
     pub scrollbar_interact_opacity: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DarkVariant {
+    Standard,
+    Cool,
+    Soft,
+    Warm,
+    Layered,
+}
+
+impl DarkVariant {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standard => "dark",
+            Self::Cool => "dark_cool",
+            Self::Soft => "dark_soft",
+            Self::Warm => "dark_warm",
+            Self::Layered => "dark_layered",
+        }
+    }
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "dark_cool" => Self::Cool,
+            "dark_soft" => Self::Soft,
+            "dark_warm" => Self::Warm,
+            "dark_layered" => Self::Layered,
+            _ => Self::Standard,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightVariant {
+    Standard,
+    Warm,
+    Cool,
+    EyeCare,
+    SoftGray,
+}
+
+impl LightVariant {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standard => "light",
+            Self::Warm => "light_warm",
+            Self::Cool => "light_cool",
+            Self::EyeCare => "light_eyecare",
+            Self::SoftGray => "light_softgray",
+        }
+    }
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "light_warm" => Self::Warm,
+            "light_cool" => Self::Cool,
+            "light_eyecare" => Self::EyeCare,
+            "light_softgray" => Self::SoftGray,
+            _ => Self::Standard,
+        }
+    }
+}
+
 /// 统一主题
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub colors: ThemeColors,
     pub fonts: FontSizes,
     pub dark_mode: bool,
+    pub dark_variant: DarkVariant,
+    pub light_variant: LightVariant,
 }
 
 impl Theme {
-    pub fn new(dark_mode: bool) -> Self {
-        if dark_mode { Self::dark() } else { Self::light() }
+    pub fn new(dark_mode: bool, dark_variant: DarkVariant, light_variant: LightVariant) -> Self {
+        if dark_mode {
+            match dark_variant {
+                DarkVariant::Standard => Self::dark(),
+                DarkVariant::Cool => Self::dark_cool(),
+                DarkVariant::Soft => Self::dark_soft(),
+                DarkVariant::Warm => Self::dark_warm(),
+                DarkVariant::Layered => Self::dark_layered(),
+            }
+        } else {
+            match light_variant {
+                LightVariant::Standard => Self::light(),
+                LightVariant::Warm => Self::light_warm(),
+                LightVariant::Cool => Self::light_cool(),
+                LightVariant::EyeCare => Self::light_eyecare(),
+                LightVariant::SoftGray => Self::light_softgray(),
+            }
+        }
     }
 
-    pub fn from_visuals(visuals: &egui::Visuals) -> Self {
-        Self::new(visuals.dark_mode)
+    pub fn from_visuals(visuals: &egui::Visuals, dark_variant: DarkVariant, light_variant: LightVariant) -> Self {
+        Self::new(visuals.dark_mode, dark_variant, light_variant)
     }
 
     pub fn dark() -> Self {
         Self {
             dark_mode: true,
+            dark_variant: DarkVariant::Standard,
+            light_variant: LightVariant::Standard,
             fonts: FontSizes::default(),
             colors: ThemeColors {
                 // ── 通用 UI ──
@@ -357,6 +437,8 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             dark_mode: false,
+            dark_variant: DarkVariant::Standard,
+            light_variant: LightVariant::Standard,
             fonts: FontSizes::default(),
             colors: ThemeColors {
                 // ── 通用 UI ──
@@ -503,4 +585,255 @@ impl Theme {
             },
         }
     }
+
+    fn apply_dark_cool(c: &mut ThemeColors) {
+        c.toolbar_bg = Color32::from_rgb(48, 48, 54);
+        c.sidebar_bg = Color32::from_rgb(38, 38, 44);
+        c.workspace_bg = Color32::from_rgb(48, 48, 54);
+        c.card_bg = Color32::from_rgb(48, 48, 54);
+        c.table_header_bg = Color32::from_rgb(56, 56, 64);
+        c.table_alt_bg = Color32::from_rgb(44, 44, 52);
+        c.search_bg = Color32::from_rgb(48, 48, 54);
+        c.tab_idle_bg = Color32::from_rgb(46, 46, 52);
+        c.accent_button_bg = Color32::from_rgb(38, 38, 44);
+        c.accent_active_button_bg = Color32::from_rgb(38, 38, 44);
+        c.subtle_button_bg = Color32::from_rgb(46, 46, 52);
+        c.danger_button_bg = Color32::from_rgb(38, 38, 44);
+        c.dialog_window_bg = Color32::from_rgb(44, 44, 50);
+        c.dialog_section_bg = Color32::from_rgb(52, 52, 58);
+        c.dialog_input_bg = Color32::from_rgb(66, 66, 72);
+        c.dialog_input_hover_bg = Color32::from_rgb(74, 74, 80);
+        c.dialog_input_active_bg = Color32::from_rgb(80, 80, 86);
+        c.editor_panel_bg = Color32::from_rgb(48, 48, 54);
+        c.editor_bg = Color32::from_rgb(36, 36, 42);
+        c.editor_gutter_bg = Color32::from_rgb(34, 34, 40);
+        c.autocomplete_popup_bg = Color32::from_rgb(40, 40, 46);
+        c.panel_fill = Color32::from_rgb(48, 48, 54);
+        c.window_fill = Color32::from_rgb(48, 48, 54);
+        c.extreme_bg = Color32::from_rgb(66, 66, 75);
+        c.faint_bg = Color32::from_rgb(52, 52, 58);
+        c.code_bg = Color32::from_rgb(62, 62, 70);
+        c.widget_noninteractive_bg = Color32::from_rgb(52, 52, 58);
+    }
+
+    fn apply_dark_soft(c: &mut ThemeColors) {
+        c.toolbar_bg = Color32::from_rgb(58, 58, 62);
+        c.sidebar_bg = Color32::from_rgb(48, 48, 52);
+        c.workspace_bg = Color32::from_rgb(58, 58, 62);
+        c.card_bg = Color32::from_rgb(58, 58, 62);
+        c.table_header_bg = Color32::from_rgb(66, 66, 70);
+        c.table_alt_bg = Color32::from_rgb(54, 54, 58);
+        c.search_bg = Color32::from_rgb(58, 58, 62);
+        c.tab_idle_bg = Color32::from_rgb(56, 56, 60);
+        c.accent_button_bg = Color32::from_rgb(48, 48, 52);
+        c.accent_active_button_bg = Color32::from_rgb(48, 48, 52);
+        c.subtle_button_bg = Color32::from_rgb(56, 56, 60);
+        c.danger_button_bg = Color32::from_rgb(48, 48, 52);
+        c.dialog_window_bg = Color32::from_rgb(54, 54, 58);
+        c.dialog_section_bg = Color32::from_rgb(62, 62, 66);
+        c.dialog_input_bg = Color32::from_rgb(76, 76, 80);
+        c.dialog_input_hover_bg = Color32::from_rgb(84, 84, 88);
+        c.dialog_input_active_bg = Color32::from_rgb(90, 90, 94);
+        c.editor_panel_bg = Color32::from_rgb(58, 58, 62);
+        c.editor_bg = Color32::from_rgb(46, 46, 50);
+        c.editor_gutter_bg = Color32::from_rgb(44, 44, 48);
+        c.autocomplete_popup_bg = Color32::from_rgb(50, 50, 54);
+        c.panel_fill = Color32::from_rgb(58, 58, 62);
+        c.window_fill = Color32::from_rgb(58, 58, 62);
+        c.extreme_bg = Color32::from_rgb(76, 76, 80);
+        c.faint_bg = Color32::from_rgb(62, 62, 66);
+        c.code_bg = Color32::from_rgb(72, 72, 76);
+        c.widget_noninteractive_bg = Color32::from_rgb(62, 62, 66);
+    }
+
+    fn apply_dark_warm(c: &mut ThemeColors) {
+        c.toolbar_bg = Color32::from_rgb(52, 50, 48);
+        c.sidebar_bg = Color32::from_rgb(42, 40, 38);
+        c.workspace_bg = Color32::from_rgb(52, 50, 48);
+        c.card_bg = Color32::from_rgb(52, 50, 48);
+        c.table_header_bg = Color32::from_rgb(60, 58, 56);
+        c.table_alt_bg = Color32::from_rgb(48, 46, 44);
+        c.search_bg = Color32::from_rgb(52, 50, 48);
+        c.tab_idle_bg = Color32::from_rgb(50, 48, 46);
+        c.accent_button_bg = Color32::from_rgb(42, 40, 38);
+        c.accent_active_button_bg = Color32::from_rgb(42, 40, 38);
+        c.subtle_button_bg = Color32::from_rgb(50, 48, 46);
+        c.danger_button_bg = Color32::from_rgb(42, 40, 38);
+        c.dialog_window_bg = Color32::from_rgb(48, 46, 44);
+        c.dialog_section_bg = Color32::from_rgb(56, 54, 52);
+        c.dialog_input_bg = Color32::from_rgb(70, 68, 66);
+        c.dialog_input_hover_bg = Color32::from_rgb(78, 76, 74);
+        c.dialog_input_active_bg = Color32::from_rgb(84, 82, 80);
+        c.editor_panel_bg = Color32::from_rgb(52, 50, 48);
+        c.editor_bg = Color32::from_rgb(40, 38, 36);
+        c.editor_gutter_bg = Color32::from_rgb(38, 36, 34);
+        c.autocomplete_popup_bg = Color32::from_rgb(44, 42, 40);
+        c.panel_fill = Color32::from_rgb(52, 50, 48);
+        c.window_fill = Color32::from_rgb(52, 50, 48);
+        c.extreme_bg = Color32::from_rgb(70, 68, 66);
+        c.faint_bg = Color32::from_rgb(56, 54, 52);
+        c.code_bg = Color32::from_rgb(66, 64, 62);
+        c.widget_noninteractive_bg = Color32::from_rgb(56, 54, 52);
+    }
+
+    fn apply_dark_layered(c: &mut ThemeColors) {
+        // 层次方案：侧栏/工具栏保持深色，工作区/内容区更亮，形成明显层次
+        c.toolbar_bg = Color32::from_rgb(48, 48, 52);
+        c.sidebar_bg = Color32::from_rgb(40, 40, 44);
+        c.workspace_bg = Color32::from_rgb(60, 60, 64);
+        c.card_bg = Color32::from_rgb(60, 60, 64);
+        c.table_header_bg = Color32::from_rgb(68, 68, 72);
+        c.table_alt_bg = Color32::from_rgb(56, 56, 60);
+        c.search_bg = Color32::from_rgb(60, 60, 64);
+        c.tab_idle_bg = Color32::from_rgb(50, 50, 54);
+        c.accent_button_bg = Color32::from_rgb(40, 40, 44);
+        c.accent_active_button_bg = Color32::from_rgb(40, 40, 44);
+        c.subtle_button_bg = Color32::from_rgb(50, 50, 54);
+        c.danger_button_bg = Color32::from_rgb(40, 40, 44);
+        c.dialog_window_bg = Color32::from_rgb(56, 56, 60);
+        c.dialog_section_bg = Color32::from_rgb(64, 64, 68);
+        c.dialog_input_bg = Color32::from_rgb(78, 78, 82);
+        c.dialog_input_hover_bg = Color32::from_rgb(86, 86, 90);
+        c.dialog_input_active_bg = Color32::from_rgb(92, 92, 96);
+        c.editor_panel_bg = Color32::from_rgb(60, 60, 64);
+        c.editor_bg = Color32::from_rgb(48, 48, 52);
+        c.editor_gutter_bg = Color32::from_rgb(46, 46, 50);
+        c.autocomplete_popup_bg = Color32::from_rgb(52, 52, 56);
+        c.panel_fill = Color32::from_rgb(54, 54, 56);
+        c.window_fill = Color32::from_rgb(54, 54, 56);
+        c.extreme_bg = Color32::from_rgb(78, 78, 82);
+        c.faint_bg = Color32::from_rgb(64, 64, 68);
+        c.code_bg = Color32::from_rgb(74, 74, 78);
+        c.widget_noninteractive_bg = Color32::from_rgb(64, 64, 68);
+    }
+
+    pub fn dark_cool() -> Self { let mut t = Self::dark(); t.dark_variant = DarkVariant::Cool; Self::apply_dark_cool(&mut t.colors); t }
+    pub fn dark_soft() -> Self { let mut t = Self::dark(); t.dark_variant = DarkVariant::Soft; Self::apply_dark_soft(&mut t.colors); t }
+    pub fn dark_warm() -> Self { let mut t = Self::dark(); t.dark_variant = DarkVariant::Warm; Self::apply_dark_warm(&mut t.colors); t }
+    pub fn dark_layered() -> Self { let mut t = Self::dark(); t.dark_variant = DarkVariant::Layered; Self::apply_dark_layered(&mut t.colors); t }
+
+    fn apply_light_warm(c: &mut ThemeColors) {
+        c.toolbar_bg = Color32::from_rgb(255, 250, 245);
+        c.sidebar_bg = Color32::from_rgb(245, 238, 230);
+        c.workspace_bg = Color32::from_rgb(255, 250, 245);
+        c.card_bg = Color32::from_rgb(255, 250, 245);
+        c.table_header_bg = Color32::from_rgb(248, 243, 238);
+        c.table_alt_bg = Color32::from_rgb(252, 248, 244);
+        c.search_bg = Color32::from_rgb(255, 250, 245);
+        c.tab_idle_bg = Color32::from_rgb(250, 245, 240);
+        c.accent_button_bg = Color32::from_rgb(250, 245, 240);
+        c.accent_active_button_bg = Color32::from_rgb(250, 245, 240);
+        c.subtle_button_bg = Color32::from_rgb(252, 248, 244);
+        c.danger_button_bg = Color32::from_rgb(255, 250, 245);
+        c.dialog_window_bg = Color32::from_rgb(250, 245, 240);
+        c.dialog_section_bg = Color32::from_rgb(255, 248, 242);
+        c.dialog_input_bg = Color32::from_rgb(255, 252, 248);
+        c.dialog_input_hover_bg = Color32::from_rgb(255, 250, 245);
+        c.dialog_input_active_bg = Color32::from_rgb(255, 252, 248);
+        c.editor_panel_bg = Color32::from_rgb(255, 250, 245);
+        c.editor_bg = Color32::from_rgb(252, 247, 242);
+        c.editor_gutter_bg = Color32::from_rgb(248, 243, 238);
+        c.autocomplete_popup_bg = Color32::from_rgb(252, 248, 244);
+        c.panel_fill = Color32::from_rgb(255, 250, 245);
+        c.window_fill = Color32::from_rgb(255, 250, 245);
+        c.extreme_bg = Color32::from_rgb(240, 235, 230);
+        c.faint_bg = Color32::from_rgb(252, 248, 244);
+        c.code_bg = Color32::from_rgb(245, 240, 235);
+        c.widget_noninteractive_bg = Color32::from_rgb(248, 243, 238);
+    }
+
+    fn apply_light_cool(c: &mut ThemeColors) {
+        c.toolbar_bg = Color32::from_rgb(245, 248, 255);
+        c.sidebar_bg = Color32::from_rgb(232, 236, 245);
+        c.workspace_bg = Color32::from_rgb(245, 248, 255);
+        c.card_bg = Color32::from_rgb(245, 248, 255);
+        c.table_header_bg = Color32::from_rgb(238, 242, 250);
+        c.table_alt_bg = Color32::from_rgb(242, 245, 252);
+        c.search_bg = Color32::from_rgb(245, 248, 255);
+        c.tab_idle_bg = Color32::from_rgb(240, 244, 250);
+        c.accent_button_bg = Color32::from_rgb(240, 244, 250);
+        c.accent_active_button_bg = Color32::from_rgb(240, 244, 250);
+        c.subtle_button_bg = Color32::from_rgb(242, 245, 252);
+        c.danger_button_bg = Color32::from_rgb(245, 248, 255);
+        c.dialog_window_bg = Color32::from_rgb(240, 244, 250);
+        c.dialog_section_bg = Color32::from_rgb(248, 250, 255);
+        c.dialog_input_bg = Color32::from_rgb(252, 253, 255);
+        c.dialog_input_hover_bg = Color32::from_rgb(248, 250, 255);
+        c.dialog_input_active_bg = Color32::from_rgb(252, 253, 255);
+        c.editor_panel_bg = Color32::from_rgb(245, 248, 255);
+        c.editor_bg = Color32::from_rgb(242, 245, 252);
+        c.editor_gutter_bg = Color32::from_rgb(238, 242, 248);
+        c.autocomplete_popup_bg = Color32::from_rgb(242, 245, 252);
+        c.panel_fill = Color32::from_rgb(245, 248, 255);
+        c.window_fill = Color32::from_rgb(245, 248, 255);
+        c.extreme_bg = Color32::from_rgb(228, 232, 240);
+        c.faint_bg = Color32::from_rgb(242, 245, 252);
+        c.code_bg = Color32::from_rgb(235, 238, 245);
+        c.widget_noninteractive_bg = Color32::from_rgb(238, 242, 248);
+    }
+
+    fn apply_light_eyecare(c: &mut ThemeColors) {
+        c.toolbar_bg = Color32::from_rgb(250, 245, 235);
+        c.sidebar_bg = Color32::from_rgb(240, 233, 220);
+        c.workspace_bg = Color32::from_rgb(250, 245, 235);
+        c.card_bg = Color32::from_rgb(250, 245, 235);
+        c.table_header_bg = Color32::from_rgb(244, 239, 230);
+        c.table_alt_bg = Color32::from_rgb(248, 244, 236);
+        c.search_bg = Color32::from_rgb(250, 245, 235);
+        c.tab_idle_bg = Color32::from_rgb(246, 241, 232);
+        c.accent_button_bg = Color32::from_rgb(246, 241, 232);
+        c.accent_active_button_bg = Color32::from_rgb(246, 241, 232);
+        c.subtle_button_bg = Color32::from_rgb(248, 244, 236);
+        c.danger_button_bg = Color32::from_rgb(250, 245, 235);
+        c.dialog_window_bg = Color32::from_rgb(246, 241, 232);
+        c.dialog_section_bg = Color32::from_rgb(252, 248, 240);
+        c.dialog_input_bg = Color32::from_rgb(255, 252, 246);
+        c.dialog_input_hover_bg = Color32::from_rgb(252, 248, 240);
+        c.dialog_input_active_bg = Color32::from_rgb(255, 252, 246);
+        c.editor_panel_bg = Color32::from_rgb(250, 245, 235);
+        c.editor_bg = Color32::from_rgb(248, 243, 233);
+        c.editor_gutter_bg = Color32::from_rgb(244, 239, 229);
+        c.autocomplete_popup_bg = Color32::from_rgb(248, 244, 236);
+        c.panel_fill = Color32::from_rgb(250, 245, 235);
+        c.window_fill = Color32::from_rgb(250, 245, 235);
+        c.extreme_bg = Color32::from_rgb(238, 233, 224);
+        c.faint_bg = Color32::from_rgb(248, 244, 236);
+        c.code_bg = Color32::from_rgb(242, 237, 228);
+        c.widget_noninteractive_bg = Color32::from_rgb(244, 239, 230);
+    }
+
+    fn apply_light_softgray(c: &mut ThemeColors) {
+        c.toolbar_bg = Color32::from_rgb(242, 242, 246);
+        c.sidebar_bg = Color32::from_rgb(232, 232, 237);
+        c.workspace_bg = Color32::from_rgb(242, 242, 246);
+        c.card_bg = Color32::from_rgb(242, 242, 246);
+        c.table_header_bg = Color32::from_rgb(236, 236, 241);
+        c.table_alt_bg = Color32::from_rgb(240, 240, 244);
+        c.search_bg = Color32::from_rgb(242, 242, 246);
+        c.tab_idle_bg = Color32::from_rgb(238, 238, 242);
+        c.accent_button_bg = Color32::from_rgb(238, 238, 242);
+        c.accent_active_button_bg = Color32::from_rgb(238, 238, 242);
+        c.subtle_button_bg = Color32::from_rgb(240, 240, 244);
+        c.danger_button_bg = Color32::from_rgb(242, 242, 246);
+        c.dialog_window_bg = Color32::from_rgb(238, 238, 242);
+        c.dialog_section_bg = Color32::from_rgb(245, 245, 250);
+        c.dialog_input_bg = Color32::from_rgb(248, 248, 252);
+        c.dialog_input_hover_bg = Color32::from_rgb(245, 245, 250);
+        c.dialog_input_active_bg = Color32::from_rgb(248, 248, 252);
+        c.editor_panel_bg = Color32::from_rgb(242, 242, 246);
+        c.editor_bg = Color32::from_rgb(238, 238, 242);
+        c.editor_gutter_bg = Color32::from_rgb(234, 234, 239);
+        c.autocomplete_popup_bg = Color32::from_rgb(240, 240, 244);
+        c.panel_fill = Color32::from_rgb(242, 242, 246);
+        c.window_fill = Color32::from_rgb(242, 242, 246);
+        c.extreme_bg = Color32::from_rgb(228, 228, 233);
+        c.faint_bg = Color32::from_rgb(240, 240, 244);
+        c.code_bg = Color32::from_rgb(232, 232, 237);
+        c.widget_noninteractive_bg = Color32::from_rgb(236, 236, 241);
+    }
+
+    pub fn light_warm() -> Self { let mut t = Self::light(); t.light_variant = LightVariant::Warm; Self::apply_light_warm(&mut t.colors); t }
+    pub fn light_cool() -> Self { let mut t = Self::light(); t.light_variant = LightVariant::Cool; Self::apply_light_cool(&mut t.colors); t }
+    pub fn light_eyecare() -> Self { let mut t = Self::light(); t.light_variant = LightVariant::EyeCare; Self::apply_light_eyecare(&mut t.colors); t }
+    pub fn light_softgray() -> Self { let mut t = Self::light(); t.light_variant = LightVariant::SoftGray; Self::apply_light_softgray(&mut t.colors); t }
 }

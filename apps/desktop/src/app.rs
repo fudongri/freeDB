@@ -21,8 +21,8 @@ use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use crate::autocomplete::{
-    autocomplete_palette, render_autocomplete_popup, AutocompleteEngine, AutocompleteState,
-    SchemaCache, SqlContextParser,
+    autocomplete_palette, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
+    AutocompleteState, SchemaCache, SqlContextParser,
 };
 
 struct ReleaseAsset {
@@ -71,6 +71,8 @@ pub struct DesktopApp {
     connection_form: ConnectionFormState,
     use_dark_theme: bool,
     theme: ui_theme::Theme,
+    dark_variant: ui_theme::DarkVariant,
+    light_variant: ui_theme::LightVariant,
     zoom_factor: f32,
     icon_texture: Option<egui::TextureHandle>,
     pending_connection_tree: Option<Receiver<ConnectionTreeLoadResult>>,
@@ -139,7 +141,7 @@ pub struct DesktopApp {
     menu_log: Option<muda::MenuItem>,
     menu_lang: Option<muda::MenuItem>,
     menu_scroll_speed: Option<muda::MenuItem>,
-    menu_theme: Option<muda::MenuItem>,
+    menu_theme: Option<muda::Submenu>,
     locale: Locale,
     /// 帧计数器：延迟最大化到窗口完全显示后执行
     frame_count: usize,
@@ -1076,7 +1078,7 @@ impl DesktopApp {
         menu_log: Option<muda::MenuItem>,
         menu_lang: Option<muda::MenuItem>,
         menu_scroll_speed: Option<muda::MenuItem>,
-        menu_theme: Option<muda::MenuItem>,
+        menu_theme: Option<muda::Submenu>,
         locale: Locale,
     ) -> Self {
         // 加载已保存的语言，优先于系统检测
@@ -1099,12 +1101,14 @@ impl DesktopApp {
             .and_then(|value| value.parse::<f32>().ok())
             .map(|value| value.clamp(180.0, 300.0))
             .unwrap_or(200.0);
-        let use_dark_theme = services
-            .load_ui_state("theme")
+        let theme_str = services
+            .load_ui_state("theme_v2")
             .ok()
             .flatten()
-            .map(|value| value != "light")
-            .unwrap_or(true);
+            .unwrap_or_else(|| "dark_soft".into());
+        let use_dark_theme = !theme_str.starts_with("light");
+        let dark_variant = ui_theme::DarkVariant::from_str(&theme_str);
+        let light_variant = ui_theme::LightVariant::from_str(&theme_str);
         let zoom_factor = services
             .load_ui_state("zoom_factor")
             .ok()
@@ -1141,7 +1145,9 @@ impl DesktopApp {
             editing_connection_id: None,
             connection_form: ConnectionFormState::default(),
             use_dark_theme,
-            theme: if use_dark_theme { ui_theme::Theme::dark() } else { ui_theme::Theme::light() },
+            theme: ui_theme::Theme::new(use_dark_theme, dark_variant, light_variant),
+            dark_variant,
+            light_variant,
             zoom_factor,
             icon_texture: None,
             pending_connection_tree: None,
@@ -1225,6 +1231,31 @@ impl DesktopApp {
         }
 
         app
+    }
+
+    fn set_active_theme_menu(&self, active_id: &str) {
+        if let Some(ref submenu) = self.menu_theme {
+            // 移除所有子项并用正确的选中状态重建，
+            // 避免因顶层菜单追加导致 ns_menu_items 中存在多余的 NSMenuItem 条目。
+            while submenu.remove_at(0).is_some() {}
+
+            let add = |id: &str, text: &str| {
+                let _ = submenu.append(&muda::CheckMenuItem::with_id(
+                    id, text, true, id == active_id, None::<muda::accelerator::Accelerator>,
+                ));
+            };
+            add("主题_浅色", &tr!("浅色"));
+            add("主题_浅色_暖调", &tr!("浅色 · 暖调"));
+            add("主题_浅色_冷调", &tr!("浅色 · 冷调"));
+            add("主题_浅色_护眼", &tr!("浅色 · 护眼"));
+            add("主题_浅色_柔灰", &tr!("浅色 · 柔灰"));
+            let _ = submenu.insert(&muda::PredefinedMenuItem::separator(), 5);
+            add("主题_深色", &tr!("深色"));
+            add("主题_深色_冷调", &tr!("深色 · 冷调"));
+            add("主题_深色_柔和", &tr!("深色 · 柔和"));
+            add("主题_深色_暖调", &tr!("深色 · 暖调"));
+            add("主题_深色_层次", &tr!("深色 · 层次"));
+        }
     }
 
     fn refresh_connections(&mut self) {
@@ -1453,10 +1484,57 @@ impl DesktopApp {
                 self.is_log_window_open = true;
             } else if event.id == "滚动速度" {
                 self.is_scroll_speed_open = true;
-            } else if event.id == "切换主题" {
-                self.use_dark_theme = !self.use_dark_theme;
-                self.theme = if self.use_dark_theme { ui_theme::Theme::dark() } else { ui_theme::Theme::light() };
-                let _ = self.services.save_ui_state("theme", if self.use_dark_theme { "dark" } else { "light" });
+            } else if event.id == "主题_浅色" {
+                self.use_dark_theme = false;
+                self.light_variant = ui_theme::LightVariant::Standard;
+                self.theme = ui_theme::Theme::new(false, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.light_variant.as_str());
+            } else if event.id == "主题_浅色_暖调" {
+                self.use_dark_theme = false;
+                self.light_variant = ui_theme::LightVariant::Warm;
+                self.theme = ui_theme::Theme::new(false, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.light_variant.as_str());
+            } else if event.id == "主题_浅色_冷调" {
+                self.use_dark_theme = false;
+                self.light_variant = ui_theme::LightVariant::Cool;
+                self.theme = ui_theme::Theme::new(false, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.light_variant.as_str());
+            } else if event.id == "主题_浅色_护眼" {
+                self.use_dark_theme = false;
+                self.light_variant = ui_theme::LightVariant::EyeCare;
+                self.theme = ui_theme::Theme::new(false, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.light_variant.as_str());
+            } else if event.id == "主题_浅色_柔灰" {
+                self.use_dark_theme = false;
+                self.light_variant = ui_theme::LightVariant::SoftGray;
+                self.theme = ui_theme::Theme::new(false, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.light_variant.as_str());
+            } else if event.id == "主题_深色" {
+                self.use_dark_theme = true;
+                self.dark_variant = ui_theme::DarkVariant::Standard;
+                self.theme = ui_theme::Theme::new(true, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.dark_variant.as_str());
+            } else if event.id == "主题_深色_冷调" {
+                self.use_dark_theme = true;
+                self.dark_variant = ui_theme::DarkVariant::Cool;
+                self.theme = ui_theme::Theme::new(true, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.dark_variant.as_str());
+            } else if event.id == "主题_深色_柔和" {
+                self.use_dark_theme = true;
+                self.dark_variant = ui_theme::DarkVariant::Soft;
+                self.theme = ui_theme::Theme::new(true, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.dark_variant.as_str());
+            } else if event.id == "主题_深色_暖调" {
+                self.use_dark_theme = true;
+                self.dark_variant = ui_theme::DarkVariant::Warm;
+                self.theme = ui_theme::Theme::new(true, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.dark_variant.as_str());
+            } else if event.id == "主题_深色_层次" {
+                self.use_dark_theme = true;
+                self.dark_variant = ui_theme::DarkVariant::Layered;
+                self.theme = ui_theme::Theme::new(true, self.dark_variant, self.light_variant);
+                let _ = self.services.save_ui_state("theme_v2", self.dark_variant.as_str());
+                self.set_active_theme_menu(event.id.as_ref());
             } else if event.id == "新建连接" {
                 self.is_connection_dialog_open = true;
                 self.editing_connection_id = None;
@@ -1528,7 +1606,7 @@ impl DesktopApp {
                     m.set_text(lang_label);
                 }
                 if let Some(m) = &self.menu_scroll_speed { m.set_text(tr!("滚动速度")); }
-                if let Some(m) = &self.menu_theme { m.set_text(tr!("切换主题")); }
+                if let Some(m) = &self.menu_theme { m.set_text(tr!("主题")); }
                 self.status_message = tr!("已切换为 {}", new_locale.display_name());
                 self.status_level = StatusLevel::Success;
             }
@@ -6916,7 +6994,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         pending_query_batch_save: bool,
     ) -> TabUiAction {
         let mut action = TabUiAction::None;
-        let chrome = mac_ui_palette(ui.visuals());
+        let chrome = mac_ui_palette_from_ui(ui);
         let selected_connection_label = tab
             .connection_id
             .as_ref()
@@ -7117,7 +7195,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 });
 
                 strip.cell(|ui| {
-                    let palette = editor_palette(ui.visuals());
+                    let palette = editor_palette_from_ui(ui);
                     egui::Frame::new()
                         .fill(palette.panel_bg)
                         .stroke(Stroke::NONE)
@@ -7190,7 +7268,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             .size(Size::remainder())
                                             .horizontal(|mut h_strip| {
                                                 h_strip.cell(|ui| {
-                                                    let palette = mac_ui_palette(ui.visuals());
+                                                    let palette = mac_ui_palette_from_ui(ui);
                                                     let (id, rect) = ui.allocate_space(egui::vec2(24.0, ui.available_height()));
                                                     let sense = egui::Sense::click();
                                                     let response = ui.interact(rect, id, sense);
@@ -7233,7 +7311,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 // 使用 has_result（frame 开始时计算），不读 bottom_panel_collapsed（可能已被 toolbar 修改）
                 if !has_result && has_result_data {
                     strip.cell(|ui| {
-                        let palette = mac_ui_palette(ui.visuals());
+                        let palette = mac_ui_palette_from_ui(ui);
                         let (rect, response) = ui.allocate_exact_size(
                             egui::vec2(ui.available_width(), 24.0),
                             egui::Sense::click(),
@@ -7696,7 +7774,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn render_create_table_tab(ui: &mut egui::Ui, tab: &mut CreateTableState) -> TabUiAction {
         let mut action = TabUiAction::None;
-        let palette = mac_ui_palette(&ui.visuals());
+        let palette = mac_ui_palette_from_ui(ui);
 
         // ── toolbar ──
         ui.horizontal(|ui| {
@@ -7810,7 +7888,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn render_create_table_columns_view(ui: &mut egui::Ui, tab: &mut CreateTableState) -> TabUiAction {
         let mut action = TabUiAction::None;
-        let palette = mac_ui_palette(ui.visuals());
+        let palette = mac_ui_palette_from_ui(ui);
 
         // 工具栏
         ui.horizontal(|ui| {
@@ -7987,7 +8065,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn render_create_table_indexes_view(ui: &mut egui::Ui, tab: &mut CreateTableState) -> TabUiAction {
         let mut action = TabUiAction::None;
-        let palette = mac_ui_palette(ui.visuals());
+        let palette = mac_ui_palette_from_ui(ui);
 
         // 工具栏
         ui.horizontal(|ui| {
@@ -8137,7 +8215,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.add(egui::TextEdit::multiline(&mut preview_ref).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).interactive(false));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let palette = mac_dialog_palette(ui.visuals().dark_mode);
+                        let palette = mac_dialog_palette_from_ui(ui);
                         let (p_fill, p_stroke, p_text) = (palette.primary_button_bg, Stroke::new(1.0, palette.primary_button_stroke), palette.primary_button_text);
                         let (s_fill, s_stroke, s_text) = (palette.secondary_button_bg, Stroke::new(1.0, palette.secondary_button_stroke), palette.secondary_button_text);
                         if ui.add(egui::Button::new(RichText::new(tr!("确定")).size(12.0).color(p_text)).fill(p_fill).stroke(p_stroke).corner_radius(6.0)).clicked()
@@ -8171,7 +8249,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn render_table_tab(ui: &mut egui::Ui, tab: &mut TableTabState, pending_batch_save: bool) -> TabUiAction {
         tab.committed_edit_this_frame = false;
-        let palette = mac_ui_palette(ui.visuals());
+        let palette = mac_ui_palette_from_ui(ui);
         let show_table_loading = |ui: &mut egui::Ui, label: &str| {
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
@@ -12068,7 +12146,7 @@ fn format_bytes(bytes: u64) -> String {
 
 impl eframe::App for DesktopApp {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        let theme = ui_theme::Theme::new(visuals.dark_mode);
+        let theme = ui_theme::Theme::new(visuals.dark_mode, self.dark_variant, self.light_variant);
         theme.colors.sidebar_bg.to_normalized_gamma_f32()
     }
 
@@ -12113,6 +12191,25 @@ impl eframe::App for DesktopApp {
                     menu.init_for_nsapp();
                     self.native_menu_initialized = true;
                     tracing::info!("原生菜单栏初始化完成");
+                    // 菜单挂载后才能设置选中状态（NSMenuItem 此时才注册）
+                    let active_id = if self.use_dark_theme {
+                        match self.dark_variant {
+                            ui_theme::DarkVariant::Standard => "主题_深色",
+                            ui_theme::DarkVariant::Cool => "主题_深色_冷调",
+                            ui_theme::DarkVariant::Soft => "主题_深色_柔和",
+                            ui_theme::DarkVariant::Warm => "主题_深色_暖调",
+                            ui_theme::DarkVariant::Layered => "主题_深色_层次",
+                        }
+                    } else {
+                        match self.light_variant {
+                            ui_theme::LightVariant::Standard => "主题_浅色",
+                            ui_theme::LightVariant::Warm => "主题_浅色_暖调",
+                            ui_theme::LightVariant::Cool => "主题_浅色_冷调",
+                            ui_theme::LightVariant::EyeCare => "主题_浅色_护眼",
+                            ui_theme::LightVariant::SoftGray => "主题_浅色_柔灰",
+                        }
+                    };
+                    self.set_active_theme_menu(active_id);
                 }
                 #[cfg(target_os = "windows")]
                 {
@@ -12163,8 +12260,9 @@ impl eframe::App for DesktopApp {
             // 后台任务进行中时主动请求后续帧，避免必须等鼠标再次移动才显示结果。
             ctx.request_repaint_after(Duration::from_millis(16));
         }
-        ctx.set_visuals(app_visuals(self.use_dark_theme));
-        let style = app_style(ctx.style().as_ref());
+        ctx.set_visuals(app_visuals(self.use_dark_theme, self.dark_variant, self.light_variant));
+        ctx.memory_mut(|mem| mem.data.insert_temp(egui::Id::new("theme_variants"), (self.dark_variant, self.light_variant)));
+        let style = app_style(ctx.style().as_ref(), self.dark_variant, self.light_variant);
         ctx.set_style(style);
         ctx.set_zoom_factor(self.zoom_factor);
         // macOS 触控板发送 Point 事件，line_scroll_speed 对其无效；
@@ -12266,7 +12364,7 @@ impl eframe::App for DesktopApp {
             None => {}
         }
 
-        let palette = mac_sidebar_palette(ctx.style().visuals.dark_mode);
+        let palette = mac_sidebar_palette(ctx.style().visuals.dark_mode, self.dark_variant, self.light_variant);
         let half_screen = ctx.viewport_rect().width() / 2.0;
         // 全局预消费 Enter/Esc：仅在侧边栏持有焦点（且搜索框无焦点）时才预消费，
         // 否则让 TextEdit (如 SQL 编辑器、侧边栏搜索框) 正常接收 Enter。
@@ -13043,7 +13141,7 @@ impl eframe::App for DesktopApp {
             .save_ui_state("sidebar_width", &format!("{:.1}", self.sidebar_width));
         let _ = self
             .services
-            .save_ui_state("theme", if self.use_dark_theme { "dark" } else { "light" });
+            .save_ui_state("theme_v2", if self.use_dark_theme { "dark" } else { "light" });
         let _ = self
             .services
             .save_ui_state("zoom_factor", &format!("{:.2}", self.zoom_factor));
@@ -14510,7 +14608,7 @@ fn render_result_table(
     row_number_width: &mut f32,
     row_num_resize_drag: &mut Option<f32>,
 ) -> ResultTableActionResult {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     if result.columns.is_empty() {
         ui.label(tr!("当前语句没有结果集"));
         return ResultTableActionResult { sort_click: None, action: TabUiAction::None };
@@ -15108,7 +15206,7 @@ fn render_editable_result_table(
     row_number_width: &mut f32,
     row_num_resize_drag: &mut Option<f32>,
 ) -> ResultTableActionResult {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     if result.columns.is_empty() {
         return ResultTableActionResult { sort_click: None, action: TabUiAction::None };
     }
@@ -16115,7 +16213,7 @@ fn commit_query_edit_to_pending(edit: &mut QueryEditContext) {
 }
 
 fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAction {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let Some(preview) = tab.preview.as_ref() else {
         ui.label(tr!("暂无预览数据"));
         return TabUiAction::None;
@@ -18157,8 +18255,8 @@ fn table_cell_content_rect(rect: egui::Rect) -> egui::Rect {
 }
 
 fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) {
-    let palette = mac_ui_palette(ui.visuals());
-    let editor = editor_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
+    let editor = editor_palette_from_ui(ui);
     let code_font_size = 13.0;
     let formatted_sql = format_definition_sql(create_sql);
     let line_count = formatted_sql.lines().count().max(1);
@@ -18204,11 +18302,15 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
                                             ui.available_height(),
                                         ),
                                     );
-                                    ui.label(sql_highlight_job_with_font_size(
-                                        &formatted_sql,
-                                        ui.visuals(),
-                                        code_font_size,
-                                    ));
+                                    {
+                                        let (dv, lv) = read_theme_variants(ui);
+                                        ui.label(sql_highlight_job_with_font_size(
+                                            &formatted_sql,
+                                            ui.visuals(),
+                                            code_font_size,
+                                            dv, lv,
+                                        ));
+                                    }
                                 });
                         });
                 });
@@ -18536,7 +18638,7 @@ enum ParsedDdlItem {
 }
 
 fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition, db_kind: DatabaseKind) {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let viewport_width = ui.available_width().max(0.0);
     let viewport_height = ui.available_height().max(180.0);
     let show_auto_increment = db_kind == DatabaseKind::MySql;
@@ -19009,7 +19111,7 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
 
 /// 结构视图的主入口，处理只读/编辑两种模式
 fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAction {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let Some(definition) = tab.definition.clone() else {
         if tab.error.is_none() {
             ui.vertical_centered(|ui| {
@@ -19172,7 +19274,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                         .max_height(200.0)
                         .show(ui, |ui| {
                             ui.set_width(available_width - 24.0);
-                            let job = sql_highlight_job_with_word_wrap(&sql, ui.visuals(), available_width - 28.0);
+                            let job = sql_highlight_job_with_word_wrap_from_ui(ui, &sql, available_width - 28.0);
                             ui.add(egui::Label::new(job));
                         });
                 });
@@ -19244,7 +19346,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState) {
             );
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                let palette = mac_dialog_palette(ui.visuals().dark_mode);
+                let palette = mac_dialog_palette_from_ui(ui);
                 let (p_fill, p_stroke, p_text) = (
                     palette.primary_button_bg,
                     Stroke::new(1.0, palette.primary_button_stroke),
@@ -19816,7 +19918,7 @@ fn render_index_table(
 }
 
 fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAction {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let Some(definition) = tab.definition.clone() else {
         if tab.error.is_none() {
             ui.vertical_centered(|ui| {
@@ -19922,7 +20024,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
                         .max_height(200.0)
                         .show(ui, |ui| {
                             ui.set_width(available_width - 24.0);
-                            let job = sql_highlight_job_with_word_wrap(&sql, ui.visuals(), available_width - 28.0);
+                            let job = sql_highlight_job_with_word_wrap_from_ui(ui, &sql, available_width - 28.0);
                             ui.add(egui::Label::new(job));
                         });
                 }
@@ -19943,7 +20045,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
 
 /// 编辑模式下的结构表格
 fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let show_auto_increment = tab.database_kind == DatabaseKind::MySql;
     let show_on_update = tab.database_kind == DatabaseKind::MySql;
 
@@ -20671,7 +20773,7 @@ fn render_editor_find_bar(
     ui: &mut egui::Ui,
     tab: &mut QueryTabState,
 ) {
-    let chrome = mac_ui_palette(ui.visuals());
+    let chrome = mac_ui_palette_from_ui(ui);
     let frame_response = egui::Frame::new()
         .fill(chrome.search_bg)
         .stroke(Stroke::new(1.0, chrome.soft_border))
@@ -22637,12 +22739,12 @@ impl From<&ui_theme::ThemeColors> for MacDialogPalette {
     }
 }
 
-fn mac_dialog_palette(dark_mode: bool) -> MacDialogPalette {
-    MacDialogPalette::from(&ui_theme::Theme::new(dark_mode).colors)
+fn mac_dialog_palette(dark_mode: bool, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> MacDialogPalette {
+    MacDialogPalette::from(&ui_theme::Theme::new(dark_mode, dark_variant, light_variant).colors)
 }
 
-fn app_visuals(use_dark_theme: bool) -> egui::Visuals {
-    let theme = ui_theme::Theme::new(use_dark_theme);
+fn app_visuals(use_dark_theme: bool, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> egui::Visuals {
+    let theme = ui_theme::Theme::new(use_dark_theme, dark_variant, light_variant);
     let c = &theme.colors;
     let mut visuals = if use_dark_theme {
         egui::Visuals::dark()
@@ -22687,8 +22789,8 @@ fn app_visuals(use_dark_theme: bool) -> egui::Visuals {
     visuals
 }
 
-fn app_style(base_style: &egui::Style) -> egui::Style {
-    let theme = ui_theme::Theme::from_visuals(&base_style.visuals);
+fn app_style(base_style: &egui::Style, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> egui::Style {
+    let theme = ui_theme::Theme::from_visuals(&base_style.visuals, dark_variant, light_variant);
     let c = &theme.colors;
     let mut style = base_style.clone();
     style.spacing.scroll = egui::style::ScrollStyle::floating();
@@ -22731,7 +22833,7 @@ fn apply_mac_dialog_style(ui: &mut egui::Ui, palette: MacDialogPalette) {
 }
 
 fn dialog_button(ui: &mut egui::Ui, label: &str, primary: bool) -> egui::Response {
-    let palette = mac_dialog_palette(ui.visuals().dark_mode);
+    let palette = mac_dialog_palette_from_ui(ui);
     let (fill, stroke, text) = if primary {
         (
             palette.primary_button_bg,
@@ -23518,7 +23620,7 @@ fn toolbar_dropdown(
     width: f32,
     items: &[(&str, bool)],
 ) -> Option<usize> {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let btn_label = format!("{label} ▾");
     let btn = ui.add(
         egui::Button::new(RichText::new(btn_label).size(12.5).color(palette.text))
@@ -23653,7 +23755,7 @@ struct TabButtonOutput {
 
 /// 渲染菜单项，右侧显示浅色快捷键提示
 fn menu_button_with_shortcut(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
-    let chrome = mac_ui_palette(ui.visuals());
+    let chrome = mac_ui_palette_from_ui(ui);
     let font_id = FontId::new(14.0, FontFamily::Proportional);
     let resp = ui.scope(|ui| {
         let mut job = egui::text::LayoutJob::default();
@@ -23667,7 +23769,7 @@ fn menu_button_with_shortcut(ui: &mut egui::Ui, label: &str, shortcut: &str) -> 
 
 /// 设置右键菜单样式：加大字号，选中/悬停背景改为蓝色，增大间距和内边距
 fn ctx_menu_style(ui: &mut egui::Ui) {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let font_id = FontId::new(14.0, FontFamily::Proportional);
     ui.style_mut().text_styles.insert(egui::TextStyle::Body, font_id.clone());
     ui.style_mut().text_styles.insert(egui::TextStyle::Button, font_id);
@@ -23712,7 +23814,7 @@ fn tab_button(
     label: &str,
     selected: bool,
 ) -> TabButtonOutput {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let display_label = truncate_ui_label_by_width(label, 20);
     let is_truncated = display_label != label;
     let label_display_width: usize = display_label.chars().map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)).sum();
@@ -23832,7 +23934,7 @@ fn segment_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respo
 }
 
 fn segment_button_color(ui: &mut egui::Ui, label: &str, selected: bool, _accent: Option<Color32>) -> egui::Response {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let (fill, text_color, stroke_color) = if selected {
         // 选中：与已保存 SQL "全部" 按钮一致的 selection 风格
         (palette.selection_bg, palette.selection_text, palette.selection_stroke)
@@ -23855,7 +23957,7 @@ fn segment_button_color(ui: &mut egui::Ui, label: &str, selected: bool, _accent:
 
 /// 单元格文本框样式：深色模式透明底，浅色模式白底 + 边框
 fn apply_cell_input_style(ui: &mut egui::Ui) {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let v = ui.visuals_mut();
     v.widgets.inactive.bg_fill = Color32::TRANSPARENT;
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.soft_border);
@@ -23960,7 +24062,7 @@ fn render_type_input_with_dropdown(
     id_source: egui::Id,
     db_kind: core_domain::DatabaseKind,
 ) -> bool {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let suggestions = match db_kind {
         core_domain::DatabaseKind::MySql => mysql_type_suggestions(),
         core_domain::DatabaseKind::Postgres => pg_type_suggestions(),
@@ -24038,7 +24140,7 @@ fn render_type_input_with_dropdown(
 }
 
 fn render_query_empty_state(ui: &mut egui::Ui, title: &str, description: &str) {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let width = ui.available_width().max(220.0);
     let height = ui.available_height().max(140.0);
     ui.allocate_ui_with_layout(
@@ -24511,7 +24613,7 @@ fn tree_row_button(
     strong: bool,
     width: f32,
 ) -> egui::Response {
-    let palette = mac_ui_palette(ui.visuals());
+    let palette = mac_ui_palette_from_ui(ui);
     let desired_size = Vec2::new(width.max(24.0).min(ui.available_width()), 20.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
     response
@@ -24556,34 +24658,75 @@ fn tree_row_button(
     response
 }
 
-fn mac_sidebar_palette(dark_mode: bool) -> MacUiPalette {
-    MacUiPalette::from(&ui_theme::Theme::new(dark_mode).colors)
+fn mac_sidebar_palette(dark_mode: bool, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> MacUiPalette {
+    MacUiPalette::from(&ui_theme::Theme::new(dark_mode, dark_variant, light_variant).colors)
 }
 
-fn mac_ui_palette(visuals: &egui::Visuals) -> MacUiPalette {
-    MacUiPalette::from(&ui_theme::Theme::from_visuals(visuals).colors)
+fn mac_ui_palette(visuals: &egui::Visuals, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> MacUiPalette {
+    MacUiPalette::from(&ui_theme::Theme::from_visuals(visuals, dark_variant, light_variant).colors)
 }
 
-fn sql_highlight_job(sql: &str, visuals: &egui::Visuals) -> egui::text::LayoutJob {
-    sql_highlight_job_with_font_size(sql, visuals, 15.0)
+fn read_theme_variants(ui: &egui::Ui) -> (ui_theme::DarkVariant, ui_theme::LightVariant) {
+    ui.memory(|mem| {
+        mem.data.get_temp::<(ui_theme::DarkVariant, ui_theme::LightVariant)>(egui::Id::new("theme_variants"))
+            .unwrap_or((ui_theme::DarkVariant::Standard, ui_theme::LightVariant::Standard))
+    })
+}
+
+fn mac_ui_palette_from_ui(ui: &egui::Ui) -> MacUiPalette {
+    let (dv, lv) = read_theme_variants(ui);
+    mac_ui_palette(ui.visuals(), dv, lv)
+}
+
+fn mac_dialog_palette_from_ui(ui: &egui::Ui) -> MacDialogPalette {
+    let (dv, lv) = read_theme_variants(ui);
+    mac_dialog_palette(ui.visuals().dark_mode, dv, lv)
+}
+
+fn autocomplete_palette_from_ui(ui: &egui::Ui) -> AutocompletePalette {
+    let (dv, lv) = read_theme_variants(ui);
+    autocomplete_palette(ui.visuals().dark_mode, dv, lv)
+}
+
+fn editor_palette_from_ui(ui: &egui::Ui) -> EditorPalette {
+    let (dv, lv) = read_theme_variants(ui);
+    editor_palette(ui.visuals(), dv, lv)
+}
+
+fn sql_highlight_job(sql: &str, visuals: &egui::Visuals, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> egui::text::LayoutJob {
+    sql_highlight_job_with_font_size(sql, visuals, 15.0, dark_variant, light_variant)
+}
+
+fn sql_highlight_job_from_ui(ui: &egui::Ui, sql: &str) -> egui::text::LayoutJob {
+    let (dv, lv) = read_theme_variants(ui);
+    sql_highlight_job(sql, ui.visuals(), dv, lv)
 }
 
 fn sql_highlight_job_with_word_wrap(
     sql: &str,
     visuals: &egui::Visuals,
     max_width: f32,
+    dark_variant: ui_theme::DarkVariant,
+    light_variant: ui_theme::LightVariant,
 ) -> egui::text::LayoutJob {
-    let mut job = sql_highlight_job_with_font_size(sql, visuals, 13.0);
+    let mut job = sql_highlight_job_with_font_size(sql, visuals, 13.0, dark_variant, light_variant);
     job.wrap.max_width = max_width;
     job
+}
+
+fn sql_highlight_job_with_word_wrap_from_ui(ui: &egui::Ui, sql: &str, max_width: f32) -> egui::text::LayoutJob {
+    let (dv, lv) = read_theme_variants(ui);
+    sql_highlight_job_with_word_wrap(sql, ui.visuals(), max_width, dv, lv)
 }
 
 fn sql_highlight_job_with_font_size(
     sql: &str,
     visuals: &egui::Visuals,
     font_size: f32,
+    dark_variant: ui_theme::DarkVariant,
+    light_variant: ui_theme::LightVariant,
 ) -> egui::text::LayoutJob {
-    let palette = editor_palette(visuals);
+    let palette = editor_palette(visuals, dark_variant, light_variant);
     let mut job = egui::text::LayoutJob::default();
     let default = TextFormat {
         font_id: FontId::new(font_size, FontFamily::Monospace),
@@ -24754,8 +24897,8 @@ impl From<&ui_theme::ThemeColors> for EditorPalette {
     }
 }
 
-fn editor_palette(visuals: &egui::Visuals) -> EditorPalette {
-    EditorPalette::from(&ui_theme::Theme::from_visuals(visuals).colors)
+fn editor_palette(visuals: &egui::Visuals, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> EditorPalette {
+    EditorPalette::from(&ui_theme::Theme::from_visuals(visuals, dark_variant, light_variant).colors)
 }
 
 fn check_autocomplete_triggers(
@@ -24919,7 +25062,7 @@ fn render_query_editor(
         .sql
         .lines()
         .map(|line| {
-            let mut job = sql_highlight_job(line, ui.visuals());
+            let mut job = sql_highlight_job_from_ui(ui, line);
             job.wrap.max_width = wrap_width;
             for section in &mut job.sections {
                 section.format.line_height = Some(gutter_row_height);
@@ -24948,7 +25091,7 @@ fn render_query_editor(
     let mut layouter = |ui: &egui::Ui,
                         buf: &dyn egui::TextBuffer,
                         wrap_width: f32| {
-        let mut job = sql_highlight_job(buf.as_str(), ui.visuals());
+        let mut job = sql_highlight_job_from_ui(ui, buf.as_str());
         job.wrap.max_width = wrap_width;
         for section in &mut job.sections {
             section.format.line_height = Some(gutter_row_height);
@@ -25171,7 +25314,7 @@ fn render_query_editor(
                                     let has_selection = tab.cursor_range
                                         .is_some_and(|r| !r.is_empty());
                                     let can_execute = has_selection && !is_executing;
-                                    let chrome = mac_ui_palette(ui.visuals());
+                                    let chrome = mac_ui_palette_from_ui(ui);
                                     let font_id = FontId::new(14.0, FontFamily::Proportional);
                                     let mut job = egui::text::LayoutJob::default();
                                     job.append(tr!("▶ 执行选中语句"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
@@ -25377,7 +25520,7 @@ fn render_query_editor(
                         if suggestions.is_empty() {
                             tab.autocomplete.dismiss();
                         } else {
-                            let pal = autocomplete_palette(ui.visuals().dark_mode);
+                            let pal = autocomplete_palette_from_ui(ui);
 
                             if let Some((selected, cursor_offset)) = render_autocomplete_popup(
                                 ui.ctx(),
@@ -25459,8 +25602,8 @@ fn render_saved_queries_panel(
     chrome: MacUiPalette,
     action: &mut TabUiAction,
 ) {
-    let panel_palette = mac_ui_palette(ui.visuals());
-    let ep = editor_palette(ui.visuals());
+    let panel_palette = mac_ui_palette_from_ui(ui);
+    let ep = editor_palette_from_ui(ui);
     let available_height = ui.available_height();
     egui::Frame::new()
         .fill(ep.editor_bg)

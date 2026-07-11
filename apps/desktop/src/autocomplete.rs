@@ -1344,8 +1344,8 @@ impl From<&ui_theme::ThemeColors> for AutocompletePalette {
 }
 
 /// Derive autocomplete palette from the application theme.
-pub(crate) fn autocomplete_palette(dark_mode: bool) -> AutocompletePalette {
-    AutocompletePalette::from(&ui_theme::Theme::new(dark_mode).colors)
+pub(crate) fn autocomplete_palette(dark_mode: bool, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> AutocompletePalette {
+    AutocompletePalette::from(&ui_theme::Theme::new(dark_mode, dark_variant, light_variant).colors)
 }
 
 #[cfg(test)]
