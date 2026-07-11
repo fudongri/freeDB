@@ -23254,9 +23254,9 @@ fn blend_color(left: Color32, right: Color32, right_weight: f32) -> Color32 {
 fn toolbar_button(
     ui: &mut egui::Ui,
     label: &str,
-    kind: ToolbarButtonKind,
+    style: ButtonStyle,
 ) -> egui::Response {
-    toolbar_button_sized(ui, label, kind, None)
+    toolbar_button_sized(ui, label, style, None)
 }
 
 
@@ -23264,58 +23264,16 @@ fn toolbar_button(
 fn toolbar_button_sized(
     ui: &mut egui::Ui,
     label: &str,
-    kind: ToolbarButtonKind,
+    style: ButtonStyle,
     fixed_width: Option<f32>,
 ) -> egui::Response {
-    let palette = mac_ui_palette(ui.visuals());
-    let (fill, text, stroke) = match kind {
-        ToolbarButtonKind::Primary => (
-            palette.primary_button_bg,
-            palette.primary_button_text,
-            Stroke::new(1.0, palette.primary_button_stroke),
-        ),
-        ToolbarButtonKind::Secondary => (
-            palette.secondary_button_bg,
-            palette.secondary_button_text,
-            Stroke::new(1.0, palette.secondary_button_stroke),
-        ),
-        ToolbarButtonKind::Accent => (
-            palette.accent_button_bg,
-            palette.accent_button_text,
-            Stroke::new(1.0, palette.accent_button_stroke),
-        ),
-        ToolbarButtonKind::AccentActive => (
-            palette.accent_active_button_bg,
-            palette.accent_active_button_text,
-            Stroke::new(1.0, palette.accent_active_button_stroke),
-        ),
-        ToolbarButtonKind::AccentMuted => {
-            let is_dark = ui.visuals().dark_mode;
-            if is_dark {
-                (Color32::from_rgb(35, 52, 58), Color32::from_rgb(100, 210, 255), Stroke::new(1.0, Color32::from_rgb(50, 80, 90)))
-            } else {
-                (Color32::from_rgb(230, 244, 250), Color32::from_rgb(55, 155, 200), Stroke::new(1.0, Color32::from_rgb(180, 220, 238)))
-            }
-        }
-        ToolbarButtonKind::Subtle => (
-            palette.subtle_button_bg,
-            palette.subtle_button_text,
-            Stroke::new(1.0, palette.subtle_button_stroke),
-        ),
-        ToolbarButtonKind::Danger => (
-            palette.danger_button_bg,
-            palette.danger_button_text,
-            Stroke::new(1.0, palette.danger_button_stroke),
-        ),
-    };
-
-    let w = fixed_width.unwrap_or(0.0);
+    let w = fixed_width.unwrap_or(style.min_width);
     ui.add(
-        egui::Button::new(RichText::new(label).size(12.5).color(text))
-            .fill(fill)
-            .stroke(stroke)
-            .corner_radius(5.0)
-            .min_size(Vec2::new(w, 26.0)),
+        egui::Button::new(RichText::new(label).size(style.font_size).color(style.text))
+            .fill(style.fill)
+            .stroke(style.stroke)
+            .corner_radius(style.corner_radius)
+            .min_size(Vec2::new(w, style.min_height)),
     )
 }
 
