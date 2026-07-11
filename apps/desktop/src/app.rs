@@ -2736,7 +2736,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     tab_id,
                     table_name: table.table.clone(),
                     definition: Some(definition.map_err(|error| error.to_string())),
-                    preview: Err(tr!("仅查看定义，未加载数据。点击刷新可获取数据").to_string()),
+                    preview: Ok(QueryResult::empty("")),
                     reloaded_definition: true,
                 });
             }
@@ -8369,7 +8369,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             });
         };
         let mut action = TabUiAction::None;
-        let show_footer = matches!(tab.active_view, TableViewMode::Data);
+        let show_footer = matches!(tab.active_view, TableViewMode::Data)
+            && tab.preview.is_some();
         let mut sb = StripBuilder::new(ui)
             .size(Size::exact(38.0))
             .size(Size::remainder());
@@ -8398,6 +8399,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ] {
                                     if segment_button(ui, mode.label(), tab.active_view == mode).clicked() {
                                         tab.active_view = mode;
+                                        if matches!(mode, TableViewMode::Data)
+                                            && tab.preview.as_ref().is_none_or(|p| p.rows.is_empty())
+                                            && tab.error.is_none()
+                                        {
+                                            action = TabUiAction::RefreshActiveTable { reload_definition: true };
+                                        }
                                     }
                                 }
                             });
