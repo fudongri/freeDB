@@ -4091,13 +4091,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.painter().hline(
                                     row_rect.x_range(),
                                     row_rect.top(),
-                                    Stroke::new(2.0, palette.accent_button_bg),
+                                    Stroke::new(2.0, palette.selection_stroke),
                                 );
                             } else if is_below {
                                 ui.painter().hline(
                                     row_rect.x_range(),
                                     row_rect.bottom(),
-                                    Stroke::new(2.0, palette.accent_button_bg),
+                                    Stroke::new(2.0, palette.selection_stroke),
                                 );
                             }
                         }
@@ -25733,8 +25733,7 @@ fn render_saved_queries_panel(
                 ui.label(
                     RichText::new(tr!("已保存查询"))
                         .size(13.0)
-                        .strong()
-                        .color(chrome.text),
+                        .color(chrome.weak_text),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // 折叠按钮
