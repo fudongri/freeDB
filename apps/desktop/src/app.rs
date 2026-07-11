@@ -14735,16 +14735,6 @@ fn render_result_table(
                                         None,
                                     );
                                     let modifiers = ui.ctx().input(|input| input.modifiers);
-                                    if response.secondary_clicked() {
-                                        if !query_row_is_selected(selected_rows, selected_row, index) {
-                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
-                                        } else {
-                                            *selected_row = Some(index);
-                                            normalize_query_selection(selected_rows, selected_row, selection_anchor);
-                                        }
-                                        // 选行时清除列选中
-                                        selected_columns.clear();
-                                    }
                                     if response.clicked() {
                                         if modifiers.shift {
                                             extend_query_selection(selected_rows, selected_row, selection_anchor, index);
@@ -14759,14 +14749,6 @@ fn render_result_table(
                                     }
                                     response.context_menu(|ui| {
                                         ctx_menu_style(ui);
-                                        if !query_row_is_selected(selected_rows, selected_row, index) {
-                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
-                                        } else {
-                                            *selected_row = Some(index);
-                                            normalize_query_selection(selected_rows, selected_row, selection_anchor);
-                                        }
-                                        // 右键菜单选行时清除列选中
-                                        selected_columns.clear();
                                         let selected_indices = query_selected_row_indices(selected_rows, selected_row, index);
                                         let copy_label = if selected_indices.len() > 1 {
                                             tr!("复制选中 {} 条数据", selected_indices.len())
@@ -15378,22 +15360,6 @@ fn render_editable_result_table(
                                         None,
                                     );
                                     let modifiers = ui.ctx().input(|input| input.modifiers);
-                                    if response.secondary_clicked() {
-                                        if !query_row_is_selected(selected_rows, selected_row, row_index) {
-                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
-                                        } else {
-                                            *selected_row = Some(row_index);
-                                            normalize_query_selection(selected_rows, selected_row, selection_anchor);
-                                        }
-                                        // 选行时清除列选中和矩形选区
-                                        selected_columns.clear();
-                                        *cell_selection_anchor = None;
-                                        *cell_selection_current = None;
-                                        *cell_selection_typing = false;
-                                        cell_selection_input.clear();
-                                        *cell_selection_is_null = false;
-                                        edit.editing_cell = None;
-                                    }
                                     if response.clicked() {
                                         if modifiers.shift {
                                             extend_query_selection(selected_rows, selected_row, selection_anchor, row_index);
@@ -15416,20 +15382,6 @@ fn render_editable_result_table(
                                     }
                                     response.context_menu(|ui| {
                                         ctx_menu_style(ui);
-                                        if !query_row_is_selected(selected_rows, selected_row, row_index) {
-                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
-                                        } else {
-                                            *selected_row = Some(row_index);
-                                            normalize_query_selection(selected_rows, selected_row, selection_anchor);
-                                        }
-                                        // 右键菜单选行时清除列选中和矩形选区
-                                        selected_columns.clear();
-                                        *cell_selection_anchor = None;
-                                        *cell_selection_current = None;
-                                        *cell_selection_typing = false;
-                                        cell_selection_input.clear();
-                                        *cell_selection_is_null = false;
-                                        edit.editing_cell = None;
                                         let selected_indices = query_selected_row_indices(selected_rows, selected_row, row_index);
                                         let copy_label = if selected_indices.len() > 1 {
                                             tr!("复制选中 {} 条数据", selected_indices.len())
@@ -16519,17 +16471,6 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         let modifiers = ui.ctx().input(|input| input.modifiers);
                                         let toggle_select = modifiers.ctrl || modifiers.command;
                                         let range_select = modifiers.shift;
-                                        if response.secondary_clicked() {
-                                            if !table_row_is_selected(tab, row_index) {
-                                                set_single_preview_selection(tab, row_index);
-                                            } else {
-                                                tab.selected_preview_row = Some(row_index);
-                                                normalize_preview_selection(tab);
-                                            }
-                                            // 选行时清除列选中和矩形选区
-                                            tab.selected_columns.clear();
-                                            clear_table_cell_selection(tab);
-                                        }
                                         if response.clicked() {
                                             if range_select {
                                                 extend_preview_selection(tab, row_index);
@@ -16548,15 +16489,6 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         }
                                         response.context_menu(|ui| {
                                             ctx_menu_style(ui);
-                                            if !table_row_is_selected(tab, row_index) {
-                                                set_single_preview_selection(tab, row_index);
-                                            } else {
-                                                tab.selected_preview_row = Some(row_index);
-                                                normalize_preview_selection(tab);
-                                            }
-                                            // 右键菜单选行时清除列选中和矩形选区
-                                            tab.selected_columns.clear();
-                                            clear_table_cell_selection(tab);
                                             let selected_row_indices =
                                                 preview_selected_row_indices(tab, row_index);
                                             let selected_count = selected_row_indices.len();
@@ -16759,14 +16691,6 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             let modifiers = ui.ctx().input(|input| input.modifiers);
                                             let toggle_select = modifiers.ctrl || modifiers.command;
                                             let range_select = modifiers.shift;
-                                            if response.secondary_clicked() {
-                                                if !table_row_is_selected(tab, row_index) {
-                                                    set_single_preview_selection(tab, row_index);
-                                                } else {
-                                                    tab.selected_preview_row = Some(row_index);
-                                                    normalize_preview_selection(tab);
-                                                }
-                                            }
                                             // ── 矩形选区交互 ──
                                             {
                                                 // 全局指针状态（response.drag_* 只在拖拽起始单元格触发，
@@ -16964,15 +16888,6 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         }
                                         response.context_menu(|ui| {
                                             ctx_menu_style(ui);
-                                            if !table_row_is_selected(tab, row_index) {
-                                                set_single_preview_selection(tab, row_index);
-                                            } else {
-                                                tab.selected_preview_row = Some(row_index);
-                                                normalize_preview_selection(tab);
-                                            }
-                                            // 右键菜单选行时清除列选中和矩形选区
-                                            tab.selected_columns.clear();
-                                            clear_table_cell_selection(tab);
                                             let selected_row_indices =
                                                 preview_selected_row_indices(tab, row_index);
                                             let selected_count = selected_row_indices.len();
