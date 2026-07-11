@@ -42,6 +42,10 @@ uuid.workspace = true
 unicode-width = "0.2"
 ui-theme = { path = "../../crates/ui-theme" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = "0.2"
+
 [build-dependencies]
 winres.workspace = true
 

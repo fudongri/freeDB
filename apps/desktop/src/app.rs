@@ -12257,6 +12257,21 @@ impl eframe::App for DesktopApp {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
+            {
+                use raw_window_handle::HasWindowHandle;
+                if let Ok(handle) = frame.window_handle() {
+                    if let raw_window_handle::RawWindowHandle::AppKit(h) = handle.as_raw() {
+                        unsafe {
+                            let ns_view = h.ns_view.as_ptr() as *mut objc2_app_kit::NSView;
+                            let view = objc2::rc::Retained::retain(ns_view).unwrap();
+                            if let Some(window) = view.window() {
+                                window.setMovable(false);
+                            }
+                        }
+                    }
+                }
+            }
             #[cfg(not(target_os = "windows"))]
             {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
