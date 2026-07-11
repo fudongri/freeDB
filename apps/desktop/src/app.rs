@@ -13458,7 +13458,7 @@ fn mini_subtle_style() -> ButtonStyle {
         text: Color32::from_rgb(200, 200, 204),
         stroke: Stroke::new(1.0, Color32::from_rgb(70, 70, 72)),
         font_size: 11.5,
-        min_width: 0.0,
+        min_width: 34.0,
         min_height: 22.0,
         corner_radius: 4.0,
     }
@@ -13470,7 +13470,7 @@ fn mini_danger_style() -> ButtonStyle {
         text: Color32::from_rgb(255, 69, 58),
         stroke: Stroke::new(1.0, Color32::from_rgb(80, 40, 40)),
         font_size: 11.5,
-        min_width: 0.0,
+        min_width: 34.0,
         min_height: 22.0,
         corner_radius: 4.0,
     }
@@ -13482,7 +13482,7 @@ fn mini_accent_style() -> ButtonStyle {
         text: Color32::from_rgb(100, 210, 255),
         stroke: Stroke::new(1.0, Color32::from_rgb(50, 80, 90)),
         font_size: 11.5,
-        min_width: 0.0,
+        min_width: 34.0,
         min_height: 22.0,
         corner_radius: 4.0,
     }
@@ -13494,7 +13494,7 @@ fn mini_accent_active_style() -> ButtonStyle {
         text: Color32::from_rgb(100, 210, 255),
         stroke: Stroke::new(1.0, Color32::from_rgb(80, 150, 200)),
         font_size: 11.5,
-        min_width: 0.0,
+        min_width: 34.0,
         min_height: 22.0,
         corner_radius: 4.0,
     }
@@ -13506,7 +13506,7 @@ fn mini_hide_style() -> ButtonStyle {
         text: Color32::from_rgb(170, 170, 174),
         stroke: Stroke::new(1.0, Color32::from_rgb(60, 60, 62)),
         font_size: 11.5,
-        min_width: 0.0,
+        min_width: 34.0,
         min_height: 22.0,
         corner_radius: 4.0,
     }
