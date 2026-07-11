@@ -5382,12 +5382,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         ui.painter().rect_filled(rect, 0.0, bg);
 
         let shortcuts = [
-            (format!("{}+D", MOD_KEY), tr!("新建查询")),
-            (format!("{}+R", MOD_KEY), tr!("执行查询")),
-            (format!("{}+S", MOD_KEY), tr!("保存查询")),
-            (format!("{}+W", MOD_KEY), tr!("关闭标签页")),
-            (format!("{}+/", MOD_KEY), tr!("切换注释")),
-            (format!("{}+,", MOD_KEY), tr!("自动补全")),
+            (format!("{} + D", MOD_KEY), tr!("新建查询")),
+            (format!("{} + R", MOD_KEY), tr!("执行查询")),
+            (format!("{} + S", MOD_KEY), tr!("保存查询")),
+            (format!("{} + W", MOD_KEY), tr!("关闭标签页")),
+            (format!("{} + /", MOD_KEY), tr!("切换注释")),
+            (format!("{} + ,", MOD_KEY), tr!("自动补全")),
         ];
 
         let title_height = 48.0;
