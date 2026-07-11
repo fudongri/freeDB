@@ -1554,6 +1554,8 @@ impl DesktopApp {
                 self.dark_variant = ui_theme::DarkVariant::Layered;
                 self.theme = ui_theme::Theme::new(true, self.dark_variant, self.light_variant);
                 let _ = self.services.save_ui_state("theme_v2", self.dark_variant.as_str());
+            }
+            if event.id.as_ref().starts_with("主题_") {
                 self.set_active_theme_menu(event.id.as_ref());
             } else if event.id == "新建连接" {
                 self.is_connection_dialog_open = true;
