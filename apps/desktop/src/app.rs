@@ -4824,6 +4824,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn render_tabs(&mut self, ui: &mut egui::Ui) {
+        // 当只有1个Dashboard标签时，不显示标签栏
+        if self.tabs.len() == 1 && matches!(self.tabs[0], WorkspaceTab::Dashboard) {
+            let palette = MacUiPalette::from(&self.theme.colors);
+            egui::Frame::new()
+                .fill(palette.workspace_bg)
+                .stroke(Stroke::NONE)
+                .inner_margin(egui::Margin::same(0))
+                .show(ui, |ui| {
+                    self.render_dashboard_tab(ui);
+                });
+            return;
+        }
+
         let palette = MacUiPalette::from(&self.theme.colors);
         let mut pending_active_tab = None;
         let mut pending_close_tab = None;
