@@ -12405,6 +12405,20 @@ impl eframe::App for DesktopApp {
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(palette.sidebar_bg).inner_margin(egui::Margin { left: 0, right: 0, top: 28, bottom: 0 }))
             .show(ctx, |ui| self.render_sidebar(ui, &mut pending_update_action));
+        // macOS: 在侧边栏顶部标题栏区域支持窗口拖拽
+        #[cfg(target_os = "macos")]
+        {
+            let sidebar_rect = sidebar.response.rect;
+            let drag_zone = egui::Rect::from_min_size(
+                sidebar_rect.min,
+                egui::vec2(sidebar_rect.width() - 6.0, 28.0),
+            );
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                if drag_zone.contains(pos) && ctx.input(|i| i.pointer.primary_pressed()) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+            }
+        }
         match pending_update_action {
             Some(UpdateAction::StartDownload) => {
                 if let Some(UpdateState::Available(ref info)) = self.update_state {
