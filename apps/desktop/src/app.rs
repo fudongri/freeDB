@@ -14695,6 +14695,11 @@ fn render_result_table(
                     // 保存 clip_rect 供后续边缘检测使用
                     let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    let header_y_start = ui.cursor().top();
+                    let painter = ui.painter().clone();
+                    let mut column_right_edges: Vec<f32> = vec![];
+                    let mut is_hovering_header = false;
+                    let mut hovered_header_col_idx: Option<usize> = None;
                     let mut table = TableBuilder::new(ui)
                         .vscroll(true)
                         .striped(true)
@@ -14711,19 +14716,31 @@ fn render_result_table(
                             .at_least(42.0)
                             .clip(true),
                     );
-                    for width in &column_widths {
-                        table = table.column(
-                            egui_extras::Column::initial(*width)
-                                .at_least(72.0)
-                                .clip(true),
-                        );
+                    let data_col_count = column_widths.len();
+                    for (i, width) in column_widths.iter().enumerate() {
+                        let is_last = i + 1 == data_col_count;
+                        if is_last {
+                            table = table.column(
+                                egui_extras::Column::remainder()
+                                    .at_least(width.max(72.0))
+                                    .clip(true),
+                            );
+                        } else {
+                            table = table.column(
+                                egui_extras::Column::initial(*width)
+                                    .at_least(72.0)
+                                    .clip(true),
+                            );
+                        }
                     }
-                    let body_output = table
+                    let table = table
                         .header(30.0, |mut header| {
                             // Row number header
                             header.col(|ui| {
                                 let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
                                 let cell_rect = ui.max_rect();
+                                column_right_edges.push(cell_rect.right() - 1.0);
+                                if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) { is_hovering_header = true; hovered_header_col_idx = Some(0); }
                                 let resize_handle_x = cell_rect.right() - 3.0;
                                 let resize_handle_rect = egui::Rect::from_min_max(
                                     egui::pos2(resize_handle_x, cell_rect.top()),
@@ -14733,7 +14750,8 @@ fn render_result_table(
                                 let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
                                 let pointer_down = ui.input(|i| i.pointer.primary_down());
                                 let just_pressed = ui.input(|i| i.pointer.primary_pressed());
-                                if on_resize_handle {
+                                let is_resizing_row_num = row_num_resize_drag.is_some();
+                                if on_resize_handle || is_resizing_row_num {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
                                 }
                                 if on_resize_handle && just_pressed {
@@ -14753,6 +14771,8 @@ fn render_result_table(
                             for (col_idx, column) in display_columns.iter().enumerate() {
                                 header.col(|ui| {
                                     let cell_rect = ui.max_rect();
+                                    column_right_edges.push(cell_rect.right() - 1.0);
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) { is_hovering_header = true; hovered_header_col_idx = Some(col_idx + 1); }
                                     let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let is_selected = selected_columns.contains(&col_idx);
                                     let has_column_values = !result.rows.is_empty();
@@ -14800,7 +14820,10 @@ fn render_result_table(
                                     let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
                                     let pointer_down = ui.input(|i| i.pointer.primary_down());
                                     let just_pressed = ui.input(|i| i.pointer.primary_pressed());
-                                    if on_resize_handle {
+                                    let is_resizing_this = result_column_resize_drag
+                                        .as_ref()
+                                        .map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
                                     }
                                     if on_resize_handle && just_pressed {
@@ -14826,7 +14849,20 @@ fn render_result_table(
                                     header_cell_rects.push(cell_rect);
                                 });
                             }
-                        })
+                        });
+                        // 在表头悬停时绘制悬浮列的左右边界线
+                        if is_hovering_header && !column_right_edges.is_empty() {
+                            let header_y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                            if let Some(idx) = hovered_header_col_idx {
+                                if idx < column_right_edges.len() {
+                                    painter.vline(column_right_edges[idx], header_y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                }
+                                if idx > 0 && idx - 1 < column_right_edges.len() {
+                                    painter.vline(column_right_edges[idx - 1], header_y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                }
+                            }
+                        }
+                        let body_output = table
                         .body(|body| {
                             let _body_start_1 = std::time::Instant::now();
                             let mut _row_count_1 = 0usize;
@@ -15331,12 +15367,20 @@ fn render_editable_result_table(
                     table = table.column(
                         egui_extras::Column::initial(*row_number_width).at_least(42.0).clip(true),
                     );
-                    for width in &column_widths {
-                        table = table.column(
-                            egui_extras::Column::initial(*width).at_least(72.0).clip(true),
-                        );
+                    let data_col_count = column_widths.len();
+                    for (i, width) in column_widths.iter().enumerate() {
+                        let is_last = i + 1 == data_col_count;
+                        if is_last {
+                            table = table.column(
+                                egui_extras::Column::remainder().at_least(width.max(72.0)).clip(true),
+                            );
+                        } else {
+                            table = table.column(
+                                egui_extras::Column::initial(*width).at_least(72.0).clip(true),
+                            );
+                        }
                     }
-                    let mut body_output_e = table
+                    let table = table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
@@ -15350,7 +15394,8 @@ fn render_editable_result_table(
                                 let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
                                 let pointer_down = ui.input(|i| i.pointer.primary_down());
                                 let just_pressed = ui.input(|i| i.pointer.primary_pressed());
-                                if on_resize_handle {
+                                let is_resizing_row_num = row_num_resize_drag.is_some();
+                                if on_resize_handle || is_resizing_row_num {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
                                 }
                                 if on_resize_handle && just_pressed {
@@ -15426,7 +15471,10 @@ fn render_editable_result_table(
                                     let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
                                     let pointer_down = ui.input(|i| i.pointer.primary_down());
                                     let just_pressed = ui.input(|i| i.pointer.primary_pressed());
-                                    if on_resize_handle {
+                                    let is_resizing_this = result_column_resize_drag
+                                        .as_ref()
+                                        .map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
                                     }
                                     if on_resize_handle && just_pressed {
@@ -15451,7 +15499,8 @@ fn render_editable_result_table(
                                     header_cell_rects.push(cell_rect);
                                 });
                             }
-                        })
+                        });
+                        let mut body_output_e = table
                         .body(|body| {
                             let _body_start = std::time::Instant::now();
                             let mut _row_count = 0usize;
@@ -16313,6 +16362,11 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                     let scroll_clip_rect = ui.clip_rect();
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     let table_state_id = ui.id().with(format!("editable-table-body-{}", tab.title));
+                    let header_y_start = ui.cursor().top();
+                    let painter = ui.painter().clone();
+                    let mut column_right_edges: Vec<f32> = vec![];
+                    let mut is_hovering_header = false;
+                    let mut hovered_header_col_idx: Option<usize> = None;
                     let mut table = TableBuilder::new(ui)
                         .vscroll(true)
                         .striped(true)
@@ -16356,6 +16410,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 header.col(|ui| {
                                     let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
                                     let cell_rect = ui.max_rect();
+                                    column_right_edges.push(cell_rect.right() - 1.0);
                                     let resize_handle_x = cell_rect.right() - 3.0;
                                     let resize_handle_rect = egui::Rect::from_min_max(
                                         egui::pos2(resize_handle_x, cell_rect.top()),
@@ -16363,9 +16418,11 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     );
                                     let pointer_pos = ui.input(|i| i.pointer.latest_pos());
                                     let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) { is_hovering_header = true; hovered_header_col_idx = Some(0); }
                                     let pointer_down = ui.input(|i| i.pointer.primary_down());
                                     let just_pressed = ui.input(|i| i.pointer.primary_pressed());
-                                    if on_resize_handle {
+                                    let is_resizing_row_num = tab.row_num_resize_drag.is_some();
+                                    if on_resize_handle || is_resizing_row_num {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
                                     }
                                     if on_resize_handle && just_pressed {
@@ -16386,6 +16443,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             for (col_idx, column) in columns.iter().enumerate() {
                                 header.col(|ui| {
                                     let cell_rect = ui.max_rect();
+                                    column_right_edges.push(cell_rect.right() - 1.0);
                                     let is_selected = tab.selected_columns.contains(&col_idx);
                                     let is_dragged = tab.column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let col_data_type = tab.definition.as_ref()
@@ -16437,9 +16495,13 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     );
                                     let pointer_pos = ui.input(|i| i.pointer.latest_pos());
                                     let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) { is_hovering_header = true; hovered_header_col_idx = Some(col_idx + 1); }
                                     let pointer_down = ui.input(|i| i.pointer.primary_down());
                                     let just_pressed = ui.input(|i| i.pointer.primary_pressed());
-                                    if on_resize_handle {
+                                    let is_resizing_this = tab.column_resize_drag
+                                        .as_ref()
+                                        .map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
                                     }
                                     if on_resize_handle && just_pressed {
@@ -16541,6 +16603,18 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             TableHeaderCopyAction::CopyData => TabUiAction::CopyColumnData(non_null_values),
                             TableHeaderCopyAction::CopyAsInCondition => TabUiAction::CopyColumnAsInCondition(non_null_values, col_type),
                         };
+                    }
+                    // 在表头悬停时绘制悬浮列的左右边界线
+                    if is_hovering_header && !column_right_edges.is_empty() {
+                        let header_y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                        if let Some(idx) = hovered_header_col_idx {
+                            if idx < column_right_edges.len() {
+                                painter.vline(column_right_edges[idx], header_y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                            }
+                            if idx > 0 && idx - 1 < column_right_edges.len() {
+                                painter.vline(column_right_edges[idx - 1], header_y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                            }
+                        }
                     }
                     let mut body_output = table_header.body(|mut body| {
                                 // Sync PendingInsert editing cell value to pending_row each frame
@@ -20423,7 +20497,7 @@ fn table_body_cell(
     paint_table_grid_lines(
         ui,
         rect,
-        subtle_grid_color(palette.table_grid, 26),
+        Color32::TRANSPARENT,
         subtle_grid_color(palette.table_grid, 40),
     );
     let clipped_rect = table_cell_content_rect(rect);
