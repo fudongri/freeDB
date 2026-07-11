@@ -5266,9 +5266,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .corner_radius(6.0)
                         .inner_margin(egui::Margin::symmetric(8, 4))
                         .show(ui, |ui| {
+                            let display = truncate_ui_label_by_width(&title, 20);
                             ui.horizontal(|ui| {
                                 ui.label(icon);
-                                ui.label(title);
+                                ui.label(display);
                             });
                         });
                 });
