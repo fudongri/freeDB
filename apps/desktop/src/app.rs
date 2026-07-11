@@ -8277,7 +8277,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_filter_summary(&tab.preview_filter)
                                                     .is_some();
                                             let filter_kind = if filter_active {
-                                                accent_active_button_style(ui.visuals().dark_mode)
+                                                selection_button_style(ui.visuals().dark_mode)
                                             } else {
                                                 subtle_button_style(ui.visuals().dark_mode)
                                             };
@@ -8291,7 +8291,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_sort_summary(&tab.preview_sort)
                                                     .is_some();
                                             let sort_kind = if sort_active {
-                                                accent_active_button_style(ui.visuals().dark_mode)
+                                                selection_button_style(ui.visuals().dark_mode)
                                             } else {
                                                 subtle_button_style(ui.visuals().dark_mode)
                                             };
@@ -8411,13 +8411,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                             if tab.pending_insert_row.is_some() {
                                                 ui.separator();
-                                                if toolbar_button(ui, tr!("取消新增"), danger_button_style(ui.visuals().dark_mode))
+                                                if toolbar_button(ui, tr!("✕ 取消新增"), danger_button_style(ui.visuals().dark_mode))
                                                     .clicked()
                                                 {
                                                     tab.pending_insert_row = None;
                                                     tab.editing_cell = None;
                                                 }
-                                                if toolbar_button(ui, tr!("保存新增"), accent_button_style(ui.visuals().dark_mode)).clicked()
+                                                if toolbar_button(ui, tr!("💾 保存新增"), accent_button_style(ui.visuals().dark_mode)).clicked()
                                                 {
                                                     action = TabUiAction::SavePendingInsertRow;
                                                 }
@@ -8928,8 +8928,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 .inner_margin(egui::Margin::symmetric(8, 8))
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        ui.small(
+                                                        ui.label(
                                                             RichText::new(tr!("筛选条件（最多8个）"))
+                                                                .size(13.0)
                                                                 .strong()
                                                                 .color(palette.text),
                                                         );
@@ -8937,48 +8938,42 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             table_filter_summary(&tab.preview_filter)
                                                         {
                                                             ui.add_space(6.0);
-                                                            ui.small(
+                                                            ui.label(
                                                                 RichText::new(summary)
+                                                                    .size(12.0)
                                                                     .color(palette.selection_text),
                                                             );
                                                         }
-                                                        ui.with_layout(
-                                                            egui::Layout::right_to_left(
-                                                                egui::Align::Center,
-                                                            ),
-                                                            |ui| {
-                                                                if mini_button(ui, tr!("隐藏面板"), mini_hide_style(ui.visuals().dark_mode)).clicked()
-                                                                {
-                                                                    tab.show_preview_filter = false;
-                                                                }
-                                                                if mini_button(ui, tr!("清空"), mini_danger_style(ui.visuals().dark_mode)).clicked()
-                                                                {
-                                                                    tab.preview_filter =
-                                                                        TableFilterState::default();
-                                                                    ensure_table_filter_column(
-                                                                        &mut tab.preview_filter,
-                                                                        &available_columns,
-                                                                    );
-                                                                    tab.current_page = 0;
-                                                                    tab.mongo_page_cursors.clear();
-                                                                    action =
-                                                                        TabUiAction::RefreshActiveTable {
-                                                                            reload_definition: false,
-                                                                        };
-                                                                }
-                                                                if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode))
-                                                                    .on_hover_text(tr!("应用筛选 ({}+R)", MOD_KEY))
-                                                                    .clicked()
-                                                                {
-                                                                    tab.current_page = 0;
-                                                                    tab.mongo_page_cursors.clear();
-                                                                    action =
-                                                                        TabUiAction::RefreshActiveTable {
-                                                                            reload_definition: false,
-                                                                        };
-                                                                }
-                                                            },
-                                                        );
+                                                        if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode))
+                                                            .on_hover_text(tr!("应用筛选 ({}+R)", MOD_KEY))
+                                                            .clicked()
+                                                        {
+                                                            tab.current_page = 0;
+                                                            tab.mongo_page_cursors.clear();
+                                                            action =
+                                                                TabUiAction::RefreshActiveTable {
+                                                                    reload_definition: false,
+                                                                };
+                                                        }
+                                                        if mini_button(ui, tr!("清空"), mini_danger_style(ui.visuals().dark_mode)).clicked()
+                                                        {
+                                                            tab.preview_filter =
+                                                                TableFilterState::default();
+                                                            ensure_table_filter_column(
+                                                                &mut tab.preview_filter,
+                                                                &available_columns,
+                                                            );
+                                                            tab.current_page = 0;
+                                                            tab.mongo_page_cursors.clear();
+                                                            action =
+                                                                TabUiAction::RefreshActiveTable {
+                                                                    reload_definition: false,
+                                                                };
+                                                        }
+                                                        if mini_button(ui, tr!("隐藏面板"), mini_hide_style(ui.visuals().dark_mode)).clicked()
+                                                        {
+                                                            tab.show_preview_filter = false;
+                                                        }
                                                     });
                                                     ui.add_space(8.0);
                                                     let mut pending_remove_clause = None;
@@ -9138,11 +9133,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                     ui.add_space(8.0);
                                                     ui.horizontal(|ui| {
-                                                        ui.small(
+                                                        ui.label(
                                                             RichText::new(tr!("预览语句"))
+                                                                .size(13.0)
                                                                 .strong()
                                                                 .color(palette.weak_text),
                                                         );
+                                                        {
+                                                            let copy_btn = mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode));
+                                                            if copy_btn.clicked() {
+                                                                show_copied_tooltip(ui, copy_btn.rect.center());
+                                                                action =
+                                                                    TabUiAction::CopyTextToClipboard {
+                                                                        text: live_preview_sql
+                                                                            .clone(),
+                                                                        status_message:
+                                                                            tr!("已复制预览语句")
+                                                                                .into(),
+                                                                    };
+                                                            }
+                                                        }
                                                         if tab
                                                             .last_preview_sql
                                                             .as_ref()
@@ -9153,24 +9163,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     .color(palette.selection_text),
                                                             );
                                                         }
-                                                        ui.with_layout(
-                                                            egui::Layout::right_to_left(
-                                                                egui::Align::Center,
-                                                            ),
-                                                            |ui| {
-                                                                if mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode)).clicked()
-                                                                {
-                                                                    action =
-                                                                        TabUiAction::CopyTextToClipboard {
-                                                                            text: live_preview_sql
-                                                                                .clone(),
-                                                                            status_message:
-                                                                                tr!("已复制预览语句")
-                                                                                    .into(),
-                                                                        };
-                                                                }
-                                                            },
-                                                        );
                                                     });
                                                     ui.add_space(4.0);
                                                     egui::Frame::new()
@@ -9206,8 +9198,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 .inner_margin(egui::Margin::symmetric(8, 8))
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        ui.small(
+                                                        ui.label(
                                                             RichText::new(tr!("排序条件（最多8个）"))
+                                                                .size(13.0)
                                                                 .strong()
                                                                 .color(palette.text),
                                                         );
@@ -9215,42 +9208,36 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             table_sort_summary(&tab.preview_sort)
                                                         {
                                                             ui.add_space(6.0);
-                                                            ui.small(
+                                                            ui.label(
                                                                 RichText::new(summary)
+                                                                    .size(12.0)
                                                                     .color(palette.selection_text),
                                                             );
                                                         }
-                                                        ui.with_layout(
-                                                            egui::Layout::right_to_left(
-                                                                egui::Align::Center,
-                                                            ),
-                                                            |ui| {
-                                                                if mini_button(ui, tr!("隐藏面板"), mini_hide_style(ui.visuals().dark_mode)).clicked()
-                                                                {
-                                                                    tab.show_preview_sort = false;
-                                                                }
-                                                                if mini_button(ui, tr!("清空"), mini_danger_style(ui.visuals().dark_mode)).clicked()
-                                                                {
-                                                                    clear_table_sort_state(&mut tab.preview_sort);
-                                                                    tab.current_page = 0;
-                                                                    tab.mongo_page_cursors.clear();
-                                                                    action =
-                                                                        TabUiAction::RefreshActiveTable {
-                                                                            reload_definition: false,
-                                                                        };
-                                                                }
-                                                                if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode)).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
-                                                                .clicked()
-                                                                {
-                                                                    tab.current_page = 0;
-                                                                    tab.mongo_page_cursors.clear();
-                                                                    action =
-                                                                        TabUiAction::RefreshActiveTable {
-                                                                            reload_definition: false,
-                                                                        };
-                                                                }
-                                                            },
-                                                        );
+                                                        if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode)).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
+                                                        .clicked()
+                                                        {
+                                                            tab.current_page = 0;
+                                                            tab.mongo_page_cursors.clear();
+                                                            action =
+                                                                TabUiAction::RefreshActiveTable {
+                                                                    reload_definition: false,
+                                                                };
+                                                        }
+                                                        if mini_button(ui, tr!("清空"), mini_danger_style(ui.visuals().dark_mode)).clicked()
+                                                        {
+                                                            clear_table_sort_state(&mut tab.preview_sort);
+                                                            tab.current_page = 0;
+                                                            tab.mongo_page_cursors.clear();
+                                                            action =
+                                                                TabUiAction::RefreshActiveTable {
+                                                                    reload_definition: false,
+                                                                };
+                                                        }
+                                                        if mini_button(ui, tr!("隐藏面板"), mini_hide_style(ui.visuals().dark_mode)).clicked()
+                                                        {
+                                                            tab.show_preview_sort = false;
+                                                        }
                                                     });
                                                     ui.add_space(8.0);
                                                     let mut pending_remove = None;
@@ -9268,11 +9255,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             ui.add_space(6.0);
                                                         }
                                                         ui.horizontal_wrapped(|ui| {
-                                                            let seq_label = format!("{}. ", index + 1);
-                                                            ui.small(
-                                                                RichText::new(seq_label)
-                                                                    .color(palette.weak_text),
-                                                            );
                                                             let column_label = clause.column.clone().unwrap_or_else(|| tr!("选择列").into());
                                                             let column_items: Vec<(String, bool)> = available_columns
                                                                 .iter()
@@ -9322,11 +9304,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                     ui.add_space(8.0);
                                                     ui.horizontal(|ui| {
-                                                        ui.small(
+                                                        ui.label(
                                                             RichText::new(tr!("预览语句"))
+                                                                .size(13.0)
                                                                 .strong()
                                                                 .color(palette.weak_text),
                                                         );
+                                                        {
+                                                            let copy_btn = mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode));
+                                                            if copy_btn.clicked() {
+                                                                show_copied_tooltip(ui, copy_btn.rect.center());
+                                                                action =
+                                                                    TabUiAction::CopyTextToClipboard {
+                                                                        text: live_preview_sql
+                                                                            .clone(),
+                                                                        status_message:
+                                                                            tr!("已复制预览语句")
+                                                                                .into(),
+                                                                    };
+                                                            }
+                                                        }
                                                         if tab
                                                             .last_preview_sql
                                                             .as_ref()
@@ -9337,24 +9334,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     .color(palette.selection_text),
                                                             );
                                                         }
-                                                        ui.with_layout(
-                                                            egui::Layout::right_to_left(
-                                                                egui::Align::Center,
-                                                            ),
-                                                            |ui| {
-                                                                if mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode)).clicked()
-                                                                {
-                                                                    action =
-                                                                        TabUiAction::CopyTextToClipboard {
-                                                                            text: live_preview_sql
-                                                                                .clone(),
-                                                                            status_message:
-                                                                                tr!("已复制预览语句")
-                                                                                    .into(),
-                                                                        };
-                                                                }
-                                                            },
-                                                        );
                                                     });
                                                     ui.add_space(4.0);
                                                     egui::Frame::new()
@@ -13450,6 +13429,31 @@ fn accent_active_button_style(dark_mode: bool) -> ButtonStyle {
     }
 }
 
+/// 与 segment_button 选中状态一致的高亮样式
+fn selection_button_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::TRANSPARENT,
+            text: Color32::from_rgb(255, 255, 255),
+            stroke: Stroke::new(1.0, Color32::from_rgb(130, 165, 220)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::TRANSPARENT,
+            text: Color32::from_rgb(20, 60, 120),
+            stroke: Stroke::new(1.0, Color32::from_rgb(125, 165, 225)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    }
+}
+
 fn accent_muted_button_style(dark_mode: bool) -> ButtonStyle {
     if dark_mode {
         ButtonStyle {
@@ -16259,12 +16263,21 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 .clip(true),
                         );
                     }
-                    for width in &column_widths {
-                        table = table.column(
-                            egui_extras::Column::initial(*width)
-                                .at_least(72.0)
-                                .clip(true),
-                        );
+                    for (col_idx, &width) in column_widths.iter().enumerate() {
+                        let is_last = col_idx + 1 == column_widths.len();
+                        if is_last {
+                            table = table.column(
+                                egui_extras::Column::remainder()
+                                    .at_least(width.max(72.0))
+                                    .clip(true),
+                            );
+                        } else {
+                            table = table.column(
+                                egui_extras::Column::initial(width)
+                                    .at_least(72.0)
+                                    .clip(true),
+                            );
+                        }
                     }
                     let table_header = table
                         .header(30.0, |mut header| {
@@ -18216,7 +18229,6 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
     let palette = mac_ui_palette(ui.visuals());
     let editor = editor_palette(ui.visuals());
     let code_font_size = 13.0;
-    let line_number_font_size = 11.0;
     let formatted_sql = format_definition_sql(create_sql);
     let line_count = formatted_sql.lines().count().max(1);
     let viewport_width = ui.available_width().max(0.0);
@@ -18234,20 +18246,16 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
                 .stroke(Stroke::NONE)
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("DDL").strong().size(13.0).color(palette.selection_text));
-                        ui.separator();
-                        ui.label(RichText::new(title).size(13.0).color(palette.weak_text));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
-                                ui.ctx().copy_text(formatted_sql.clone());
-                            }
-                        });
-                    });
+                    let copy_btn = mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode));
+                    if copy_btn.clicked() {
+                        ui.ctx().copy_text(formatted_sql.clone());
+                        show_copied_tooltip(ui, copy_btn.rect.center());
+                    }
                 });
 
             ui.add_space(8.0);
 
+            let row_height = 18.0;
             egui::Frame::new()
                 .fill(editor.panel_bg)
                 .stroke(Stroke::NONE)
@@ -18256,51 +18264,20 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
                         .id_salt(format!("table-ddl-{}", title))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let row_height = 18.0;
-                            StripBuilder::new(ui)
-                                .size(Size::exact(42.0))
-                                .size(Size::remainder())
-                                .horizontal(|mut strip| {
-                                    strip.cell(|ui| {
-                                        let rect = ui.max_rect();
-                                        let painter = ui.painter();
-                                        painter.rect_filled(rect, 0.0, editor.gutter_bg);
-
-                                        let text_x = rect.right() - 8.0;
-                                        let mut y = rect.top() + 10.0;
-                                        for row in 0..line_count {
-                                            painter.text(
-                                                egui::pos2(text_x, y),
-                                                Align2::RIGHT_TOP,
-                                                (row + 1).to_string(),
-                                                FontId::new(
-                                                    line_number_font_size,
-                                                    FontFamily::Monospace,
-                                                ),
-                                                editor.line_number,
-                                            );
-                                            y += row_height;
-                                        }
-                                        ui.allocate_rect(rect, egui::Sense::hover());
-                                    });
-
-                                    strip.cell(|ui| {
-                                        egui::Frame::new()
-                                            .fill(editor.panel_bg)
-                                            .inner_margin(egui::Margin::symmetric(12, 10))
-                                            .show(ui, |ui| {
-                                                ui.set_min_height(
-                                                    (line_count as f32 * row_height).max(
-                                                        ui.available_height(),
-                                                    ),
-                                                );
-                                                ui.label(sql_highlight_job_with_font_size(
-                                                    &formatted_sql,
-                                                    ui.visuals(),
-                                                    code_font_size,
-                                                ));
-                                            });
-                                    });
+                            egui::Frame::new()
+                                .fill(editor.panel_bg)
+                                .inner_margin(egui::Margin::symmetric(12, 10))
+                                .show(ui, |ui| {
+                                    ui.set_min_height(
+                                        (line_count as f32 * row_height).max(
+                                            ui.available_height(),
+                                        ),
+                                    );
+                                    ui.label(sql_highlight_job_with_font_size(
+                                        &formatted_sql,
+                                        ui.visuals(),
+                                        code_font_size,
+                                    ));
                                 });
                         });
                 });
@@ -18634,7 +18611,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::NONE)
+        .stroke(Stroke::new(1.0, palette.border))
         .show(ui, |ui| {
             ui.set_width(viewport_width);
             ui.set_min_height(viewport_height);
@@ -18645,17 +18622,17 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     TableBuilder::new(ui)
                         .vscroll(false)
-                        .striped(true)
+                        .striped(false)
                         .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .column(egui_extras::Column::initial(42.0).at_least(42.0))
                         .column(egui_extras::Column::initial(200.0).at_least(120.0))
-                        .column(egui_extras::Column::initial(170.0).at_least(100.0))
+                        .column(egui_extras::Column::remainder().at_least(100.0))
                         .column(egui_extras::Column::initial(60.0).at_least(50.0))
                         .column(egui_extras::Column::initial(150.0).at_least(80.0))
-                        .column(egui_extras::Column::initial(220.0).at_least(100.0))
-                        .column(egui_extras::Column::initial(60.0).at_least(50.0))
-                        .column(egui_extras::Column::initial(60.0).at_least(50.0))
+                        .column(egui_extras::Column::initial(200.0).at_least(100.0))
+                        .column(egui_extras::Column::initial(100.0).at_least(80.0))
+                        .column(egui_extras::Column::initial(110.0).at_least(80.0))
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
@@ -18668,11 +18645,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                         })
                         .body(|mut body| {
                             for (index, column) in definition.columns.iter().enumerate() {
-                                let fill = if index % 2 == 0 {
-                                    palette.card_bg
-                                } else {
-                                    palette.table_alt_bg
-                                };
+                                let fill = palette.card_bg;
                                 body.row(28.0, |mut row| {
                                     row.col(|ui| {
                                         table_text_cell(ui, &palette, fill, &format!("{}", index + 1), false);
@@ -18696,13 +18669,12 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                                         );
                                     });
                                     row.col(|ui| {
-                                        table_status_badge_cell(
-                                            ui,
-                                            &palette,
-                                            fill,
-                                            if column.nullable { tr!("否") } else { tr!("是") },
-                                            !column.nullable,
-                                        );
+                                        let rect = ui.max_rect();
+                                        ui.painter().rect_filled(rect, 0.0, fill);
+                                        paint_table_grid_lines(ui, rect, Color32::TRANSPARENT, subtle_grid_color(palette.table_grid, 40));
+                                        let cb_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+                                        let mut checked = !column.nullable;
+                                        ui.put(cb_rect, egui::Checkbox::without_text(&mut checked));
                                     });
                                     row.col(|ui| {
                                         table_text_cell(
@@ -19102,23 +19074,9 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
 
     ui.horizontal(|ui| {
         let has_pending = tab.editing_structure;
-        let edit_label = if has_pending {
-            tr!("✕ 取消编辑")
-        } else {
-            tr!("✎ 编辑表结构")
-        };
-        let edit_kind = if has_pending {
-            secondary_button_style(ui.visuals().dark_mode)
-        } else {
-            subtle_button_style(ui.visuals().dark_mode)
-        };
-        if toolbar_button(ui, edit_label, edit_kind).clicked() {
-            if has_pending {
-                // 退出编辑模式，丢弃修改
-                tab.editing_structure = false;
-                tab.edited_columns.clear();
-            } else {
-                // 进入编辑模式，复制当前定义
+
+        if !has_pending {
+            if toolbar_button(ui, tr!("✎ 编辑表结构"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.edited_columns = definition
                     .columns
                     .iter()
@@ -19164,6 +19122,12 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
             // SQL 预览切换按钮（保存按钮左侧）
             if toolbar_button(ui, tr!("◉ 语句预览"), accent_muted_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.show_structure_sql_preview = !tab.show_structure_sql_preview;
+            }
+
+            // 取消编辑（保存按钮左侧）
+            if toolbar_button(ui, tr!("✕ 取消编辑"), danger_button_style(ui.visuals().dark_mode)).clicked() {
+                tab.editing_structure = false;
+                tab.edited_columns.clear();
             }
 
             let save_btn =
@@ -19631,7 +19595,11 @@ fn render_index_table(
     existing: &[ExistingIndex],
     palette: &MacUiPalette,
 ) {
-    egui::ScrollArea::vertical()
+    egui::Frame::new()
+        .fill(palette.card_bg)
+        .stroke(Stroke::new(1.0, palette.border))
+        .show(ui, |ui| {
+        egui::ScrollArea::vertical()
         .id_salt("indexes-list")
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -19641,16 +19609,16 @@ fn render_index_table(
 
             TableBuilder::new(ui)
                 .vscroll(false)
-                .striped(true)
+                .striped(false)
                 .resizable(false)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(egui_extras::Column::initial(42.0).at_least(42.0))
                 .column(egui_extras::Column::initial(200.0).at_least(120.0))
                 .column(egui_extras::Column::initial(80.0).at_least(60.0))
                 .column(egui_extras::Column::initial(80.0).at_least(60.0))
-                .column(egui_extras::Column::initial(240.0).at_least(150.0))
-                .column(egui_extras::Column::initial(60.0).at_least(50.0))
-                .column(egui_extras::Column::initial(50.0).at_least(50.0))
+                .column(egui_extras::Column::remainder().at_least(150.0))
+                .column(egui_extras::Column::initial(120.0).at_least(80.0))
+                .column(egui_extras::Column::initial(80.0).at_least(60.0))
                 .header(30.0, |mut header| {
                     header.col(|ui| {
                         let (_, _, _, _) = table_header_cell(ui, palette, "#", false, None, false, false, None, false);
@@ -19662,7 +19630,7 @@ fn render_index_table(
                     }
                 })
                 .body(|mut body| {
-                    let idx_grid_v = subtle_grid_color(palette.table_grid, 26);
+                    let idx_grid_v = Color32::TRANSPARENT;
                     let idx_grid_h = subtle_grid_color(palette.table_grid, 40);
                     let mut row_num = 0usize;
                     // 已有索引
@@ -19675,9 +19643,8 @@ fn render_index_table(
                             row.col(|ui| {
                                 let rect = ui.max_rect();
                                 paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                let center = rect.center();
-                                let r = egui::Rect::from_center_size(center, egui::vec2(30.0, 20.0));
-                                let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
+                                let content_rect = rect.shrink2(egui::vec2(4.0, 0.0));
+                                let mut child = ui.child_ui(content_rect, egui::Layout::left_to_right(egui::Align::Center), None);
                                 child.label(RichText::new(format!("{}", row_num)).size(11.0).color(palette.weak_text));
                             });
                             // 索引名
@@ -19693,16 +19660,10 @@ fn render_index_table(
                             row.col(|ui| {
                                 let rect = ui.max_rect();
                                 paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                let center = rect.center();
-                                let r = egui::Rect::from_center_size(center, egui::vec2(40.0, 20.0));
-                                let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
-                                let unique_text = if idx.unique { "✓" } else { "—" };
-                                if idx.unique {
-                                    child.label(RichText::new(unique_text).size(12.0).strong());
-                                } else {
-                                    child.label(RichText::new(unique_text).size(12.0).color(palette.weak_text));
-                                }
-                                index_cell_double_click_copy(ui, rect, unique_text);
+                                let cb_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+                                let mut checked = idx.unique;
+                                ui.put(cb_rect, egui::Checkbox::without_text(&mut checked));
+                                index_cell_double_click_copy(ui, rect, if idx.unique { "✓" } else { "—" });
                             });
                             // 类型
                             row.col(|ui| {
@@ -19734,9 +19695,8 @@ fn render_index_table(
                             row.col(|ui| {
                                 let rect = ui.max_rect();
                                 paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                let center = rect.center();
-                                let r = egui::Rect::from_center_size(center, egui::vec2(40.0, 20.0));
-                                let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
+                                let content_rect = rect.shrink2(egui::vec2(4.0, 0.0));
+                                let mut child = ui.child_ui(content_rect, egui::Layout::left_to_right(egui::Align::Center), None);
                                 child.label(
                                     RichText::new(tr!("已有")).size(11.0).color(palette.weak_text),
                                 );
@@ -19789,9 +19749,8 @@ fn render_index_table(
                             row.col(|ui| {
                                 let rect = ui.max_rect();
                                 paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                let center = rect.center();
-                                let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
-                                ui.put(cb_rect, egui::Checkbox::new(&mut idx.unique, ""));
+                                let cb_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+                                ui.put(cb_rect, egui::Checkbox::without_text(&mut idx.unique));
                             });
                             // 类型（新增索引默认 BTREE）
                             row.col(|ui| {
@@ -19819,12 +19778,12 @@ fn render_index_table(
                                 );
                                 index_cell_double_click_copy(ui, rect, &cols_text);
                             });
+                            // 来源
                             row.col(|ui| {
                                 let rect = ui.max_rect();
                                 paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                let center = rect.center();
-                                let r = egui::Rect::from_center_size(center, egui::vec2(40.0, 20.0));
-                                let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
+                                let content_rect = rect.shrink2(egui::vec2(4.0, 0.0));
+                                let mut child = ui.child_ui(content_rect, egui::Layout::left_to_right(egui::Align::Center), None);
                                 child.label(
                                     RichText::new(tr!("新增")).size(11.0).color(palette.index_badge),
                                 );
@@ -19882,6 +19841,7 @@ fn render_index_table(
                 tab.deleted_indexes.insert(i);
             }
         });
+        });
 }
 
 fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAction {
@@ -19933,13 +19893,13 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
                 &tab.pending_indexes,
                 tab.database_kind,
             );
-            if toolbar_button(ui, tr!("💾 保存"), accent_button_style(ui.visuals().dark_mode)).clicked() && !sql.is_empty() {
-                action = TabUiAction::ExecuteStructureSql(sql);
+            if toolbar_button(ui, tr!("✕ 取消编辑"), danger_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.pending_indexes.clear();
                 tab.deleted_indexes.clear();
                 tab.add_index_dialog_open = false;
             }
-            if toolbar_button(ui, tr!("✕ 取消编辑"), secondary_button_style(ui.visuals().dark_mode)).clicked() {
+            if toolbar_button(ui, tr!("💾 保存"), accent_button_style(ui.visuals().dark_mode)).clicked() && !sql.is_empty() {
+                action = TabUiAction::ExecuteStructureSql(sql);
                 tab.pending_indexes.clear();
                 tab.deleted_indexes.clear();
                 tab.add_index_dialog_open = false;
@@ -20025,7 +19985,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::NONE)
+        .stroke(Stroke::new(1.0, palette.border))
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("editable-structure-grid")
@@ -20034,18 +19994,18 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                     TableBuilder::new(ui)
                         .vscroll(false)
-                        .striped(true)
+                        .striped(false)
                         .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .column(egui_extras::Column::initial(42.0).at_least(42.0))
                         .column(egui_extras::Column::initial(200.0).at_least(120.0))
-                        .column(egui_extras::Column::initial(170.0).at_least(100.0))
+                        .column(egui_extras::Column::remainder().at_least(100.0))
                         .column(egui_extras::Column::initial(60.0).at_least(50.0))
                         .column(egui_extras::Column::initial(140.0).at_least(70.0))
-                        .column(egui_extras::Column::initial(160.0).at_least(80.0))
+                        .column(egui_extras::Column::initial(200.0).at_least(80.0))
+                        .column(egui_extras::Column::initial(100.0).at_least(80.0))
+                        .column(egui_extras::Column::initial(110.0).at_least(80.0))
                         .column(egui_extras::Column::initial(60.0).at_least(50.0))
-                        .column(egui_extras::Column::initial(60.0).at_least(50.0))
-                        .column(egui_extras::Column::initial(48.0).at_least(48.0))
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
@@ -20075,10 +20035,8 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                 let col = &tab.edited_columns[col_idx];
                                 let fill = if col.is_new {
                                     palette.new_row_bg
-                                } else if col_idx % 2 == 0 {
-                                    palette.card_bg
                                 } else {
-                                    palette.table_alt_bg
+                                    palette.card_bg
                                 };
                                 let name = col.name.clone();
                                 let data_type = col.data_type.clone();
@@ -20228,46 +20186,39 @@ fn table_header_cell(
     } else {
         palette.card_bg
     };
-    let inner = egui::Frame::new()
-        .fill(header_bg)
-        .inner_margin(egui::Margin::symmetric(8, 5))
-        .show(ui, |ui| {
-            ui.set_min_height(28.0);
-            let content_rect = ui.max_rect();
-            // 表头底部淡线
-            let bottom_y = content_rect.bottom() - 0.5;
-            ui.painter().line_segment(
-                [egui::pos2(content_rect.left(), bottom_y), egui::pos2(content_rect.right(), bottom_y)],
-                Stroke::new(1.0, subtle_grid_color(palette.table_grid, 40)),
-            );
-            ui.with_layout(
-                egui::Layout::top_down(egui::Align::Center)
-                    .with_cross_align(egui::Align::Min),
-                |ui| {
-                    ui.set_min_size(egui::vec2(content_rect.width().max(20.0), content_rect.height()));
-                    let label_text = match sort_state {
-                        Some(false) => RichText::new(format!("{} ▲", text))
-                            .size(12.5)
-                            .color(palette.selection_text)
-                            .strong(),
-                        Some(true) => RichText::new(format!("{} ▼", text))
-                            .size(12.5)
-                            .color(palette.selection_text)
-                            .strong(),
-                        None => RichText::new(text)
-                            .size(12.5)
-                            .color(palette.text)
-                            .strong(),
-                    };
-                    ui.add(
-                        egui::Label::new(label_text)
-                            .selectable(false),
-                    )
-                },
-            );
-        });
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0.0, header_bg);
+    let content_rect = rect.shrink2(egui::vec2(8.0, 5.0));
+    ui.allocate_ui_at_rect(content_rect, |ui| {
+        ui.set_min_height(28.0);
+        ui.with_layout(
+            egui::Layout::top_down(egui::Align::Center)
+                .with_cross_align(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(egui::vec2(content_rect.width().max(20.0), content_rect.height()));
+                let label_text = match sort_state {
+                    Some(false) => RichText::new(format!("{} ▲", text))
+                        .size(12.5)
+                        .color(palette.selection_text)
+                        .strong(),
+                    Some(true) => RichText::new(format!("{} ▼", text))
+                        .size(12.5)
+                        .color(palette.selection_text)
+                        .strong(),
+                    None => RichText::new(text)
+                        .size(12.5)
+                        .color(palette.text)
+                        .strong(),
+                };
+                ui.add(
+                    egui::Label::new(label_text)
+                        .selectable(false),
+                )
+            },
+        );
+    });
     let mut column_clicked = false;
-    let cell_rect = inner.response.rect;
+    let cell_rect = rect;
     let cell_response = ui.interact(
         cell_rect,
         ui.next_auto_id(),
@@ -20322,8 +20273,8 @@ fn table_header_cell(
     });
     paint_table_grid_lines(
         ui,
-        inner.response.rect,
-        subtle_grid_color(palette.table_grid, 40),
+        rect,
+        Color32::TRANSPARENT,
         subtle_grid_color(palette.table_grid, 40),
     );
     (sort_choice, column_clicked, cell_response.dragged(), copy_action)
@@ -20425,7 +20376,7 @@ fn table_text_cell(
     text: &str,
     weak: bool,
 ) {
-    let display = table_display_text(text, weak, None);
+    let display = table_display_text(text, weak, Some("text"));
     let display_color = display.color(palette);
     let rect = ui.max_rect();
     let response = ui.allocate_rect(rect, egui::Sense::click());
@@ -20433,7 +20384,7 @@ fn table_text_cell(
     paint_table_grid_lines(
         ui,
         rect,
-        subtle_grid_color(palette.table_grid, 26),
+        Color32::TRANSPARENT,
         subtle_grid_color(palette.table_grid, 40),
     );
     let clipped_rect = table_cell_content_rect(rect);
@@ -20479,7 +20430,7 @@ fn table_status_badge_cell(
     paint_table_grid_lines(
         ui,
         rect,
-        subtle_grid_color(palette.table_grid, 26),
+        Color32::TRANSPARENT,
         subtle_grid_color(palette.table_grid, 40),
     );
 
@@ -22696,8 +22647,10 @@ fn app_visuals(use_dark_theme: bool) -> egui::Visuals {
     visuals.faint_bg_color = c.faint_bg;
     visuals.code_bg_color = c.code_bg;
     visuals.override_text_color = Some(c.text);
+    visuals.text_edit_bg_color = Some(Color32::TRANSPARENT);
     visuals.window_stroke = Stroke::new(1.0, c.window_stroke);
-    visuals.widgets.noninteractive.bg_fill = c.widget_noninteractive_bg;
+    visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.noninteractive.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, c.widget_noninteractive_fg);
     visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
@@ -23543,8 +23496,8 @@ fn toolbar_dropdown(
     let palette = mac_ui_palette(ui.visuals());
     let btn_label = format!("{label} ▾");
     let btn = ui.add(
-        egui::Button::new(RichText::new(btn_label).size(12.5).color(palette.secondary_button_text))
-            .fill(palette.secondary_button_bg)
+        egui::Button::new(RichText::new(btn_label).size(12.5).color(palette.text))
+            .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, palette.secondary_button_stroke))
             .corner_radius(5.0)
             .min_size(Vec2::new(width, 22.0)),
@@ -23578,7 +23531,7 @@ fn toolbar_dropdown(
     area.show(ui.ctx(), |ui| {
         egui::Frame::new()
             .fill(palette.card_bg)
-            .stroke(Stroke::NONE)
+            .stroke(Stroke::new(1.0, palette.border))
             .corner_radius(6.0)
             .inner_margin(egui::Margin::symmetric(4, 4))
             .show(ui, |ui| {
