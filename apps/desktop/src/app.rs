@@ -7228,8 +7228,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 // 拖拽把手
                                                 h_strip.cell(|ui| {
                                                     let rect = ui.max_rect();
+                                                    let palette = mac_ui_palette_from_ui(ui);
                                                     let response = ui.allocate_rect(rect, egui::Sense::drag());
-                                                    if response.hovered() || response.dragged() {
+                                                    let interacted = response.hovered() || response.dragged();
+                                                    if interacted {
                                                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                                                     }
                                                     // 拖拽时更新面板宽度
@@ -7239,14 +7241,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         tab.saved_queries_panel_width = Some(new_width);
                                                         ui.ctx().request_repaint();
                                                     }
-                                                    // 绘制拖拽指示线
-                                                    ui.painter().line_segment(
-                                                        [
-                                                            egui::pos2(rect.center().x, rect.top() + 4.0),
-                                                            egui::pos2(rect.center().x, rect.bottom() - 4.0),
-                                                        ],
-                                                        Stroke::new(1.0, chrome.soft_border),
-                                                    );
+                                                    // 绘制拖拽指示线（仅悬停/拖拽时可见）
+                                                    if interacted {
+                                                        ui.painter().line_segment(
+                                                            [
+                                                                egui::pos2(rect.center().x, rect.top() + 4.0),
+                                                                egui::pos2(rect.center().x, rect.bottom() - 4.0),
+                                                            ],
+                                                            Stroke::new(1.0, palette.accent_button_stroke),
+                                                        );
+                                                    }
                                                 });
                                                 // 右侧：编辑器
                                                 h_strip.cell(|ui| {
@@ -13572,8 +13576,8 @@ fn accent_muted_button_style(dark_mode: bool) -> ButtonStyle {
     if dark_mode {
         ButtonStyle {
             fill: Color32::from_rgb(44, 44, 46),
-            text: Color32::from_rgb(100, 180, 220),
-            stroke: Stroke::new(1.0, Color32::from_rgb(50, 70, 80)),
+            text: Color32::from_rgb(130, 165, 220),
+            stroke: Stroke::new(1.0, Color32::from_rgb(130, 165, 220)),
             font_size: 12.5,
             min_width: 0.0,
             min_height: 26.0,
@@ -13582,8 +13586,8 @@ fn accent_muted_button_style(dark_mode: bool) -> ButtonStyle {
     } else {
         ButtonStyle {
             fill: Color32::from_rgb(246, 246, 246),
-            text: Color32::from_rgb(40, 140, 195),
-            stroke: Stroke::new(1.0, Color32::from_rgb(90, 200, 250)),
+            text: Color32::from_rgb(125, 165, 225),
+            stroke: Stroke::new(1.0, Color32::from_rgb(125, 165, 225)),
             font_size: 12.5,
             min_width: 0.0,
             min_height: 26.0,
@@ -22769,9 +22773,11 @@ fn app_visuals(use_dark_theme: bool, dark_variant: ui_theme::DarkVariant, light_
     visuals.widgets.hovered.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, c.widget_hovered_stroke);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, c.widget_hovered_stroke);
     visuals.widgets.active.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.active.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.active.bg_stroke = Stroke::new(1.2, c.widget_active_stroke);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, c.widget_active_stroke);
     visuals.widgets.open.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, c.widget_open_stroke);
     visuals.selection.bg_fill = c.egui_selection_bg;
@@ -25608,7 +25614,7 @@ fn render_saved_queries_panel(
     egui::Frame::new()
         .fill(ep.editor_bg)
         .corner_radius(8.0)
-        .inner_margin(egui::Margin::symmetric(8, 8))
+        .inner_margin(egui::Margin { left: 8, right: 3, top: 8, bottom: 8 })
         .show(ui, |ui| {
             ui.set_min_height(available_height - 16.0); // 减去margin
             // 标题栏
@@ -25656,12 +25662,12 @@ fn render_saved_queries_panel(
                     let selected = tab.saved_queries_filter_mode == *mode;
                     let (fill, text_color, stroke) = if selected {
                         (
-                            panel_palette.selection_bg,
+                            Color32::TRANSPARENT,
                             panel_palette.selection_text,
                             Stroke::new(1.0, panel_palette.selection_stroke),
                         )
                     } else {
-                        (chrome.search_bg, chrome.weak_text, Stroke::new(1.0, chrome.soft_border))
+                        (Color32::TRANSPARENT, chrome.weak_text, Stroke::new(1.0, chrome.soft_border))
                     };
                     let (rect, response) = ui.allocate_exact_size(
                         egui::vec2(btn_width, btn_height),
@@ -25742,7 +25748,7 @@ fn render_saved_queries_panel(
                         // monospace 11pt: each column is about 7.5 px wide
                         for (idx, entry) in filtered.iter().enumerate() {
                             let full_title = &entry.title;
-                            let max_cols = ((btn_width - 20.0) / 7.5) as usize;
+                            let max_cols = ((btn_width - 36.0) / 7.5) as usize;
                             let display_title = truncate_ui_label_by_width(full_title, max_cols.max(3));
                             let is_truncated = display_title.len() < full_title.len();
 
@@ -25763,21 +25769,21 @@ fn render_saved_queries_panel(
                                 sql_changed || conn_changed || db_changed
                             };
                             let (fill, stroke_color, text_color) = if is_dragging {
-                                (chrome.search_bg, chrome.soft_border, chrome.weak_text)
+                                (Color32::TRANSPARENT, chrome.soft_border, chrome.weak_text)
                             } else if is_modified {
                                 (
-                                    panel_palette.modified_button_bg,
+                                    Color32::TRANSPARENT,
                                     panel_palette.modified_button_stroke,
                                     panel_palette.modified_button_text,
                                 )
                             } else if is_selected {
                                 (
-                                    panel_palette.selection_bg,
+                                    Color32::TRANSPARENT,
                                     panel_palette.selection_stroke,
                                     panel_palette.selection_text,
                                 )
                             } else {
-                                (chrome.search_bg, chrome.soft_border, chrome.text)
+                                (Color32::TRANSPARENT, chrome.soft_border, chrome.weak_text)
                             };
 
                             // 拖拽指示线（在拖拽其他项时显示）
@@ -25814,13 +25820,18 @@ fn render_saved_queries_panel(
 
                             ui.horizontal(|ui| {
                                 // 查询名称区域（左对齐）
-                                let title_btn_width = btn_width - 28.0;
                                 let (rect, item_response) = ui.allocate_exact_size(
-                                    egui::vec2(title_btn_width, 22.0),
+                                    egui::vec2(btn_width, 22.0),
                                     egui::Sense::click_and_drag(),
                                 );
                                 ui.painter().rect_filled(rect, 4.0, fill);
                                 ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.0, stroke_color), egui::StrokeKind::Inside);
+                                // 删除图标区域（rect 右侧）
+                                let delete_icon_rect = egui::Rect::from_center_size(
+                                    egui::pos2(rect.right() - 12.0, rect.center().y),
+                                    egui::vec2(20.0, 20.0),
+                                );
+                                // 标题文字（左侧，避开右侧删除图标）
                                 ui.painter().text(
                                     egui::pos2(rect.left() + 8.0, rect.center().y),
                                     egui::Align2::LEFT_CENTER,
@@ -25828,6 +25839,22 @@ fn render_saved_queries_panel(
                                     FontId::new(11.0, FontFamily::Monospace),
                                     text_color,
                                 );
+                                // 删除图标
+                                if !is_dragging {
+                                    let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+                                    let hovering_delete = pointer_pos.map(|p| delete_icon_rect.contains(p)).unwrap_or(false);
+                                    let del_color = if hovering_delete { chrome.text } else { chrome.weak_text };
+                                    ui.painter().text(
+                                        delete_icon_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "✕",
+                                        FontId::new(10.0, FontFamily::Proportional),
+                                        del_color,
+                                    );
+                                    if hovering_delete {
+                                        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                                    }
+                                }
                                 // 悬浮显示完整名称
                                 if is_truncated && !is_dragging {
                                     item_response.clone().on_hover_text(full_title.clone());
@@ -25838,17 +25865,34 @@ fn render_saved_queries_panel(
                                     tab.saved_query_drag_source = Some((entry.id.clone(), entry.title.clone()));
                                 }
 
-                                // 双击：加载到编辑器（非拖拽状态下）
+                                // 单击：检测是否点击了删除图标
+                                if !is_dragging && item_response.clicked() {
+                                    let click_pos = item_response.interact_pointer_pos();
+                                    let clicked_delete = click_pos
+                                        .map(|p| delete_icon_rect.contains(p))
+                                        .unwrap_or(false);
+                                    if clicked_delete {
+                                        *action = TabUiAction::PromptDeleteSavedQuery((*entry).clone());
+                                    }
+                                }
+
+                                // 双击：加载到编辑器（非拖拽、非删除图标区域）
                                 if !is_dragging && item_response.double_clicked() {
-                                    tab.sql = entry.sql_text.clone();
-                                    tab.connection_id = Some(entry.connection_id.clone());
-                                    tab.database = entry.database.clone();
-                                    tab.title = entry.title.clone();
-                                    tab.selected_saved_query_id = Some(entry.id.clone());
-                                    tab.selected_saved_query_sql = Some(entry.sql_text.clone());
-                                    tab.selected_saved_query_connection_id = Some(entry.connection_id.clone());
-                                    tab.selected_saved_query_database = entry.database.clone();
-                                    *action = TabUiAction::LoadSavedQuery(entry.connection_id.clone());
+                                    let click_pos = item_response.interact_pointer_pos();
+                                    let on_delete = click_pos
+                                        .map(|p| delete_icon_rect.contains(p))
+                                        .unwrap_or(false);
+                                    if !on_delete {
+                                        tab.sql = entry.sql_text.clone();
+                                        tab.connection_id = Some(entry.connection_id.clone());
+                                        tab.database = entry.database.clone();
+                                        tab.title = entry.title.clone();
+                                        tab.selected_saved_query_id = Some(entry.id.clone());
+                                        tab.selected_saved_query_sql = Some(entry.sql_text.clone());
+                                        tab.selected_saved_query_connection_id = Some(entry.connection_id.clone());
+                                        tab.selected_saved_query_database = entry.database.clone();
+                                        *action = TabUiAction::LoadSavedQuery(entry.connection_id.clone());
+                                    }
                                 }
 
                                 // 右键菜单
@@ -25864,23 +25908,6 @@ fn render_saved_queries_panel(
                                             ui.close();
                                         }
                                     });
-                                }
-
-                                // 删除按钮 - 与折叠按钮对齐
-                                if !is_dragging {
-                                    let delete_response = ui.add_sized(
-                                        [24.0, 22.0],
-                                        egui::Button::new(
-                                            RichText::new("✕")
-                                                .size(10.0)
-                                                .color(chrome.weak_text),
-                                        )
-                                        .fill(Color32::TRANSPARENT)
-                                        .stroke(Stroke::NONE),
-                                    );
-                                    if delete_response.clicked() {
-                                        *action = TabUiAction::PromptDeleteSavedQuery((*entry).clone());
-                                    }
                                 }
                             });
 
