@@ -3983,11 +3983,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .outer_margin(egui::Margin::symmetric(10, 0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let text_width = if self.search_keyword.is_empty() {
-                        ui.available_width()
-                    } else {
-                        ui.available_width() - 20.0
-                    };
+                    let text_width = ui.available_width() - 20.0;
                     let search_response = ui.add(
                         TextEdit::singleline(&mut self.search_keyword)
                             .hint_text(RichText::new(tr!("搜索")).color(ui.visuals().weak_text_color()))
@@ -4011,19 +4007,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     if search_response.changed() && self.search_keyword.is_empty() {
                         self.committed_search.clear();
                     }
-                    // 清空按钮
-                    if !self.search_keyword.is_empty() {
-                        let clear_btn = ui.add(
-                            egui::Button::new(
-                                RichText::new("✕").size(11.0).color(ui.visuals().weak_text_color()),
-                            )
-                            .frame(false),
-                        );
-                        if clear_btn.clicked() {
-                            self.search_keyword.clear();
-                            self.committed_search.clear();
-                            search_response.request_focus();
-                        }
+                    // 清空按钮（始终渲染，空白时不可见，避免布局跳动）
+                    let has_text = !self.search_keyword.is_empty();
+                    let clear_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new("✕").size(11.0).color(
+                                if has_text { ui.visuals().weak_text_color() } else { Color32::TRANSPARENT },
+                            ),
+                        )
+                        .frame(false),
+                    );
+                    if clear_btn.clicked() && has_text {
+                        self.search_keyword.clear();
+                        self.committed_search.clear();
+                        search_response.request_focus();
                     }
                 });
             });
