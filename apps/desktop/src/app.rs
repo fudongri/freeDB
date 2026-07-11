@@ -23990,7 +23990,7 @@ fn tab_button(
                     egui::pos2(rect.left() + 1.0, rect.bottom() - 1.0),
                     egui::pos2(rect.right() - 1.0, rect.bottom() - 1.0),
                 ],
-                Stroke::new(2.0, palette.workspace_bg),
+                Stroke::new(1.0, palette.workspace_bg),
             );
         }
 
