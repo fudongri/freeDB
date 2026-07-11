@@ -53,7 +53,7 @@ fn main() -> eframe::Result<()> {
     // ---- 原生菜单栏（macOS/Windows 使用 muda，Linux 跳过） ----
     // 菜单在 DesktopApp 首帧 update() 时才挂载到 NSApp，
     // 避免被 winit 事件循环启动时创建的默认菜单覆盖。
-    let (menu_event_rx, native_menu, menu_file, menu_view, menu_settings, menu_shortcuts, menu_log, menu_lang, menu_scroll_speed) = if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
+    let (menu_event_rx, native_menu, menu_file, menu_view, menu_settings, menu_shortcuts, menu_log, menu_lang, menu_scroll_speed, menu_theme) = if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
         let (tx, rx) = mpsc::channel();
         muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
             let _ = tx.send(event);
@@ -98,6 +98,7 @@ fn main() -> eframe::Result<()> {
         let lang_label = if locale == Locale::En { "中文" } else { "English" };
         let mi_lang = muda::MenuItem::with_id("切换语言", lang_label, true, None::<muda::accelerator::Accelerator>);
         let mi_scroll_speed = muda::MenuItem::with_id("滚动速度", &tr!("滚动速度"), true, None::<muda::accelerator::Accelerator>);
+        let mi_theme = muda::MenuItem::with_id("切换主题", &tr!("切换主题"), true, None::<muda::accelerator::Accelerator>);
 
         let view_menu = muda::Submenu::with_items(
             &tr!("查看"),
@@ -112,6 +113,7 @@ fn main() -> eframe::Result<()> {
 
         let settings_menu = muda::Submenu::new(&tr!("设置"), true);
         settings_menu.append(&mi_lang).unwrap();
+        settings_menu.append(&mi_theme).unwrap();
         settings_menu.append(&mi_scroll_speed).unwrap();
         if !cfg!(target_os = "macos") {
             let about_meta = muda::AboutMetadata { name: Some("FreeDB".into()), ..muda::from_cargo_metadata!() };
@@ -119,9 +121,9 @@ fn main() -> eframe::Result<()> {
         }
         menu.append(&settings_menu).unwrap();
 
-        (Some(rx), Some(menu), Some(file_menu), Some(view_menu), Some(settings_menu), Some(mi_shortcuts), Some(mi_log), Some(mi_lang), Some(mi_scroll_speed))
+        (Some(rx), Some(menu), Some(file_menu), Some(view_menu), Some(settings_menu), Some(mi_shortcuts), Some(mi_log), Some(mi_lang), Some(mi_scroll_speed), Some(mi_theme))
     } else {
-        (None, None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None, None)
     };
 
     let options = eframe::NativeOptions {
@@ -141,7 +143,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             configure_fonts(&cc.egui_ctx);
-            Ok(Box::new(DesktopApp::new(runtime, services, log_buffer, menu_event_rx, native_menu, menu_file, menu_view, menu_settings, menu_shortcuts, menu_log, menu_lang, menu_scroll_speed, locale)))
+            Ok(Box::new(DesktopApp::new(runtime, services, log_buffer, menu_event_rx, native_menu, menu_file, menu_view, menu_settings, menu_shortcuts, menu_log, menu_lang, menu_scroll_speed, menu_theme, locale)))
         }),
     )
 }

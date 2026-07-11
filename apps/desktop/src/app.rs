@@ -139,6 +139,7 @@ pub struct DesktopApp {
     menu_log: Option<muda::MenuItem>,
     menu_lang: Option<muda::MenuItem>,
     menu_scroll_speed: Option<muda::MenuItem>,
+    menu_theme: Option<muda::MenuItem>,
     locale: Locale,
     /// 帧计数器：延迟最大化到窗口完全显示后执行
     frame_count: usize,
@@ -1074,6 +1075,7 @@ impl DesktopApp {
         menu_log: Option<muda::MenuItem>,
         menu_lang: Option<muda::MenuItem>,
         menu_scroll_speed: Option<muda::MenuItem>,
+        menu_theme: Option<muda::MenuItem>,
         locale: Locale,
     ) -> Self {
         // 加载已保存的语言，优先于系统检测
@@ -1205,6 +1207,7 @@ impl DesktopApp {
             menu_log,
             menu_lang,
             menu_scroll_speed,
+            menu_theme,
             locale,
             frame_count: 0,
         };
@@ -1449,6 +1452,10 @@ impl DesktopApp {
                 self.is_log_window_open = true;
             } else if event.id == "滚动速度" {
                 self.is_scroll_speed_open = true;
+            } else if event.id == "切换主题" {
+                self.use_dark_theme = !self.use_dark_theme;
+                self.theme = if self.use_dark_theme { ui_theme::Theme::dark() } else { ui_theme::Theme::light() };
+                let _ = self.services.save_ui_state("theme", if self.use_dark_theme { "dark" } else { "light" });
             } else if event.id == "新建连接" {
                 self.is_connection_dialog_open = true;
                 self.editing_connection_id = None;
@@ -1509,6 +1516,7 @@ impl DesktopApp {
                     m.set_text(lang_label);
                 }
                 if let Some(m) = &self.menu_scroll_speed { m.set_text(tr!("滚动速度")); }
+                if let Some(m) = &self.menu_theme { m.set_text(tr!("切换主题")); }
                 self.status_message = tr!("已切换为 {}", new_locale.display_name());
                 self.status_level = StatusLevel::Success;
             }
@@ -3731,33 +3739,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                 });
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let theme_label = if self.use_dark_theme { tr!("切换浅色") } else { tr!("切换深色") };
-                if toolbar_button(ui, theme_label, subtle_button_style(ui.visuals().dark_mode)).clicked() {
-                    self.use_dark_theme = !self.use_dark_theme;
-                    self.theme = if self.use_dark_theme { ui_theme::Theme::dark() } else { ui_theme::Theme::light() };
-                    let _ = self
-                        .services
-                        .save_ui_state("theme", if self.use_dark_theme { "dark" } else { "light" });
-                }
-                if let Some(connection_id) = &self.selected_connection {
-                    let conn_name = self.connection_name(connection_id);
-                    let status = self.services.connection_status(connection_id);
-                    let dot = match status.state {
-                        core_domain::ConnectionState::Connected => palette.success,
-                        core_domain::ConnectionState::Failed => palette.danger,
-                        core_domain::ConnectionState::Disconnected => palette.muted_dot,
-                        core_domain::ConnectionState::Reconnecting => palette.warning,
-                    };
-                    ui.add_space(8.0);
-                    ui.colored_label(dot, "●");
-                    ui.label(
-                        RichText::new(conn_name.clone())
-                            .size(12.0)
-                            .color(palette.weak_text),
-                    );
-                }
-            });
         });
     }
 
@@ -7705,7 +7686,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             let name_edit = egui::TextEdit::singleline(&mut tab.table_name)
                 .desired_width(180.0)
-                .hint_text(tr!("请输入表名"));
+                .hint_text(RichText::new(tr!("请输入表名")).color(ui.visuals().weak_text_color()));
             let name_resp = ui.add(name_edit);
             if tab.needs_focus {
                 name_resp.request_focus();
@@ -8788,7 +8769,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                                             egui::TextEdit::multiline(&mut es.enum_text)
                                                                                                                 .desired_rows(2)
                                                                                                                 .desired_width(280.0)
-                                                                                                                .hint_text(tr!("值列表（逗号分隔）")),
+                                                                                                                .hint_text(RichText::new(tr!("值列表（逗号分隔）")).color(ui.visuals().weak_text_color())),
                                                                                                         );
                                                                                                         ui.visuals_mut().widgets.inactive.bg_stroke = orig_stroke;
                                                                                                         ui.visuals_mut().widgets.hovered.bg_stroke = orig_stroke;
@@ -8804,7 +8785,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                                             ui.add(
                                                                                                                 egui::TextEdit::singleline(&mut es.regex_pattern)
                                                                                                                     .desired_width(200.0)
-                                                                                                                    .hint_text(tr!("正则表达式")),
+                                                                                                                    .hint_text(RichText::new(tr!("正则表达式")).color(ui.visuals().weak_text_color())),
                                                                                                             );
                                                                                                             test_clicked = mini_button(ui, tr!("测试"), mini_accent_style(ui.visuals().dark_mode)).clicked();
                                                                                                         });
@@ -9064,13 +9045,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 ui.add_sized(
                                                                     [360.0, 22.0],
                                                                     TextEdit::singleline(&mut clause.value)
-                                                                        .hint_text(tr!("输入原始条件")),
+                                                                        .hint_text(RichText::new(tr!("输入原始条件")).color(ui.visuals().weak_text_color())),
                                                                 );
                                                             } else if clause.operator.uses_secondary_value() {
                                                                 ui.add_sized(
                                                                     [150.0, 22.0],
                                                                     TextEdit::singleline(&mut clause.value)
-                                                                        .hint_text(tr!("起始值")),
+                                                                        .hint_text(RichText::new(tr!("起始值")).color(ui.visuals().weak_text_color())),
                                                                 );
                                                                 ui.small(
                                                                     RichText::new(tr!("到"))
@@ -9081,13 +9062,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     TextEdit::singleline(
                                                                         &mut clause.second_value,
                                                                     )
-                                                                    .hint_text(tr!("结束值")),
+                                                                    .hint_text(RichText::new(tr!("结束值")).color(ui.visuals().weak_text_color())),
                                                                 );
                                                             } else if clause.operator.uses_primary_value() {
                                                                 ui.add_sized(
                                                                     [240.0, 22.0],
                                                                     TextEdit::singleline(&mut clause.value)
-                                                                        .hint_text(clause.operator.value_hint()),
+                                                                        .hint_text(RichText::new(clause.operator.value_hint()).color(ui.visuals().weak_text_color())),
                                                                 );
                                                             } else {
                                                                 ui.small(
@@ -10195,7 +10176,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.label(RichText::new(tr!("查询名称")).size(13.0).color(palette.weak_text));
                     let input_response = ui.add(
                         egui::TextEdit::singleline(&mut dialog.title_input)
-                            .hint_text(tr!("输入查询名称"))
+                            .hint_text(RichText::new(tr!("输入查询名称")).color(ui.visuals().weak_text_color()))
                             .font(FontId::new(14.0, FontFamily::Proportional))
                             .desired_width(ui.available_width()),
                     );
@@ -10914,7 +10895,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.allocate_ui_at_rect(inner, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 14.0);
                         ui.label(RichText::new(&title).size(15.0).color(palette.title).strong());
-                        let resp = ui.add(TextEdit::singleline(&mut value).hint_text(&placeholder).desired_width(f32::INFINITY));
+                        let resp = ui.add(TextEdit::singleline(&mut value).hint_text(RichText::new(&placeholder).color(ui.visuals().weak_text_color())).desired_width(f32::INFINITY));
                         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             should_confirm = true;
                             should_close = true;
@@ -20736,7 +20717,7 @@ fn render_editor_find_bar(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
                     let te = TextEdit::singleline(&mut tab.find.find_text)
-                        .hint_text(tr!("查找…"))
+                        .hint_text(RichText::new(tr!("查找…")).color(ui.visuals().weak_text_color()))
                         .desired_width(180.0)
                         .frame(false);
                     let find_response = ui.add(te);
@@ -20868,7 +20849,7 @@ fn render_editor_find_bar(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
                         let te = TextEdit::singleline(&mut tab.find.replace_text)
-                            .hint_text(tr!("替换为…"))
+                            .hint_text(RichText::new(tr!("替换为…")).color(ui.visuals().weak_text_color()))
                             .desired_width(140.0)
                             .frame(false);
                         ui.add(te);
@@ -20915,7 +20896,7 @@ fn render_table_search_bar(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let te = TextEdit::singleline(&mut search.keyword)
-                    .hint_text(tr!("搜索表格内容…"))
+                    .hint_text(RichText::new(tr!("搜索表格内容…")).color(ui.visuals().weak_text_color()))
                     .desired_width(200.0)
                     .frame(false);
                 let response = ui.add(te);

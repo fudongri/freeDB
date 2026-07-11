@@ -112,6 +112,7 @@ fn en(key: &'static str) -> &'static str {
         "运行日志" => "Logs",
         "切换语言" => "Language",
         "滚动速度" => "Scroll Speed",
+        "切换主题" => "Toggle Theme",
         "慢" => "Slow",
         "快" => "Fast",
         "默认" => "Default",
