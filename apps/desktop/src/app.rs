@@ -3776,16 +3776,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add_space(10.0); // 左侧间距与搜索框 outer_margin 对齐
                     let style = if self.sidebar_active_only {
-                        ButtonStyle {
-                            fill: Color32::TRANSPARENT,
-                            ..mini_accent_active_style(ui.visuals().dark_mode)
-                        }
+                        mini_accent_active_style(ui.visuals().dark_mode)
                     } else {
-                        ButtonStyle {
-                            fill: Color32::TRANSPARENT,
-                            stroke: Stroke::NONE,
-                            ..mini_subtle_style(ui.visuals().dark_mode)
-                        }
+                        mini_subtle_style(ui.visuals().dark_mode)
                     };
                     if mini_button(ui, tr!("仅活跃"), style).clicked() {
                         self.sidebar_active_only = !self.sidebar_active_only;
@@ -23512,7 +23505,7 @@ fn toolbar_button_sized(
     let w = fixed_width.unwrap_or(style.min_width);
     ui.add(
         egui::Button::new(RichText::new(label).size(style.font_size).color(style.text))
-            .fill(style.fill)
+            .fill(Color32::TRANSPARENT)
             .stroke(style.stroke)
             .corner_radius(style.corner_radius)
             .min_size(Vec2::new(w, style.min_height)),
@@ -23648,7 +23641,7 @@ fn toolbar_dropdown(
 fn mini_button(ui: &mut egui::Ui, label: &str, style: ButtonStyle) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(label).size(style.font_size).color(style.text))
-            .fill(style.fill)
+            .fill(Color32::TRANSPARENT)
             .stroke(style.stroke)
             .corner_radius(style.corner_radius)
             .min_size(Vec2::new(style.min_width, style.min_height)),
@@ -23856,7 +23849,7 @@ fn segment_button_color(ui: &mut egui::Ui, label: &str, selected: bool, _accent:
                 .size(12.0)
                 .color(text_color),
         )
-        .fill(fill)
+        .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0, stroke_color))
         .corner_radius(5.0)
         .min_size(Vec2::new(0.0, 24.0)),
