@@ -150,6 +150,8 @@ pub struct DesktopApp {
     menu_lang: Option<muda::MenuItem>,
     menu_scroll_speed: Option<muda::MenuItem>,
     menu_theme: Option<muda::Submenu>,
+    menu_tab_back: Option<muda::MenuItem>,
+    menu_tab_forward: Option<muda::MenuItem>,
     locale: Locale,
     /// 帧计数器：延迟最大化到窗口完全显示后执行
     frame_count: usize,
@@ -1087,6 +1089,8 @@ impl DesktopApp {
         menu_lang: Option<muda::MenuItem>,
         menu_scroll_speed: Option<muda::MenuItem>,
         menu_theme: Option<muda::Submenu>,
+        menu_tab_back: Option<muda::MenuItem>,
+        menu_tab_forward: Option<muda::MenuItem>,
         locale: Locale,
     ) -> Self {
         // 加载已保存的语言，优先于系统检测
@@ -1225,6 +1229,8 @@ impl DesktopApp {
             menu_lang,
             menu_scroll_speed,
             menu_theme,
+            menu_tab_back,
+            menu_tab_forward,
             locale,
             frame_count: 0,
         };
@@ -1492,6 +1498,10 @@ impl DesktopApp {
                 self.is_shortcuts_open = true;
             } else if event.id == "运行日志" {
                 self.is_log_window_open = true;
+            } else if event.id == "标签页后退" {
+                self.tab_back();
+            } else if event.id == "标签页前进" {
+                self.tab_forward();
             } else if event.id == "滚动速度" {
                 self.is_scroll_speed_open = true;
             } else if event.id == "主题_浅色" {
@@ -1611,6 +1621,8 @@ impl DesktopApp {
                 if let Some(m) = &self.menu_settings { m.set_text(tr!("设置")); }
                 if let Some(m) = &self.menu_shortcuts { m.set_text(tr!("快捷键速查表")); }
                 if let Some(m) = &self.menu_log { m.set_text(tr!("运行日志")); }
+                if let Some(m) = &self.menu_tab_back { m.set_text(tr!("标签页后退")); }
+                if let Some(m) = &self.menu_tab_forward { m.set_text(tr!("标签页前进")); }
                 if let Some(m) = &self.menu_lang {
                     let lang_label = if new_locale == Locale::En { "中文" } else { "English" };
                     m.set_text(lang_label);
