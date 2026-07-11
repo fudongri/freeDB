@@ -9561,7 +9561,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let prev_text_color = ui.visuals().override_text_color;
                         ui.visuals_mut().override_text_color = Some(palette.weak_text);
                         let limit_changed = ui
-                            .checkbox(&mut tab.preview_limit_enabled, tr!("限制"))
+                            .add_sized([48.0, 22.0], egui::Checkbox::new(&mut tab.preview_limit_enabled, tr!("限制")))
                             .changed();
                         let page_size_changed = ui
                             .add_enabled_ui(tab.preview_limit_enabled, |ui| {
@@ -9579,7 +9579,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.add_space(2.0);
                         ui.label(RichText::new(tr!("条记录（每页）")).size(11.5).color(palette.weak_text));
                         ui.add_space(2.0);
-                        ui.menu_button(RichText::new("⚙").size(13.0).color(palette.weak_text), |ui| {
+                        let gear_popup_id = egui::Id::new("footer_gear_popup");
+                        let gear_btn = ui.add_sized(
+                            [22.0, 22.0],
+                            egui::Button::new(RichText::new("⚙").size(13.0).color(palette.weak_text))
+                                .fill(Color32::TRANSPARENT),
+                        );
+                        if gear_btn.clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(gear_popup_id));
+                        }
+                        egui::popup_below_widget(
+                            ui,
+                            gear_popup_id,
+                            &gear_btn,
+                            egui::PopupCloseBehavior::CloseOnClickOutside,
+                            |ui| {
                             ui.set_min_width(140.0);
                             if ui.button(tr!("重置为 1000")).clicked() {
                                 tab.preview_limit_enabled = true;
