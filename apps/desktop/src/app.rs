@@ -9139,22 +9139,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 .inner_margin(egui::Margin::symmetric(8, 8))
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        ui.label(
-                                                            RichText::new(tr!("筛选条件（最多8个）"))
-                                                                .size(13.0)
-                                                                .strong()
-                                                                .color(palette.text),
-                                                        );
-                                                        if let Some(summary) =
-                                                            table_filter_summary(&tab.preview_filter)
-                                                        {
-                                                            ui.add_space(6.0);
-                                                            ui.label(
-                                                                RichText::new(summary)
-                                                                    .size(12.0)
-                                                                    .color(palette.selection_text),
-                                                            );
-                                                        }
                                                         if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode))
                                                             .on_hover_text(tr!("应用筛选 ({}+R)", MOD_KEY))
                                                             .clicked()
@@ -9409,22 +9393,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 .inner_margin(egui::Margin::symmetric(8, 8))
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        ui.label(
-                                                            RichText::new(tr!("排序条件（最多8个）"))
-                                                                .size(13.0)
-                                                                .strong()
-                                                                .color(palette.text),
-                                                        );
-                                                        if let Some(summary) =
-                                                            table_sort_summary(&tab.preview_sort)
-                                                        {
-                                                            ui.add_space(6.0);
-                                                            ui.label(
-                                                                RichText::new(summary)
-                                                                    .size(12.0)
-                                                                    .color(palette.selection_text),
-                                                            );
-                                                        }
                                                         if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode)).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
                                                         .clicked()
                                                         {
@@ -23880,7 +23848,7 @@ struct TabButtonOutput {
 /// 渲染菜单项，右侧显示浅色快捷键提示
 fn menu_button_with_shortcut(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
     let chrome = mac_ui_palette_from_ui(ui);
-    let font_id = FontId::new(14.0, FontFamily::Proportional);
+    let font_id = FontId::new(13.0, FontFamily::Proportional);
     let resp = ui.scope(|ui| {
         let mut job = egui::text::LayoutJob::default();
         job.append(label, 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
@@ -23891,24 +23859,26 @@ fn menu_button_with_shortcut(ui: &mut egui::Ui, label: &str, shortcut: &str) -> 
     resp.inner.clicked()
 }
 
-/// 设置右键菜单样式：加大字号，选中/悬停背景改为蓝色，增大间距和内边距
+/// 设置右键菜单样式：字号、悬停/选中背景跟随主题配色
 fn ctx_menu_style(ui: &mut egui::Ui) {
     let palette = mac_ui_palette_from_ui(ui);
-    let font_id = FontId::new(14.0, FontFamily::Proportional);
+    let (dv, lv) = read_theme_variants(ui);
+    let colors = ui_theme::Theme::from_visuals(ui.visuals(), dv, lv).colors;
+    let font_id = FontId::new(13.0, FontFamily::Proportional);
     ui.style_mut().text_styles.insert(egui::TextStyle::Body, font_id.clone());
     ui.style_mut().text_styles.insert(egui::TextStyle::Button, font_id);
     ui.style_mut().spacing.button_padding = egui::vec2(10.0, 5.0);
     ui.spacing_mut().window_margin = egui::Margin::symmetric(6, 4);
     ui.style_mut().visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, palette.text);
-    ui.style_mut().visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(0, 120, 215);
-    ui.style_mut().visuals.widgets.hovered.bg_fill = Color32::from_rgb(0, 120, 215);
+    ui.style_mut().visuals.widgets.hovered.weak_bg_fill = colors.context_menu_hover;
+    ui.style_mut().visuals.widgets.hovered.bg_fill = colors.context_menu_hover;
     ui.style_mut().visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
-    ui.style_mut().visuals.widgets.active.weak_bg_fill = Color32::from_rgb(0, 96, 172);
-    ui.style_mut().visuals.widgets.active.bg_fill = Color32::from_rgb(0, 96, 172);
+    ui.style_mut().visuals.widgets.active.weak_bg_fill = colors.context_menu_active;
+    ui.style_mut().visuals.widgets.active.bg_fill = colors.context_menu_active;
     ui.style_mut().visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, Color32::WHITE);
 }
 
-/// 带蓝色高亮的子菜单按钮：当子菜单展开时父项保持蓝色背景，文字变为白色
+/// 带主题色高亮的子菜单按钮：当子菜单展开时父项保持高亮背景，文字变为白色
 fn ctx_menu_button(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>, add_contents: impl FnOnce(&mut egui::Ui)) {
     let label: egui::WidgetText = label.into();
     let resp = ui.menu_button(label.clone(), |ui| {
@@ -23916,13 +23886,15 @@ fn ctx_menu_button(ui: &mut egui::Ui, label: impl Into<egui::WidgetText>, add_co
         add_contents(ui);
     });
     if resp.inner.is_some() {
+        let (dv, lv) = read_theme_variants(ui);
+        let colors = ui_theme::Theme::from_visuals(ui.visuals(), dv, lv).colors;
         let rect = resp.response.rect;
-        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(0, 120, 215));
+        ui.painter().rect_filled(rect, 0.0, colors.context_menu_hover);
         let text = label.text();
         if !text.is_empty() {
             let galley = ui.painter().layout_no_wrap(
                 text.to_string(),
-                FontId::new(14.0, FontFamily::Proportional),
+                FontId::new(13.0, FontFamily::Proportional),
                 Color32::WHITE,
             );
             let text_pos = rect.left_top() + egui::vec2(10.0, 5.0);

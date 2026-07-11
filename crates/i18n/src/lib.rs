@@ -469,8 +469,6 @@ fn en(key: &'static str) -> &'static str {
         "[DEBUG] 开始加载连接树" => "[DEBUG] Loading connection tree",
         "[DEBUG] 开始加载节点子级" => "[DEBUG] Loading node children",
         "关闭搜索/取消选择" => "Close search / Deselect",
-        "筛选条件（最多8个）" => "Filters (max 8)",
-        "排序条件（最多8个）" => "Sort Conditions (max 8)",
         "IP地址, IPv4/IPv6" => "INET, IPv4/IPv6",
         "JSON, JSON 数据" => "JSON",
         "JSONB, 二进制 JSON" => "JSONB, binary JSON",
