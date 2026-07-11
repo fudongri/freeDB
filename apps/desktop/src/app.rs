@@ -18768,7 +18768,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition, 
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
             ui.set_width(viewport_width);
             ui.set_min_height(viewport_height);
@@ -19792,7 +19792,7 @@ fn render_index_table(
 ) {
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
         egui::ScrollArea::vertical()
         .id_salt("indexes-list")
@@ -20173,7 +20173,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("editable-structure-grid")
