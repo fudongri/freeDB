@@ -23403,45 +23403,13 @@ fn toolbar_dropdown(
     result
 }
 
-fn mini_button(ui: &mut egui::Ui, label: &str, kind: MiniButtonKind) -> egui::Response {
-    let palette = mac_ui_palette(ui.visuals());
-    let (fill, text, stroke) = match kind {
-        MiniButtonKind::Subtle => (
-            palette.subtle_button_bg,
-            palette.subtle_button_text,
-            Stroke::new(1.0, palette.subtle_button_stroke),
-        ),
-        MiniButtonKind::Danger => (
-            palette.danger_button_bg,
-            palette.danger_button_text,
-            Stroke::new(1.0, palette.danger_button_stroke),
-        ),
-        MiniButtonKind::Accent => (
-            palette.accent_button_bg,
-            palette.accent_button_text,
-            Stroke::new(1.0, palette.accent_button_stroke),
-        ),
-        MiniButtonKind::AccentActive => (
-            palette.accent_active_button_bg,
-            palette.accent_active_button_text,
-            Stroke::new(1.0, palette.accent_active_button_stroke),
-        ),
-        MiniButtonKind::Hide => {
-            let is_dark = ui.visuals().dark_mode;
-            if is_dark {
-                (Color32::from_rgb(44, 44, 46), Color32::from_rgb(130, 155, 175), Stroke::new(1.0, Color32::from_rgb(130, 155, 175)))
-            } else {
-                (Color32::from_rgb(246, 246, 246), Color32::from_rgb(90, 120, 145), Stroke::new(1.0, Color32::from_rgb(90, 120, 145)))
-            }
-        }
-    };
-
+fn mini_button(ui: &mut egui::Ui, label: &str, style: ButtonStyle) -> egui::Response {
     ui.add(
-        egui::Button::new(RichText::new(label).size(11.5).color(text))
-            .fill(fill)
-            .stroke(stroke)
-            .corner_radius(4.0)
-            .min_size(Vec2::new(34.0, 22.0)),
+        egui::Button::new(RichText::new(label).size(style.font_size).color(style.text))
+            .fill(style.fill)
+            .stroke(style.stroke)
+            .corner_radius(style.corner_radius)
+            .min_size(Vec2::new(style.min_width, style.min_height)),
     )
 }
 
