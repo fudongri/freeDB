@@ -13374,6 +13374,18 @@ enum MiniButtonKind {
     Hide,
 }
 
+/// 按钮独立样式，每个按钮调用时传入自己的样式
+#[derive(Clone)]
+struct ButtonStyle {
+    fill: Color32,
+    text: Color32,
+    stroke: Stroke,
+    font_size: f32,
+    min_width: f32,
+    min_height: f32,
+    corner_radius: f32,
+}
+
 #[derive(Clone, Copy)]
 enum StatusLevel {
     Normal,
