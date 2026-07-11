@@ -1460,6 +1460,17 @@ impl DesktopApp {
                 self.is_connection_dialog_open = true;
                 self.editing_connection_id = None;
                 self.connection_form = ConnectionFormState::default();
+            } else if event.id == "新建查询" {
+                let (conn_id, database) = if let Some(node) = self.selected_sidebar_node() {
+                    let db = node.database.clone().or_else(|| {
+                        matches!(node.node_type, ExplorerNodeType::Database)
+                            .then(|| node.name.clone())
+                    });
+                    (Some(node.connection_id.clone()), db)
+                } else {
+                    (self.selected_connection.clone(), None)
+                };
+                self.create_query_tab(conn_id, database, None);
             } else if event.id == "导入配置" {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("FreeDB Config", &["dbx"])
@@ -3636,7 +3647,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn render_toolbar(&mut self, ui: &mut egui::Ui) {
         let palette = MacUiPalette::from(&self.theme.colors);
-        ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
         ui.horizontal(|ui| {
             self.toolbar_icon(ui);
@@ -3765,7 +3775,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         ui.add_space(6.0);
         egui::Frame::new()
             .fill(palette.search_bg)
-            .stroke(Stroke::new(1.0, palette.soft_border))
+            .stroke(Stroke::NONE)
             .corner_radius(5.0)
             .inner_margin(egui::Margin::symmetric(8, 5))
             .outer_margin(egui::Margin::symmetric(10, 0))
@@ -4844,7 +4854,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         egui::Frame::new()
             .fill(palette.toolbar_bg)
-            .stroke(Stroke::new(1.0, palette.border))
+            .stroke(Stroke::NONE)
             .inner_margin(egui::Margin::symmetric(0, 0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -4856,7 +4866,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             egui::Button::new("◀")
                                 .rounding(0.0)
                                 .fill(palette.tab_idle_bg)
-                                .stroke(Stroke::new(1.0, palette.soft_border))
+                                .stroke(Stroke::NONE)
                         )
                     }).inner;
                     // 点击或按住时滚动
@@ -4978,7 +4988,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             egui::Button::new("▶")
                                 .rounding(0.0)
                                 .fill(palette.tab_idle_bg)
-                                .stroke(Stroke::new(1.0, palette.soft_border))
+                                .stroke(Stroke::NONE)
                         )
                     }).inner;
                     // 点击或按住时滚动
@@ -6913,8 +6923,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 strip.cell(|ui| {
                     egui::Frame::new()
                         .fill(chrome.toolbar_bg)
-                        .stroke(Stroke::new(1.0, chrome.border))
-                        .corner_radius(8.0)
+                        .stroke(Stroke::NONE)
+                        .corner_radius(2.0)
                         .inner_margin(egui::Margin::symmetric(14, 10))
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
@@ -7081,13 +7091,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let palette = editor_palette(ui.visuals());
                     egui::Frame::new()
                         .fill(palette.panel_bg)
-                        .stroke(Stroke::new(1.0, chrome.soft_border))
-                        .corner_radius(8.0)
+                        .stroke(Stroke::NONE)
+                        .corner_radius(2.0)
                         .inner_margin(egui::Margin::same(0))
                         .show(ui, |ui| {
                             egui::Frame::new()
                                 .fill(palette.editor_bg)
-                                .corner_radius(8.0)
+                                .corner_radius(2.0)
                                 .inner_margin(egui::Margin::same(0))
                                 .show(ui, |ui| {
                                     let editor_inner_height = ui.available_height();
@@ -7290,8 +7300,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     strip.cell(|ui| {
                         egui::Frame::new()
                             .fill(chrome.card_bg)
-                            .stroke(Stroke::new(1.0, chrome.border))
-                            .corner_radius(8.0)
+                            .stroke(Stroke::NONE)
+                            .corner_radius(2.0)
                             .inner_margin(egui::Margin::symmetric(8, 8))
                             .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -7518,8 +7528,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             for message in tab.messages.iter() {
                                                 egui::Frame::new()
                                                     .fill(chrome.search_bg)
-                                                    .stroke(Stroke::new(1.0, chrome.soft_border))
-                                                    .corner_radius(6.0)
+                                                    .stroke(Stroke::NONE)
+                                                    .corner_radius(2.0)
                                                     .inner_margin(egui::Margin::symmetric(8, 6))
                                                     .show(ui, |ui| {
                                                         ui.label(message);
@@ -7638,8 +7648,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 let font = FontId::new(12.0, FontFamily::Monospace);
                                                 egui::Frame::new()
                                                     .fill(chrome.search_bg)
-                                                    .stroke(Stroke::new(1.0, chrome.soft_border))
-                                                    .corner_radius(6.0)
+                                                    .stroke(Stroke::NONE)
+                                                    .corner_radius(2.0)
                                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                                     .show(ui, |ui| {
                                                         ui.label(RichText::new(json.as_str()).font(font).color(chrome.text));
@@ -7751,7 +7761,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ui.add_space(4.0);
                 egui::Frame::new()
                     .fill(palette.card_bg)
-                    .stroke(Stroke::new(1.0, palette.soft_border))
+                    .stroke(Stroke::NONE)
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -7807,7 +7817,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         egui::Frame::new()
             .fill(palette.card_bg)
-            .stroke(Stroke::new(1.0, palette.soft_border))
+            .stroke(Stroke::NONE)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("create-table-columns-grid")
@@ -7817,7 +7827,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         TableBuilder::new(ui)
                             .vscroll(false)
                             .striped(true)
-                            .resizable(true)
+                            .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                             .column(egui_extras::Column::initial(160.0).at_least(100.0))
                             .column(egui_extras::Column::initial(140.0).at_least(80.0))
@@ -7979,7 +7989,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         egui::Frame::new()
             .fill(palette.card_bg)
-            .stroke(Stroke::new(1.0, palette.soft_border))
+            .stroke(Stroke::NONE)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("create-table-indexes-grid")
@@ -7989,7 +7999,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         TableBuilder::new(ui)
                             .vscroll(false)
                             .striped(true)
-                            .resizable(true)
+                            .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                             .column(egui_extras::Column::initial(160.0).at_least(100.0))
                             .column(egui_extras::Column::initial(80.0).at_least(50.0))
@@ -8154,7 +8164,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 strip.cell(|ui| {
                     egui::Frame::new()
                         .fill(palette.toolbar_bg)
-                        .stroke(Stroke::new(1.0, palette.border))
+                        .stroke(Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(10, 6))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -8174,20 +8184,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         tab.active_view = mode;
                                     }
                                 }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if toolbar_button(ui, tr!("新建查询"), accent_button_style(ui.visuals().dark_mode)).clicked() {
-                                            action = TabUiAction::NewQueryFromTable {
-                                                connection_id: tab.table.connection_id.clone(),
-                                                database: tab.table.database.clone(),
-                                                schema: tab.table.schema.clone(),
-                                                table: tab.table.table.clone(),
-                                            };
-                                        }
-                                        ui.separator();
-                                    },
-                                );
                             });
                         });
                 });
@@ -8195,7 +8191,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 strip.cell(|ui| {
                     egui::Frame::new()
                         .fill(palette.card_bg)
-                        .stroke(Stroke::new(1.0, palette.border))
+                        .stroke(Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(8, 8))
                         .show(ui, |ui| {
                             if let Some(error) = &tab.error {
@@ -8449,7 +8445,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 area.show(ui.ctx(), |ui| {
                                                     egui::Frame::new()
                                                         .fill(palette.card_bg)
-                                                        .stroke(Stroke::new(1.0, palette.border))
+                                                        .stroke(Stroke::NONE)
                                                         .corner_radius(6.0)
                                                         .inner_margin(egui::Margin::same(8))
                                                         .show(ui, |ui| {
@@ -8548,7 +8544,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     .show(ui.ctx(), |ui| {
                                                         egui::Frame::new()
                                                             .fill(palette.card_bg)
-                                                            .stroke(Stroke::new(1.0, palette.border))
+                                                            .stroke(Stroke::NONE)
                                                             .corner_radius(6.0)
                                                             .inner_margin(egui::Margin::same(8))
                                                             .show(ui, |ui| {
@@ -8915,7 +8911,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             ui.add_space(6.0);
                                             egui::Frame::new()
                                                 .fill(palette.search_bg)
-                                                .stroke(Stroke::new(1.0, palette.soft_border))
+                                                .stroke(Stroke::NONE)
                                                 .corner_radius(6.0)
                                                 .inner_margin(egui::Margin::symmetric(8, 8))
                                                 .show(ui, |ui| {
@@ -9193,7 +9189,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             ui.add_space(6.0);
                                             egui::Frame::new()
                                                 .fill(palette.search_bg)
-                                                .stroke(Stroke::new(1.0, palette.soft_border))
+                                                .stroke(Stroke::NONE)
                                                 .corner_radius(6.0)
                                                 .inner_margin(egui::Margin::symmetric(8, 8))
                                                 .show(ui, |ui| {
@@ -10875,10 +10871,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let card_h = if is_create_db { 290.0 } else { 190.0 };
                 let card_rect = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(card_w, card_h));
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                    let r = 12.0;
+                    let r = 2.0;
                     let bg = if is_dark { Color32::from_rgb(44, 47, 54) } else { Color32::from_rgb(252, 252, 252) };
-                    let shadow_rect = ui.max_rect().translate(egui::vec2(0.0, 4.0));
-                    ui.painter().rect_filled(shadow_rect, r, Color32::from_rgba_premultiplied(0, 0, 0, 30));
                     ui.painter().rect_filled(ui.max_rect(), r, bg);
                     ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
                     let inner = ui.max_rect().shrink(20.0);
@@ -11052,10 +11046,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let card_h = 164.0;
                 let card_rect = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(card_w, card_h));
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                    let r = 12.0;
+                    let r = 2.0;
                     let bg = if is_dark { Color32::from_rgb(44, 47, 54) } else { Color32::from_rgb(252, 252, 252) };
-                    let shadow_rect = ui.max_rect().translate(egui::vec2(0.0, 4.0));
-                    ui.painter().rect_filled(shadow_rect, r, Color32::from_rgba_premultiplied(0, 0, 0, 30));
                     ui.painter().rect_filled(ui.max_rect(), r, bg);
                     ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
                     let inner = ui.max_rect().shrink(20.0);
@@ -11140,10 +11132,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let card_h = 164.0;
                 let card_rect = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(card_w, card_h));
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                    let r = 12.0;
+                    let r = 2.0;
                     let bg = if is_dark { Color32::from_rgb(44, 47, 54) } else { Color32::from_rgb(252, 252, 252) };
-                    let shadow_rect = ui.max_rect().translate(egui::vec2(0.0, 4.0));
-                    ui.painter().rect_filled(shadow_rect, r, Color32::from_rgba_premultiplied(0, 0, 0, 30));
                     ui.painter().rect_filled(ui.max_rect(), r, bg);
                     ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
                     let inner = ui.max_rect().shrink(20.0);
@@ -12156,15 +12146,6 @@ impl eframe::App for DesktopApp {
                 input.raw_scroll_delta *= scale;
             });
         }
-
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(40.0)
-            .frame(
-                egui::Frame::NONE
-                    .fill(MacUiPalette::from(&self.theme.colors).toolbar_bg)
-                    .inner_margin(egui::vec2(0.0, 7.0)),
-            )
-            .show(ctx, |ui| self.render_toolbar(ui));
 
         // 更新提示栏
         enum UpdateAction { StartDownload, Apply, Retry, Dismiss }
@@ -14519,7 +14500,7 @@ fn render_result_table(
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.soft_border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
             ui.set_width(viewport_width);
             ui.set_min_height(viewport_height);
@@ -15138,7 +15119,7 @@ fn render_editable_result_table(
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.soft_border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
             ui.set_width(viewport_width);
             ui.set_min_height(viewport_height);
@@ -16176,7 +16157,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.soft_border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
             ui.set_width(viewport_width);
             ui.set_min_height(viewport_height);
@@ -17934,11 +17915,7 @@ fn table_row_fill(
     selected: bool,
     pending_insert: bool,
 ) -> Color32 {
-    let base_fill = if row_index % 2 == 0 {
-        palette.card_bg
-    } else {
-        palette.table_alt_bg
-    };
+    let base_fill = palette.card_bg;
     if pending_insert {
         return Color32::from_rgba_premultiplied(
             palette.search_bg.r(),
@@ -18182,8 +18159,8 @@ fn table_grid_colors(
         )
     } else {
         (
-            subtle_grid_color(palette.table_grid, 26),
-            subtle_grid_color(palette.table_grid, 40),
+            Color32::TRANSPARENT,
+            subtle_grid_color(palette.table_grid, 30),
         )
     }
 }
@@ -18212,14 +18189,14 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.soft_border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
             ui.set_width(viewport_width);
             ui.set_min_height(viewport_height);
 
             egui::Frame::new()
                 .fill(palette.toolbar_bg)
-                .stroke(Stroke::new(1.0, palette.border))
+                .stroke(Stroke::NONE)
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -18238,7 +18215,7 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
 
             egui::Frame::new()
                 .fill(editor.panel_bg)
-                .stroke(Stroke::new(1.0, palette.soft_border))
+                .stroke(Stroke::NONE)
                 .show(ui, |ui| {
                     egui::ScrollArea::both()
                         .id_salt(format!("table-ddl-{}", title))
@@ -18622,7 +18599,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.soft_border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
             ui.set_width(viewport_width);
             ui.set_min_height(viewport_height);
@@ -18634,7 +18611,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                     TableBuilder::new(ui)
                         .vscroll(false)
                         .striped(true)
-                        .resizable(true)
+                        .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .column(egui_extras::Column::initial(42.0).at_least(42.0))
                         .column(egui_extras::Column::initial(200.0).at_least(120.0))
@@ -19210,7 +19187,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
             let available_width = ui.available_width();
             egui::Frame::new()
                 .fill(palette.card_bg)
-                .stroke(Stroke::new(1.0, palette.soft_border))
+                .stroke(Stroke::NONE)
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     ui.label(
@@ -19966,7 +19943,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
         let available_width = ui.available_width();
         egui::Frame::new()
             .fill(palette.card_bg)
-            .stroke(Stroke::new(1.0, palette.soft_border))
+            .stroke(Stroke::NONE)
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.label(
@@ -20013,7 +19990,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
 
     egui::Frame::new()
         .fill(palette.card_bg)
-        .stroke(Stroke::new(1.0, palette.soft_border))
+        .stroke(Stroke::NONE)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("editable-structure-grid")
@@ -20023,7 +20000,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                     TableBuilder::new(ui)
                         .vscroll(false)
                         .striped(true)
-                        .resizable(true)
+                        .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .column(egui_extras::Column::initial(42.0).at_least(42.0))
                         .column(egui_extras::Column::initial(200.0).at_least(120.0))
@@ -20206,15 +20183,15 @@ fn table_header_cell(
     let header_bg = if dragged {
         // 被拖拽列：背景降低不透明度，营造"抬起"效果
         let base = if selected {
-            blend_color(palette.table_header_bg, palette.selection_bg, 0.35)
+            blend_color(palette.card_bg, palette.selection_bg, 0.35)
         } else {
-            palette.table_header_bg
+            palette.card_bg
         };
         blend_color(base, Color32::TRANSPARENT, 0.5)
     } else if selected {
-        blend_color(palette.table_header_bg, palette.selection_bg, 0.35)
+        blend_color(palette.card_bg, palette.selection_bg, 0.35)
     } else {
-        palette.table_header_bg
+        palette.card_bg
     };
     let inner = egui::Frame::new()
         .fill(header_bg)
@@ -20222,6 +20199,12 @@ fn table_header_cell(
         .show(ui, |ui| {
             ui.set_min_height(28.0);
             let content_rect = ui.max_rect();
+            // 表头底部淡线
+            let bottom_y = content_rect.bottom() - 0.5;
+            ui.painter().line_segment(
+                [egui::pos2(content_rect.left(), bottom_y), egui::pos2(content_rect.right(), bottom_y)],
+                Stroke::new(1.0, subtle_grid_color(palette.table_grid, 40)),
+            );
             ui.with_layout(
                 egui::Layout::top_down(egui::Align::Center)
                     .with_cross_align(egui::Align::Min),
@@ -20879,7 +20862,7 @@ fn render_table_search_bar(
 ) {
     let frame_response = egui::Frame::new()
         .fill(palette.search_bg)
-        .stroke(Stroke::new(1.0, palette.soft_border))
+        .stroke(Stroke::NONE)
         .corner_radius(5.0)
         .inner_margin(egui::Margin::symmetric(8, 4))
         .outer_margin(egui::Margin::symmetric(4, 4))
@@ -22680,7 +22663,7 @@ fn app_visuals(use_dark_theme: bool) -> egui::Visuals {
     visuals.override_text_color = Some(c.text);
     visuals.window_stroke = Stroke::new(1.0, c.window_stroke);
     visuals.widgets.noninteractive.bg_fill = c.widget_noninteractive_bg;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c.widget_noninteractive_stroke);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, c.widget_noninteractive_fg);
     visuals.widgets.inactive.bg_fill = c.widget_inactive_bg;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, c.widget_inactive_stroke);
@@ -22692,6 +22675,16 @@ fn app_visuals(use_dark_theme: bool) -> egui::Visuals {
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, c.widget_open_stroke);
     visuals.selection.bg_fill = c.egui_selection_bg;
     visuals.selection.stroke = Stroke::new(1.0, c.egui_selection_stroke);
+
+    // 扁平化：去掉圆角和阴影
+    visuals.window_corner_radius = egui::CornerRadius::same(2);
+    visuals.menu_corner_radius = egui::CornerRadius::same(2);
+    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(0);
+    visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(0);
+    visuals.widgets.active.corner_radius = egui::CornerRadius::same(0);
+    visuals.widgets.open.corner_radius = egui::CornerRadius::same(0);
+    visuals.window_shadow = egui::epaint::Shadow::NONE;
+
     visuals
 }
 
@@ -23547,7 +23540,7 @@ fn toolbar_dropdown(
     area.show(ui.ctx(), |ui| {
         egui::Frame::new()
             .fill(palette.card_bg)
-            .stroke(Stroke::new(1.0, palette.border))
+            .stroke(Stroke::NONE)
             .corner_radius(6.0)
             .inner_margin(egui::Margin::symmetric(4, 4))
             .show(ui, |ui| {
@@ -24050,7 +24043,7 @@ fn render_query_empty_state(ui: &mut egui::Ui, title: &str, description: &str) {
         |ui| {
             egui::Frame::new()
                 .fill(palette.search_bg)
-                .stroke(Stroke::new(1.0, palette.soft_border))
+                .stroke(Stroke::NONE)
                 .corner_radius(10.0)
                 .inner_margin(egui::Margin::symmetric(18, 16))
                 .show(ui, |ui| {

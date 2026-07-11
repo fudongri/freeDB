@@ -210,13 +210,13 @@ impl Theme {
             fonts: FontSizes::default(),
             colors: ThemeColors {
                 // ── 通用 UI ──
-                toolbar_bg: Color32::from_rgb(44, 44, 46),
-                sidebar_bg: Color32::from_rgb(36, 36, 38),
-                workspace_bg: Color32::from_rgb(56, 56, 58),
+                toolbar_bg: Color32::from_rgb(54, 54, 56),
+                sidebar_bg: Color32::from_rgb(44, 44, 46),
+                workspace_bg: Color32::from_rgb(54, 54, 56),
                 card_bg: Color32::from_rgb(54, 54, 56),
                 table_header_bg: Color32::from_rgb(62, 62, 64),
                 table_alt_bg: Color32::from_rgb(50, 50, 52),
-                search_bg: Color32::from_rgb(58, 58, 60),
+                search_bg: Color32::from_rgb(54, 54, 56),
                 border: Color32::from_rgb(86, 86, 89),
                 soft_border: Color32::from_rgb(70, 70, 73),
                 table_grid: Color32::from_rgb(74, 74, 77),
@@ -283,7 +283,7 @@ impl Theme {
                 dialog_secondary_button_text: Color32::from_rgb(250, 250, 250),
 
                 // ── 编辑器 ──
-                editor_panel_bg: Color32::from_rgb(36, 36, 38),
+                editor_panel_bg: Color32::from_rgb(54, 54, 56),
                 editor_bg: Color32::from_rgb(42, 42, 44),
                 editor_gutter_bg: Color32::from_rgb(40, 40, 42),
                 editor_current_line_bg: Color32::from_rgb(36, 50, 72),
@@ -327,7 +327,7 @@ impl Theme {
 
                 // ── egui 全局视觉 ──
                 panel_fill: Color32::from_rgb(54, 54, 56),
-                window_fill: Color32::from_rgb(50, 50, 52),
+                window_fill: Color32::from_rgb(54, 54, 56),
                 extreme_bg: Color32::from_rgb(72, 72, 75),
                 faint_bg: Color32::from_rgb(58, 58, 60),
                 code_bg: Color32::from_rgb(68, 68, 70),
@@ -360,9 +360,9 @@ impl Theme {
             fonts: FontSizes::default(),
             colors: ThemeColors {
                 // ── 通用 UI ──
-                toolbar_bg: Color32::from_rgb(246, 246, 246),
+                toolbar_bg: Color32::from_rgb(255, 255, 255),
                 sidebar_bg: Color32::from_rgb(237, 237, 239),
-                workspace_bg: Color32::from_rgb(249, 249, 249),
+                workspace_bg: Color32::from_rgb(255, 255, 255),
                 card_bg: Color32::from_rgb(255, 255, 255),
                 table_header_bg: Color32::from_rgb(243, 243, 243),
                 table_alt_bg: Color32::from_rgb(248, 248, 248),
@@ -433,7 +433,7 @@ impl Theme {
                 dialog_secondary_button_text: Color32::from_rgb(50, 50, 50),
 
                 // ── 编辑器 ──
-                editor_panel_bg: Color32::from_rgb(248, 248, 248),
+                editor_panel_bg: Color32::from_rgb(255, 255, 255),
                 editor_bg: Color32::from_rgb(250, 250, 250),
                 editor_gutter_bg: Color32::from_rgb(244, 244, 244),
                 editor_current_line_bg: Color32::from_rgb(228, 238, 252),
@@ -476,10 +476,10 @@ impl Theme {
                 update_error_text: Color32::from_rgb(180, 50, 50),
 
                 // ── egui 全局视觉 ──
-                panel_fill: Color32::from_rgb(249, 249, 249),
-                window_fill: Color32::from_rgb(248, 248, 248),
+                panel_fill: Color32::from_rgb(255, 255, 255),
+                window_fill: Color32::from_rgb(255, 255, 255),
                 extreme_bg: Color32::from_rgb(230, 230, 230),
-                faint_bg: Color32::from_rgb(240, 240, 240),
+                faint_bg: Color32::from_rgb(248, 248, 248),
                 code_bg: Color32::from_rgb(240, 240, 240),
                 window_stroke: Color32::from_rgb(218, 218, 218),
                 widget_noninteractive_bg: Color32::from_rgb(240, 240, 240),

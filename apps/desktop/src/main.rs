@@ -77,6 +77,7 @@ fn main() -> eframe::Result<()> {
         }
 
         let mi_new_conn = muda::MenuItem::with_id("新建连接", &tr!("新建连接"), true, None::<muda::accelerator::Accelerator>);
+        let mi_new_query = muda::MenuItem::with_id("新建查询", &tr!("新建查询"), true, Some(muda::accelerator::Accelerator::new(Some(muda::accelerator::Modifiers::SUPER), muda::accelerator::Code::KeyD)));
         let mi_import = muda::MenuItem::with_id("导入配置", &tr!("导入配置"), true, None::<muda::accelerator::Accelerator>);
         let mi_export = muda::MenuItem::with_id("导出配置", &tr!("导出配置"), true, None::<muda::accelerator::Accelerator>);
 
@@ -85,6 +86,7 @@ fn main() -> eframe::Result<()> {
             true,
             &[
                 &mi_new_conn as &dyn muda::IsMenuItem,
+                &mi_new_query as &dyn muda::IsMenuItem,
                 &muda::PredefinedMenuItem::separator(),
                 &mi_import as &dyn muda::IsMenuItem,
                 &mi_export as &dyn muda::IsMenuItem,
