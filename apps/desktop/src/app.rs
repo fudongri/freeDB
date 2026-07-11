@@ -8095,7 +8095,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         // 索引列表
         let idx_grid_v = subtle_grid_color(palette.table_grid, 26);
-        let idx_grid_h = subtle_grid_color(palette.table_grid, 40);
+        let idx_grid_h = subtle_grid_color(palette.table_grid, 30);
 
         egui::Frame::new()
             .fill(palette.card_bg)
@@ -18800,7 +18800,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition, 
                                     row.col(|ui| {
                                         let rect = ui.max_rect();
                                         ui.painter().rect_filled(rect, 0.0, fill);
-                                        paint_table_grid_lines(ui, rect, Color32::TRANSPARENT, subtle_grid_color(palette.table_grid, 40));
+                                        paint_table_grid_lines(ui, rect, Color32::TRANSPARENT, subtle_grid_color(palette.table_grid, 30));
                                         let cb_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
                                         let mut checked = !column.nullable;
                                         ui.put(cb_rect, egui::Checkbox::without_text(&mut checked));
@@ -19782,7 +19782,7 @@ fn render_index_table(
                 })
                 .body(|mut body| {
                     let idx_grid_v = Color32::TRANSPARENT;
-                    let idx_grid_h = subtle_grid_color(palette.table_grid, 40);
+                    let idx_grid_h = subtle_grid_color(palette.table_grid, 30);
                     let mut row_num = 0usize;
                     // 已有索引
                     for (i, idx) in existing.iter().enumerate() {
@@ -20459,7 +20459,7 @@ fn table_header_cell(
         ui,
         rect,
         Color32::TRANSPARENT,
-        subtle_grid_color(palette.table_grid, 40),
+        subtle_grid_color(palette.table_grid, 30),
     );
     (sort_choice, column_clicked, cell_response.dragged(), copy_action)
 }
@@ -20498,7 +20498,7 @@ fn table_body_cell(
         ui,
         rect,
         Color32::TRANSPARENT,
-        subtle_grid_color(palette.table_grid, 40),
+        subtle_grid_color(palette.table_grid, 30),
     );
     let clipped_rect = table_cell_content_rect(rect);
     let font_id = FontId::new(
@@ -20569,7 +20569,7 @@ fn table_text_cell(
         ui,
         rect,
         Color32::TRANSPARENT,
-        subtle_grid_color(palette.table_grid, 40),
+        subtle_grid_color(palette.table_grid, 30),
     );
     let clipped_rect = table_cell_content_rect(rect);
     ui.painter().with_clip_rect(clipped_rect).text(
@@ -20615,7 +20615,7 @@ fn table_status_badge_cell(
         ui,
         rect,
         Color32::TRANSPARENT,
-        subtle_grid_color(palette.table_grid, 40),
+        subtle_grid_color(palette.table_grid, 30),
     );
 
     if !text.is_empty() {
