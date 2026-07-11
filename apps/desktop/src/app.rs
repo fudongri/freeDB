@@ -7700,14 +7700,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             let name_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("集合名:") } else { tr!("表名:") };
             ui.label(RichText::new(name_label).color(palette.weak_text));
             let visuals = ui.visuals_mut();
-            if !visuals.dark_mode {
-                visuals.widgets.inactive.bg_fill = Color32::WHITE;
-                visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.soft_border);
-                visuals.widgets.hovered.bg_fill = Color32::WHITE;
-                visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
-                visuals.widgets.active.bg_fill = Color32::WHITE;
-                visuals.widgets.active.bg_stroke = Stroke::new(1.0, palette.selection_stroke);
-            }
+            visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+            visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.soft_border);
+            visuals.widgets.hovered.bg_fill = Color32::TRANSPARENT;
+            visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
+            visuals.widgets.active.bg_fill = Color32::TRANSPARENT;
+            visuals.widgets.active.bg_stroke = Stroke::new(1.0, palette.selection_stroke);
             let name_edit = egui::TextEdit::singleline(&mut tab.table_name)
                 .desired_width(180.0)
                 .hint_text(RichText::new(tr!("请输入表名")).color(ui.visuals().weak_text_color()));
@@ -9560,11 +9558,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             RichText::new(tr!("耗时 {} ms", result_elapsed_ms)).size(11.5).color(palette.weak_text),
                         );
                         ui.separator();
+                        let prev_text_color = ui.visuals().override_text_color;
+                        ui.visuals_mut().override_text_color = Some(palette.weak_text);
                         let limit_changed = ui
                             .checkbox(&mut tab.preview_limit_enabled, tr!("限制"))
                             .changed();
                         let page_size_changed = ui
                             .add_enabled_ui(tab.preview_limit_enabled, |ui| {
+                                ui.visuals_mut().override_text_color = Some(palette.weak_text);
                                 ui.add_sized(
                                     [64.0, 22.0],
                                     egui::DragValue::new(&mut tab.preview_page_size)
@@ -9574,6 +9575,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             })
                             .inner
                             .changed();
+                        ui.visuals_mut().override_text_color = prev_text_color;
                         ui.add_space(2.0);
                         ui.label(RichText::new(tr!("条记录（每页）")).size(11.5).color(palette.weak_text));
                         ui.add_space(2.0);
@@ -22684,13 +22686,16 @@ fn app_visuals(use_dark_theme: bool) -> egui::Visuals {
     visuals.widgets.noninteractive.bg_fill = c.widget_noninteractive_bg;
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, c.widget_noninteractive_fg);
-    visuals.widgets.inactive.bg_fill = c.widget_inactive_bg;
+    visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, c.widget_inactive_stroke);
-    visuals.widgets.hovered.bg_fill = c.widget_hovered_bg;
+    visuals.widgets.hovered.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, c.widget_hovered_stroke);
-    visuals.widgets.active.bg_fill = c.widget_active_bg;
+    visuals.widgets.active.bg_fill = Color32::TRANSPARENT;
+    visuals.widgets.active.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.active.bg_stroke = Stroke::new(1.2, c.widget_active_stroke);
-    visuals.widgets.open.bg_fill = c.widget_open_bg;
+    visuals.widgets.open.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, c.widget_open_stroke);
     visuals.selection.bg_fill = c.egui_selection_bg;
     visuals.selection.stroke = Stroke::new(1.0, c.egui_selection_stroke);
@@ -22711,10 +22716,10 @@ fn app_style(base_style: &egui::Style) -> egui::Style {
     let theme = ui_theme::Theme::from_visuals(&base_style.visuals);
     let c = &theme.colors;
     let mut style = base_style.clone();
-    style.spacing.scroll = egui::style::ScrollStyle::solid();
+    style.spacing.scroll = egui::style::ScrollStyle::floating();
     style.spacing.scroll.bar_width = 8.0;
     style.spacing.scroll.floating_width = 6.0;
-    style.spacing.scroll.floating_allocated_width = 6.0;
+    style.spacing.scroll.floating_allocated_width = 0.0;
     style.spacing.scroll.handle_min_length = 28.0;
     style.spacing.scroll.foreground_color = true;
     style.spacing.scroll.dormant_handle_opacity = c.scrollbar_dormant_opacity;
@@ -22736,16 +22741,16 @@ fn apply_mac_dialog_style(ui: &mut egui::Ui, palette: MacDialogPalette) {
     style.visuals.widgets.noninteractive.bg_fill = palette.section_bg;
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.section_border);
     style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, palette.weak_text);
-    style.visuals.widgets.inactive.bg_fill = palette.input_bg;
+    style.visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.input_border);
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, palette.text);
-    style.visuals.widgets.hovered.bg_fill = palette.input_hover_bg;
+    style.visuals.widgets.hovered.bg_fill = Color32::TRANSPARENT;
     style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, primary);
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, palette.text);
-    style.visuals.widgets.active.bg_fill = palette.input_active_bg;
+    style.visuals.widgets.active.bg_fill = Color32::TRANSPARENT;
     style.visuals.widgets.active.bg_stroke = Stroke::new(1.2, primary);
     style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, palette.text);
-    style.visuals.widgets.open.bg_fill = palette.input_hover_bg;
+    style.visuals.widgets.open.bg_fill = Color32::TRANSPARENT;
     style.visuals.widgets.open.bg_stroke = Stroke::new(1.0, palette.input_border);
     style.visuals.widgets.open.fg_stroke = Stroke::new(1.0, palette.text);
 }
@@ -23859,18 +23864,13 @@ fn segment_button_color(ui: &mut egui::Ui, label: &str, selected: bool, _accent:
 /// 单元格文本框样式：深色模式透明底，浅色模式白底 + 边框
 fn apply_cell_input_style(ui: &mut egui::Ui) {
     let palette = mac_ui_palette(ui.visuals());
-    if !ui.visuals().dark_mode {
-        let v = ui.visuals_mut();
-        v.widgets.inactive.bg_fill = Color32::WHITE;
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.soft_border);
-        v.widgets.hovered.bg_fill = Color32::WHITE;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
-        v.widgets.active.bg_fill = Color32::WHITE;
-        v.widgets.active.bg_stroke = Stroke::new(1.0, palette.selection_stroke);
-    } else {
-        ui.visuals_mut().widgets.inactive.bg_fill = Color32::TRANSPARENT;
-        ui.visuals_mut().widgets.hovered.bg_fill = Color32::TRANSPARENT;
-    }
+    let v = ui.visuals_mut();
+    v.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.soft_border);
+    v.widgets.hovered.bg_fill = Color32::TRANSPARENT;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
+    v.widgets.active.bg_fill = Color32::TRANSPARENT;
+    v.widgets.active.bg_stroke = Stroke::new(1.0, palette.selection_stroke);
 }
 
 /// MySQL 类型建议列表 (类型名, 中文描述)
