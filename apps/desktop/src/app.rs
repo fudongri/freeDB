@@ -3757,19 +3757,40 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut pending_actions = Vec::new();
         ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 3.0);
-        ui.add_space(2.0);
+        ui.add_space(8.0); // 与交通灯保持间距
         ui.horizontal(|ui| {
-            ui.label(RichText::new(tr!("连接列表")).size(12.0).strong().color(palette.text));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(4.0); // 右侧间距
-                let kind = if self.sidebar_active_only {
-                    mini_accent_active_style(ui.visuals().dark_mode)
-                } else {
-                    mini_subtle_style(ui.visuals().dark_mode)
-                };
-                if mini_button(ui, tr!("仅活跃"), kind).clicked() {
-                    self.sidebar_active_only = !self.sidebar_active_only;
+                ui.add_space(10.0); // 右侧间距与搜索框 outer_margin 对齐
+                if mini_button(ui, tr!("新建查询"), mini_accent_style(ui.visuals().dark_mode)).clicked() {
+                    let (conn_id, database) = if let Some(node) = self.selected_sidebar_node() {
+                        let db = node.database.clone().or_else(|| {
+                            matches!(node.node_type, ExplorerNodeType::Database)
+                                .then(|| node.name.clone())
+                        });
+                        (Some(node.connection_id.clone()), db)
+                    } else {
+                        (self.selected_connection.clone(), None)
+                    };
+                    self.create_query_tab(conn_id, database, None);
                 }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add_space(10.0); // 左侧间距与搜索框 outer_margin 对齐
+                    let style = if self.sidebar_active_only {
+                        ButtonStyle {
+                            fill: Color32::TRANSPARENT,
+                            ..mini_accent_active_style(ui.visuals().dark_mode)
+                        }
+                    } else {
+                        ButtonStyle {
+                            fill: Color32::TRANSPARENT,
+                            stroke: Stroke::NONE,
+                            ..mini_subtle_style(ui.visuals().dark_mode)
+                        }
+                    };
+                    if mini_button(ui, tr!("仅活跃"), style).clicked() {
+                        self.sidebar_active_only = !self.sidebar_active_only;
+                    }
+                });
             });
         });
         ui.add_space(6.0);
@@ -3788,7 +3809,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     };
                     let search_response = ui.add(
                         TextEdit::singleline(&mut self.search_keyword)
-                            .hint_text(RichText::new(tr!("回车搜索")).color(ui.visuals().weak_text_color()))
+                            .hint_text(RichText::new(tr!("搜索")).color(ui.visuals().weak_text_color()))
                             .desired_width(text_width)
                             .frame(false),
                     );
@@ -12042,6 +12063,11 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 impl eframe::App for DesktopApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        let theme = ui_theme::Theme::new(visuals.dark_mode);
+        theme.colors.sidebar_bg.to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // 首帧即把窗口设为最大化。Windows 上用 ShowWindow(SW_MAXIMIZE)，
         // 窗口还在 hidden 状态时执行无闪烁且系统自动处理边框补偿。
@@ -12263,7 +12289,7 @@ impl eframe::App for DesktopApp {
             .min_width(180.0)
             .max_width(half_screen)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(palette.sidebar_bg))
+            .frame(egui::Frame::new().fill(palette.sidebar_bg).inner_margin(egui::Margin { left: 0, right: 0, top: 28, bottom: 0 }))
             .show(ctx, |ui| self.render_sidebar(ui));
         self.sidebar_width = sidebar.response.rect.width().clamp(180.0, half_screen);
         if ctx.input(|input| input.pointer.any_pressed()) && !sidebar.response.hovered() {
@@ -23742,13 +23768,6 @@ fn tab_button(
         );
 
         if selected {
-            ui.painter().line_segment(
-                [
-                    egui::pos2(rect.left() + 8.0, rect.top() + 1.0),
-                    egui::pos2(rect.right() - 8.0, rect.top() + 1.0),
-                ],
-                Stroke::new(2.0, palette.selection_stroke),
-            );
             ui.painter().line_segment(
                 [
                     egui::pos2(rect.left() + 1.0, rect.bottom() - 1.0),

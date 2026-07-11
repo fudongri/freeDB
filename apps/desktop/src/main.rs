@@ -130,10 +130,12 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(APP_NAME)
+            .with_title("")
             .with_icon(icon::app_icon_data(256))
             .with_inner_size([1480.0, 920.0])
-            .with_min_inner_size([1200.0, 760.0]),
+            .with_min_inner_size([1200.0, 760.0])
+            .with_titlebar_shown(false)
+            .with_fullsize_content_view(true),
         // 最大化由 DesktopApp::update() 中 Windows 原生 ShowWindow 处理，
         // 不走 ViewportBuilder，避免 winit 内部最大化状态与实际窗口不同步
         persist_window: false,
