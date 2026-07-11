@@ -49,6 +49,12 @@ enum UpdateEvent {
     Done(Result<std::path::PathBuf, String>),
 }
 
+enum UpdateAction {
+    StartDownload,
+    Apply,
+    Retry,
+}
+
 pub struct DesktopApp {
     runtime: Runtime,
     services: AppServices,
@@ -3831,12 +3837,115 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
     }
 
-    fn render_sidebar(&mut self, ui: &mut egui::Ui) {
+    fn render_sidebar(&mut self, ui: &mut egui::Ui, pending_update_action: &mut Option<UpdateAction>) {
         let palette = MacUiPalette::from(&self.theme.colors);
         let mut pending_actions = Vec::new();
         ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 3.0);
+        // 更新 badge — 标题栏区域（交通灯同一排），绝对定位
+        if let Some(ref state) = self.update_state {
+            if !self.update_dismissed {
+                let dark = ui.visuals().dark_mode;
+                let accent = mini_accent_style(dark);
+                let h = 18.0;
+                let cr = egui::CornerRadius::same(4);
+                let sidebar_w = ui.available_width();
+                let badge_y = 9.0; // 标题栏内与交通灯对齐
+                match state {
+                    UpdateState::Available(info) => {
+                        let label = format!("{}v{}  ↓", tr!("更新"), info.version);
+                        let font = FontId::new(11.0, FontFamily::Proportional);
+                        let galley = ui.fonts_mut(|f| f.layout(label.clone(), font.clone(), palette.selection_stroke, f32::INFINITY));
+                        let badge_w = (galley.rect.width() + 14.0).max(38.0);
+                        let badge_rect = egui::Rect::from_min_size(
+                            egui::pos2(sidebar_w - badge_w - 10.0, badge_y),
+                            Vec2::new(badge_w, h),
+                        );
+                        let response = ui.allocate_rect(badge_rect, egui::Sense::click());
+                        if response.hovered() {
+                            ui.painter().rect_filled(badge_rect, cr, accent.fill.linear_multiply(1.15));
+                            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                        } else {
+                            ui.painter().rect_filled(badge_rect, cr, accent.fill);
+                        }
+                        ui.painter().rect_stroke(badge_rect, cr, Stroke::new(1.0, palette.selection_stroke), egui::StrokeKind::Outside);
+                        ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, &label, font, palette.selection_stroke);
+                        if response.clicked() {
+                            *pending_update_action = Some(UpdateAction::StartDownload);
+                        }
+                    }
+                    UpdateState::Downloading { downloaded, total } => {
+                        let pct_text = if *total > 0 { format!("{}%", (*downloaded * 100) / *total) } else { format_bytes(*downloaded) };
+                        let font = FontId::new(10.5, FontFamily::Proportional);
+                        let galley = ui.fonts_mut(|f| f.layout(pct_text.clone(), font.clone(), palette.selection_stroke, f32::INFINITY));
+                        let badge_w = (galley.rect.width() + 14.0).max(50.0);
+                        let badge_rect = egui::Rect::from_min_size(
+                            egui::pos2(sidebar_w - badge_w - 10.0, badge_y),
+                            Vec2::new(badge_w, h),
+                        );
+                        let _ = ui.allocate_rect(badge_rect, egui::Sense::hover());
+                        ui.painter().rect_filled(badge_rect, cr, accent.fill);
+                        let fraction = if *total > 0 { *downloaded as f32 / *total as f32 } else { 0.0 };
+                        if fraction > 0.0 {
+                            let fill_w = badge_rect.width() * fraction;
+                            let progress_rect = egui::Rect::from_min_size(badge_rect.min, Vec2::new(fill_w, badge_rect.height()));
+                            ui.painter().rect_filled(progress_rect, cr, accent.fill.linear_multiply(1.3));
+                        }
+                        ui.painter().rect_stroke(badge_rect, cr, Stroke::new(1.0, palette.selection_stroke), egui::StrokeKind::Outside);
+                        ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, &pct_text, font, palette.selection_stroke);
+                    }
+                    UpdateState::ReadyToApply { .. } => {
+                        let label = tr!("重启完成更新");
+                        let font = FontId::new(11.0, FontFamily::Proportional);
+                        let galley = ui.fonts_mut(|f| f.layout(label.to_string(), font.clone(), palette.selection_stroke, f32::INFINITY));
+                        let badge_w = (galley.rect.width() + 14.0).max(38.0);
+                        let badge_rect = egui::Rect::from_min_size(
+                            egui::pos2(sidebar_w - badge_w - 10.0, badge_y),
+                            Vec2::new(badge_w, h),
+                        );
+                        let response = ui.allocate_rect(badge_rect, egui::Sense::click());
+                        if response.hovered() {
+                            ui.painter().rect_filled(badge_rect, cr, accent.fill.linear_multiply(1.15));
+                            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                        } else {
+                            ui.painter().rect_filled(badge_rect, cr, accent.fill);
+                        }
+                        ui.painter().rect_stroke(badge_rect, cr, Stroke::new(1.0, palette.selection_stroke), egui::StrokeKind::Outside);
+                        ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, label, font, palette.selection_stroke);
+                        if response.clicked() {
+                            *pending_update_action = Some(UpdateAction::Apply);
+                        }
+                    }
+                    UpdateState::Error(_) => {
+                        let label = tr!("重试");
+                        let font = FontId::new(11.0, FontFamily::Proportional);
+                        let galley = ui.fonts_mut(|f| f.layout(label.to_string(), font.clone(), Color32::WHITE, f32::INFINITY));
+                        let badge_w = (galley.rect.width() + 14.0).max(38.0);
+                        let badge_rect = egui::Rect::from_min_size(
+                            egui::pos2(sidebar_w - badge_w - 10.0, badge_y),
+                            Vec2::new(badge_w, h),
+                        );
+                        let response = ui.allocate_rect(badge_rect, egui::Sense::click());
+                        let err_fill = if dark { Color32::from_rgb(60, 35, 35) } else { Color32::from_rgb(255, 235, 235) };
+                        let err_stroke = if dark { Color32::from_rgb(120, 50, 50) } else { Color32::from_rgb(220, 100, 100) };
+                        let err_text = if dark { Color32::from_rgb(255, 140, 140) } else { Color32::from_rgb(180, 30, 30) };
+                        if response.hovered() {
+                            ui.painter().rect_filled(badge_rect, cr, err_fill.linear_multiply(1.15));
+                            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                        } else {
+                            ui.painter().rect_filled(badge_rect, cr, err_fill);
+                        }
+                        ui.painter().rect_stroke(badge_rect, cr, Stroke::new(1.0, err_stroke), egui::StrokeKind::Outside);
+                        ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, label, font, err_text);
+                        if response.clicked() {
+                            *pending_update_action = Some(UpdateAction::Retry);
+                        }
+                    }
+                }
+            }
+        }
         ui.add_space(8.0); // 与交通灯保持间距
+        // 按钮行
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(10.0); // 右侧间距与搜索框 outer_margin 对齐
@@ -12279,95 +12388,6 @@ impl eframe::App for DesktopApp {
             });
         }
 
-        // 更新提示栏
-        enum UpdateAction { StartDownload, Apply, Retry, Dismiss }
-        let mut pending_update_action: Option<UpdateAction> = None;
-        if let Some(ref state) = self.update_state {
-            if !self.update_dismissed {
-                let dark = ctx.style().visuals.dark_mode;
-                let bg = if dark { Color32::from_rgb(30, 60, 30) } else { Color32::from_rgb(220, 245, 220) };
-                let error_bg = if dark { Color32::from_rgb(60, 30, 30) } else { Color32::from_rgb(245, 220, 220) };
-                let green_text = if dark { Color32::from_rgb(100, 220, 100) } else { Color32::from_rgb(0, 130, 0) };
-                let red_text = if dark { Color32::from_rgb(220, 100, 100) } else { Color32::from_rgb(180, 0, 0) };
-
-                let banner_height = match state {
-                    UpdateState::Downloading { .. } => 44.0,
-                    _ => 28.0,
-                };
-                let banner_bg = match state {
-                    UpdateState::Error(_) => error_bg,
-                    _ => bg,
-                };
-
-                egui::TopBottomPanel::top("update_banner")
-                    .exact_height(banner_height)
-                    .frame(egui::Frame::NONE.fill(banner_bg).inner_margin(egui::vec2(8.0, 4.0)))
-                    .show(ctx, |ui| {
-                        ui.horizontal_centered(|ui| {
-                            match state {
-                                UpdateState::Available(info) => {
-                                    ui.label("🆕");
-                                    ui.colored_label(green_text, format!("FreeDB {} is available!", info.version));
-                                    if mini_button(ui, tr!("更新"), mini_accent_style(ui.visuals().dark_mode)).clicked() {
-                                        pending_update_action = Some(UpdateAction::StartDownload);
-                                    }
-                                }
-                                UpdateState::Downloading { downloaded, total } => {
-                                    ui.spinner();
-                                    let fraction = if *total > 0 { *downloaded as f32 / *total as f32 } else { 0.0 };
-                                    let pct = if *total > 0 {
-                                        format!("{}%", (*downloaded * 100) / *total)
-                                    } else {
-                                        format_bytes(*downloaded)
-                                    };
-                                    ui.label(tr!("正在下载更新..."));
-                                    ui.add(egui::ProgressBar::new(fraction).text(pct).desired_width(200.0));
-                                }
-                                UpdateState::ReadyToApply { .. } => {
-                                    ui.label("✅");
-                                    ui.colored_label(green_text, tr!("更新已下载完成"));
-                                    if mini_button(ui, tr!("重启完成更新"), mini_accent_style(ui.visuals().dark_mode)).clicked() {
-                                        pending_update_action = Some(UpdateAction::Apply);
-                                    }
-                                }
-                                UpdateState::Error(msg) => {
-                                    ui.label("⚠");
-                                    ui.colored_label(red_text, tr!("更新失败: {}", msg));
-                                    if mini_button(ui, tr!("重试"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
-                                        pending_update_action = Some(UpdateAction::Retry);
-                                    }
-                                }
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if mini_button(ui, "✕", mini_subtle_style(ui.visuals().dark_mode)).clicked() {
-                                    pending_update_action = Some(UpdateAction::Dismiss);
-                                }
-                            });
-                        });
-                    });
-            }
-        }
-        match pending_update_action {
-            Some(UpdateAction::StartDownload) => {
-                if let Some(UpdateState::Available(ref info)) = self.update_state {
-                    let info_clone = UpdateInfo {
-                        version: info.version.clone(),
-                        url: info.url.clone(),
-                        assets: info.assets.iter().map(|a| ReleaseAsset {
-                            name: a.name.clone(),
-                            download_url: a.download_url.clone(),
-                            size: a.size,
-                        }).collect(),
-                    };
-                    self.start_update_download(&info_clone);
-                }
-            }
-            Some(UpdateAction::Apply) => self.apply_downloaded_update(),
-            Some(UpdateAction::Retry) => self.retry_update(),
-            Some(UpdateAction::Dismiss) => self.update_dismissed = true,
-            None => {}
-        }
-
         let palette = mac_sidebar_palette(ctx.style().visuals.dark_mode, self.dark_variant, self.light_variant);
         let half_screen = ctx.viewport_rect().width() / 2.0;
         // 全局预消费 Enter/Esc：仅在侧边栏持有焦点（且搜索框无焦点）时才预消费，
@@ -12389,6 +12409,7 @@ impl eframe::App for DesktopApp {
         } else {
             self.sidebar_esc_pressed = false;
         }
+        let mut pending_update_action: Option<UpdateAction> = None;
         let sidebar = egui::SidePanel::left("sidebar")
             .resizable(true)
             .default_width(self.sidebar_width)
@@ -12396,7 +12417,26 @@ impl eframe::App for DesktopApp {
             .max_width(half_screen)
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(palette.sidebar_bg).inner_margin(egui::Margin { left: 0, right: 0, top: 28, bottom: 0 }))
-            .show(ctx, |ui| self.render_sidebar(ui));
+            .show(ctx, |ui| self.render_sidebar(ui, &mut pending_update_action));
+        match pending_update_action {
+            Some(UpdateAction::StartDownload) => {
+                if let Some(UpdateState::Available(ref info)) = self.update_state {
+                    let info_clone = UpdateInfo {
+                        version: info.version.clone(),
+                        url: info.url.clone(),
+                        assets: info.assets.iter().map(|a| ReleaseAsset {
+                            name: a.name.clone(),
+                            download_url: a.download_url.clone(),
+                            size: a.size,
+                        }).collect(),
+                    };
+                    self.start_update_download(&info_clone);
+                }
+            }
+            Some(UpdateAction::Apply) => self.apply_downloaded_update(),
+            Some(UpdateAction::Retry) => self.retry_update(),
+            None => {}
+        }
         self.sidebar_width = sidebar.response.rect.width().clamp(180.0, half_screen);
         if ctx.input(|input| input.pointer.any_pressed()) && !sidebar.response.hovered() {
             self.sidebar_has_focus = false;
