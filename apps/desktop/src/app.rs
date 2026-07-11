@@ -3633,12 +3633,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         ui.horizontal(|ui| {
             self.toolbar_icon(ui);
             ui.separator();
-            if toolbar_button(ui, tr!("新建连接"), primary_button_style()).clicked() {
+            if toolbar_button(ui, tr!("新建连接"), primary_button_style(ui.visuals().dark_mode)).clicked() {
                 self.is_connection_dialog_open = true;
                 self.editing_connection_id = None;
                 self.connection_form = ConnectionFormState::default();
             }
-            if toolbar_button(ui, tr!("新建查询"), secondary_button_style())
+            if toolbar_button(ui, tr!("新建查询"), secondary_button_style(ui.visuals().dark_mode))
                 .on_hover_text(tr!("新建查询 ({}+D)", MOD_KEY))
                 .clicked()
             {
@@ -3733,7 +3733,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let theme_label = if self.use_dark_theme { tr!("切换浅色") } else { tr!("切换深色") };
-                if toolbar_button(ui, theme_label, subtle_button_style()).clicked() {
+                if toolbar_button(ui, theme_label, subtle_button_style(ui.visuals().dark_mode)).clicked() {
                     self.use_dark_theme = !self.use_dark_theme;
                     self.theme = if self.use_dark_theme { ui_theme::Theme::dark() } else { ui_theme::Theme::light() };
                     let _ = self
@@ -3772,9 +3772,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(4.0); // 右侧间距
                 let kind = if self.sidebar_active_only {
-                    mini_accent_active_style()
+                    mini_accent_active_style(ui.visuals().dark_mode)
                 } else {
-                    mini_subtle_style()
+                    mini_subtle_style(ui.visuals().dark_mode)
                 };
                 if mini_button(ui, tr!("仅活跃"), kind).clicked() {
                     self.sidebar_active_only = !self.sidebar_active_only;
@@ -6943,7 +6943,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 let exec_all_enabled = !is_executing;
                                 let exec_sel_enabled = !is_executing;
 
-                                let exec_kind = if is_executing { subtle_button_style() } else { accent_muted_button_style() };
+                                let exec_kind = if is_executing { subtle_button_style(ui.visuals().dark_mode) } else { accent_muted_button_style(ui.visuals().dark_mode) };
 
                                 if exec_all_enabled {
                                     if toolbar_button(ui, tr!("执行全部"), exec_kind)
@@ -6969,11 +6969,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                                 // 停止按钮：执行中显示
                                 if is_executing {
-                                    if toolbar_button(ui, tr!("停止"), danger_button_style()).clicked() {
+                                    if toolbar_button(ui, tr!("停止"), danger_button_style(ui.visuals().dark_mode)).clicked() {
                                         action = TabUiAction::StopExecution;
                                     }
                                 }
-                                if toolbar_button(ui, tr!("查看历史查询"), subtle_button_style()).clicked()
+                                if toolbar_button(ui, tr!("查看历史查询"), subtle_button_style(ui.visuals().dark_mode)).clicked()
                                 {
                                     if tab.connection_id.is_some() {
                                         tab.active_bottom_tab = QueryBottomTab::History;
@@ -6988,7 +6988,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         tab.active_bottom_tab = QueryBottomTab::Messages;
                                     }
                                 }
-                                if toolbar_button(ui, tr!("保存查询"), subtle_button_style())
+                                if toolbar_button(ui, tr!("保存查询"), subtle_button_style(ui.visuals().dark_mode))
                                     .on_hover_text(tr!("保存查询 ({}+S)", MOD_KEY))
                                     .clicked()
                                 {
@@ -7002,7 +7002,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         action = TabUiAction::ShowStatusError(tr!("请先选择一个连接后再保存查询").into());
                                     }
                                 }
-                                if toolbar_button(ui, tr!("格式化"), subtle_button_style()).clicked() {
+                                if toolbar_button(ui, tr!("格式化"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                                     let conn_id = tab.connection_id.as_deref();
                                     let db_kind = conn_id.and_then(|cid|
                                         connections.iter().find(|c| c.id == cid).map(|c| c.kind)
@@ -7015,7 +7015,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                                 // EXPLAIN 按钮（放在格式化后面）
                                 if !is_executing {
-                                    if toolbar_button(ui, tr!("解释"), subtle_button_style())
+                                    if toolbar_button(ui, tr!("解释"), subtle_button_style(ui.visuals().dark_mode))
                                         .on_hover_text(tr!("EXPLAIN 执行计划")).clicked()
                                     {
                                         let selected = tab.cursor_range
@@ -7406,10 +7406,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     ui.ctx().input_mut(|input| { input.consume_key(egui::Modifiers::NONE, egui::Key::Enter); });
                                                 }
                                             }
-                                            if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), danger_button_style(), Some(90.0)).clicked() {
+                                            if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), danger_button_style(ui.visuals().dark_mode), Some(90.0)).clicked() {
                                                 action = TabUiAction::CancelQueryTabCellChanges;
                                             }
-                                            if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(), Some(90.0)).clicked() {
+                                            if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(ui.visuals().dark_mode), Some(90.0)).clicked() {
                                                 action = TabUiAction::SaveQueryTabCellChanges;
                                                 query_batch_dialog_open = true;
                                             }
@@ -7564,13 +7564,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             .color(chrome.weak_text),
                                                     );
                                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                        if toolbar_button(ui, tr!("清空历史"), subtle_button_style()).clicked() {
+                                                        if toolbar_button(ui, tr!("清空历史"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                                                             if let Some(conn_id) = &tab.connection_id {
                                                                 let _ = services.clear_query_history(conn_id);
                                                             }
                                                             tab.history.clear();
                                                         }
-                                                        if toolbar_button(ui, tr!("刷新"), subtle_button_style()).clicked() {
+                                                        if toolbar_button(ui, tr!("刷新"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                                                             if let Some(conn_id) = &tab.connection_id {
                                                                 let (history, saved_queries, all_saved_queries) =
                                                                     load_query_library(&services, conn_id);
@@ -7638,7 +7638,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 });
                                                                 row.col(|ui| {
                                                                     let sql_clone = sql_text.clone();
-                                                                    if mini_button(ui, tr!("查看"), mini_subtle_style()).clicked() {
+                                                                    if mini_button(ui, tr!("查看"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                                                         tab.sql = sql_clone;
                                                                     }
                                                                 });
@@ -7763,7 +7763,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             ui.spinner();
                             ui.label(RichText::new(tr!("创建中...")).color(palette.weak_text));
                         });
-                    } else if toolbar_button(ui, tr!("💾 保存"), if can_execute { accent_button_style() } else { subtle_button_style() }).clicked() && can_execute {
+                    } else if toolbar_button(ui, tr!("💾 保存"), if can_execute { accent_button_style(ui.visuals().dark_mode) } else { subtle_button_style(ui.visuals().dark_mode) }).clicked() && can_execute {
                         action = TabUiAction::CreateTableExecute;
                     }
                 });
@@ -7796,7 +7796,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         // 工具栏
         ui.horizontal(|ui| {
-            if toolbar_button(ui, tr!("＋ 添加字段"), subtle_button_style()).clicked() {
+            if toolbar_button(ui, tr!("＋ 添加字段"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.columns.push(EditableColumn {
                     name: String::new(),
                     original_name: String::new(),
@@ -7818,7 +7818,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.spinner();
                     ui.label(RichText::new(tr!("创建中...")).color(palette.weak_text));
                 });
-            } else if toolbar_button(ui, tr!("💾 保存"), if can_execute { accent_button_style() } else { subtle_button_style() }).clicked() && can_execute {
+            } else if toolbar_button(ui, tr!("💾 保存"), if can_execute { accent_button_style(ui.visuals().dark_mode) } else { subtle_button_style(ui.visuals().dark_mode) }).clicked() && can_execute {
                 action = TabUiAction::CreateTableExecute;
             }
         });
@@ -7972,7 +7972,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         // 工具栏
         ui.horizontal(|ui| {
-            if toolbar_button(ui, tr!("＋ 添加索引"), subtle_button_style()).clicked() {
+            if toolbar_button(ui, tr!("＋ 添加索引"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.add_index_dialog_open = true;
                 tab.add_index_needs_focus = true;
                 tab.new_index_name.clear();
@@ -7986,7 +7986,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.spinner();
                     ui.label(RichText::new(tr!("创建中...")).color(palette.weak_text));
                 });
-            } else if toolbar_button(ui, tr!("💾 保存"), if can_execute { accent_button_style() } else { subtle_button_style() }).clicked() && can_execute {
+            } else if toolbar_button(ui, tr!("💾 保存"), if can_execute { accent_button_style(ui.visuals().dark_mode) } else { subtle_button_style(ui.visuals().dark_mode) }).clicked() && can_execute {
                 action = TabUiAction::CreateTableExecute;
             }
         });
@@ -8196,7 +8196,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if toolbar_button(ui, tr!("新建查询"), accent_button_style()).clicked() {
+                                        if toolbar_button(ui, tr!("新建查询"), accent_button_style(ui.visuals().dark_mode)).clicked() {
                                             action = TabUiAction::NewQueryFromTable {
                                                 connection_id: tab.table.connection_id.clone(),
                                                 database: tab.table.database.clone(),
@@ -8255,7 +8255,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         let mut column_btn_rect: Option<egui::Rect> = None;
                                         let mut gen_data_btn_rect: Option<egui::Rect> = None;
                                         ui.horizontal(|ui| {
-                                            if toolbar_button(ui, tr!("刷新"), subtle_button_style())
+                                            if toolbar_button(ui, tr!("刷新"), subtle_button_style(ui.visuals().dark_mode))
                                                 .on_hover_text(tr!("刷新 ({}+R)", MOD_KEY))
                                                 .clicked()
                                             {
@@ -8264,7 +8264,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 action =
                                                     TabUiAction::RefreshActiveTable { reload_definition: true };
                                             }
-                                            if toolbar_button(ui, tr!("新增"), subtle_button_style()).clicked() {
+                                            if toolbar_button(ui, tr!("新增"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                                                 let columns = table_editable_columns(tab);
                                                 tab.pending_insert_row =
                                                     Some(create_empty_insert_row(&columns));
@@ -8288,9 +8288,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_filter_summary(&tab.preview_filter)
                                                     .is_some();
                                             let filter_kind = if filter_active {
-                                                accent_active_button_style()
+                                                accent_active_button_style(ui.visuals().dark_mode)
                                             } else {
-                                                subtle_button_style()
+                                                subtle_button_style(ui.visuals().dark_mode)
                                             };
                                             if toolbar_button(ui, tr!("筛选"), filter_kind).clicked() {
                                                 tab.show_preview_filter = !tab.show_preview_filter;
@@ -8302,9 +8302,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_sort_summary(&tab.preview_sort)
                                                     .is_some();
                                             let sort_kind = if sort_active {
-                                                accent_active_button_style()
+                                                accent_active_button_style(ui.visuals().dark_mode)
                                             } else {
-                                                subtle_button_style()
+                                                subtle_button_style(ui.visuals().dark_mode)
                                             };
                                             if toolbar_button(ui, tr!("排序"), sort_kind).clicked() {
                                                 tab.show_preview_sort = !tab.show_preview_sort;
@@ -8313,7 +8313,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 }
                                             }
                                             let export_popup_id = egui::Id::new(("export-popup", &tab.id));
-                                            let export_btn = toolbar_button(ui, tr!("导出 ▾"), subtle_button_style());
+                                            let export_btn = toolbar_button(ui, tr!("导出 ▾"), subtle_button_style(ui.visuals().dark_mode));
                                             if export_btn.clicked() {
                                                 let is_open = ui.memory(|m| m.is_popup_open(export_popup_id));
                                                 if is_open {
@@ -8346,9 +8346,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             );
                                             let all_columns = table_editable_columns(tab);
                                             let column_filter_kind = if !tab.hidden_columns.is_empty() {
-                                                accent_active_button_style()
+                                                accent_active_button_style(ui.visuals().dark_mode)
                                             } else {
-                                                subtle_button_style()
+                                                subtle_button_style(ui.visuals().dark_mode)
                                             };
                                             let column_btn_response = toolbar_button(ui, tr!("列"), column_filter_kind);
                                             if column_btn_response.clicked() {
@@ -8359,7 +8359,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                             column_btn_rect = Some(column_btn_response.rect);
                                             // 生成数据按钮
-                                            let gen_data_btn_response = toolbar_button(ui, tr!("生成数据"), subtle_button_style());
+                                            let gen_data_btn_response = toolbar_button(ui, tr!("生成数据"), subtle_button_style(ui.visuals().dark_mode));
                                             gen_data_btn_rect = Some(gen_data_btn_response.rect);
                                             if gen_data_btn_response.clicked() {
                                                 tab.show_generate_data_popup = !tab.show_generate_data_popup;
@@ -8407,10 +8407,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                 }
                                                 ui.separator();
-                                                if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), danger_button_style(), Some(90.0)).clicked() {
+                                                if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), danger_button_style(ui.visuals().dark_mode), Some(90.0)).clicked() {
                                                     action = TabUiAction::CancelPendingCellChanges;
                                                 }
-                                                if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(), Some(90.0)).clicked() {
+                                                if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(ui.visuals().dark_mode), Some(90.0)).clicked() {
                                                     action = TabUiAction::SavePendingCellChanges;
                                                 }
                                                 let count = tab.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
@@ -8422,13 +8422,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                             if tab.pending_insert_row.is_some() {
                                                 ui.separator();
-                                                if toolbar_button(ui, tr!("取消新增"), danger_button_style())
+                                                if toolbar_button(ui, tr!("取消新增"), danger_button_style(ui.visuals().dark_mode))
                                                     .clicked()
                                                 {
                                                     tab.pending_insert_row = None;
                                                     tab.editing_cell = None;
                                                 }
-                                                if toolbar_button(ui, tr!("保存新增"), accent_button_style()).clicked()
+                                                if toolbar_button(ui, tr!("保存新增"), accent_button_style(ui.visuals().dark_mode)).clicked()
                                                 {
                                                     action = TabUiAction::SavePendingInsertRow;
                                                 }
@@ -8478,13 +8478,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 ui.with_layout(
                                                                     egui::Layout::right_to_left(egui::Align::Center),
                                                                     |ui| {
-                                                                        if mini_button(ui, tr!("全不选"), mini_subtle_style()).clicked() {
+                                                                        if mini_button(ui, tr!("全不选"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                                                             for col in &tab.column_order {
                                                                                 tab.hidden_columns.insert(col.clone());
                                                                             }
                                                                             tab.preview_column_widths.clear();
                                                                         }
-                                                                        if mini_button(ui, tr!("全选"), mini_subtle_style()).clicked() {
+                                                                        if mini_button(ui, tr!("全选"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                                                             tab.hidden_columns.clear();
                                                                             tab.preview_column_widths.clear();
                                                                         }
@@ -8501,12 +8501,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                         let mut visible = !tab.hidden_columns.contains(&col_name);
                                                                         ui.horizontal(|ui| {
                                                                             let up_clicked = if i > 0 {
-                                                                                mini_button(ui, "▲", mini_subtle_style()).clicked()
+                                                                                mini_button(ui, "▲", mini_subtle_style(ui.visuals().dark_mode)).clicked()
                                                                             } else {
                                                                                 ui.add_enabled(false, egui::Button::new(RichText::new("▲").size(11.5).color(palette.weak_text)).fill(palette.subtle_button_bg).stroke(Stroke::new(1.0, palette.subtle_button_stroke)).corner_radius(4.0).min_size(Vec2::new(34.0, 22.0))).clicked()
                                                                             };
                                                                             let down_clicked = if i + 1 < order_len {
-                                                                                mini_button(ui, "▼", mini_subtle_style()).clicked()
+                                                                                mini_button(ui, "▼", mini_subtle_style(ui.visuals().dark_mode)).clicked()
                                                                             } else {
                                                                                 ui.add_enabled(false, egui::Button::new(RichText::new("▼").size(11.5).color(palette.weak_text)).fill(palette.subtle_button_bg).stroke(Stroke::new(1.0, palette.subtle_button_stroke)).corner_radius(4.0).min_size(Vec2::new(34.0, 22.0))).clicked()
                                                                             };
@@ -8586,7 +8586,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                         ui.label(format!("{}/{}", progress.completed, progress.total));
                                                                     }
                                                                     ui.add_space(8.0);
-                                                                    if toolbar_button(ui, tr!("停止"), subtle_button_style()).clicked() {
+                                                                    if toolbar_button(ui, tr!("停止"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                                                                         action = TabUiAction::GenerateData;
                                                                     }
                                                                 } else if let Some(ref progress) = tab.generate_data_progress {
@@ -8597,7 +8597,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     ui.add_space(4.0);
                                                                     ui.label(RichText::new(tr!("数据为随机测试数据")).small().color(palette.weak_text));
                                                                     ui.add_space(8.0);
-                                                                    if toolbar_button(ui, tr!("再次生成"), primary_button_style()).clicked() {
+                                                                    if toolbar_button(ui, tr!("再次生成"), primary_button_style(ui.visuals().dark_mode)).clicked() {
                                                                         tab.generate_data_progress = None;
                                                                     }
                                                                     // 点击外部关闭
@@ -8647,7 +8647,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             ui.horizontal(|ui| {
                                                                                 ui.label(RichText::new(tr!("列约束")).strong());
                                                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                                                    if mini_button(ui, tr!("清除全部"), mini_subtle_style()).clicked() {
+                                                                                    if mini_button(ui, tr!("清除全部"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                                                                         tab.generate_data_constraints.clear();
                                                                                         tab.generate_data_default_columns.clear();
                                                                                         tab.generate_data_expanded_col = None;
@@ -8684,7 +8684,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                                                                 let is_default = tab.generate_data_default_columns.contains(col_name);
                                                                                                 if has_constraint || is_default {
-                                                                                                    if mini_button(ui, "×", mini_danger_style()).clicked() {
+                                                                                                    if mini_button(ui, "×", mini_danger_style(ui.visuals().dark_mode)).clicked() {
                                                                                                         tab.generate_data_constraints.remove(col_name);
                                                                                                         tab.generate_data_default_columns.remove(col_name);
                                                                                                         tab.generate_data_edit_state = None;
@@ -8701,7 +8701,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                                         ui.label(RichText::new(tr!("使用默认值")).small().color(palette.weak_text));
                                                                                                     }
                                                                                                 } else if !is_expanded {
-                                                                                                    if mini_button(ui, tr!("设置"), mini_accent_style()).clicked() {
+                                                                                                    if mini_button(ui, tr!("设置"), mini_accent_style(ui.visuals().dark_mode)).clicked() {
                                                                                                         tab.generate_data_expanded_col = Some(col_name.clone());
                                                                                                         let dt = col.data_type.to_lowercase();
                                                                                                         let is_num = dt.contains("int") || dt.contains("serial")
@@ -8715,7 +8715,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                                         tab.generate_data_edit_state = Some((col_name.clone(), state));
                                                                                                     }
                                                                                                 } else {
-                                                                                                    if mini_button(ui, tr!("收起"), mini_subtle_style()).clicked() {
+                                                                                                    if mini_button(ui, tr!("收起"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                                                                                         tab.generate_data_expanded_col = None;
                                                                                                         tab.generate_data_edit_state = None;
                                                                                                     }
@@ -8806,7 +8806,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                                                     .desired_width(200.0)
                                                                                                                     .hint_text(tr!("正则表达式")),
                                                                                                             );
-                                                                                                            test_clicked = mini_button(ui, tr!("测试"), mini_accent_style()).clicked();
+                                                                                                            test_clicked = mini_button(ui, tr!("测试"), mini_accent_style(ui.visuals().dark_mode)).clicked();
                                                                                                         });
                                                                                                         ui.visuals_mut().widgets.inactive.bg_stroke = orig_stroke;
                                                                                                         ui.visuals_mut().widgets.hovered.bg_stroke = orig_stroke;
@@ -8837,7 +8837,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                                 }
                                                                                                 // 应用按钮
                                                                                                 ui.horizontal(|ui| {
-                                                                                                    if mini_button(ui, tr!("应用"), mini_accent_style()).clicked() {
+                                                                                                    if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode)).clicked() {
                                                                                                         apply_clicked = true;
                                                                                                     }
                                                                                                 });
@@ -8897,7 +8897,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     }
                                                                     ui.add_space(8.0);
                                                                     let count_valid = tab.generate_data_count.parse::<usize>().map_or(false, |n| n > 0);
-                                                                    let btn_kind = if count_valid { primary_button_style() } else { subtle_button_style() };
+                                                                    let btn_kind = if count_valid { primary_button_style(ui.visuals().dark_mode) } else { subtle_button_style(ui.visuals().dark_mode) };
                                                                     if toolbar_button(ui, tr!("开始生成"), btn_kind).clicked() && count_valid {
                                                                         action = TabUiAction::GenerateData;
                                                                     }
@@ -8958,11 +8958,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                if mini_button(ui, tr!("隐藏面板"), mini_hide_style()).clicked()
+                                                                if mini_button(ui, tr!("隐藏面板"), mini_hide_style(ui.visuals().dark_mode)).clicked()
                                                                 {
                                                                     tab.show_preview_filter = false;
                                                                 }
-                                                                if mini_button(ui, tr!("清空"), mini_danger_style()).clicked()
+                                                                if mini_button(ui, tr!("清空"), mini_danger_style(ui.visuals().dark_mode)).clicked()
                                                                 {
                                                                     tab.preview_filter =
                                                                         TableFilterState::default();
@@ -8977,7 +8977,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             reload_definition: false,
                                                                         };
                                                                 }
-                                                                if mini_button(ui, tr!("应用"), mini_accent_style())
+                                                                if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode))
                                                                     .on_hover_text(tr!("应用筛选 ({}+R)", MOD_KEY))
                                                                     .clicked()
                                                                 {
@@ -9098,7 +9098,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             ui.style_mut().visuals.widgets.inactive.bg_stroke = prev_inactive_stroke;
                                                             let add_enabled = clause_count < 8;
                                                             let add_btn = ui.add_enabled_ui(add_enabled, |ui| {
-                                                                mini_button(ui, "+", mini_subtle_style())
+                                                                mini_button(ui, "+", mini_subtle_style(ui.visuals().dark_mode))
                                                             }).inner;
                                                             if add_enabled && add_btn.on_hover_text(tr!("新增条件")).clicked()
                                                             {
@@ -9108,7 +9108,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 && mini_button(
                                                                     ui,
                                                                     "−",
-                                                                    mini_subtle_style(),
+                                                                    mini_subtle_style(ui.visuals().dark_mode),
                                                                 )
                                                                 .clicked()
                                                             {
@@ -9170,7 +9170,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                if mini_button(ui, tr!("📋 复制"), mini_subtle_style()).clicked()
+                                                                if mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode)).clicked()
                                                                 {
                                                                     action =
                                                                         TabUiAction::CopyTextToClipboard {
@@ -9237,11 +9237,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                if mini_button(ui, tr!("隐藏面板"), mini_hide_style()).clicked()
+                                                                if mini_button(ui, tr!("隐藏面板"), mini_hide_style(ui.visuals().dark_mode)).clicked()
                                                                 {
                                                                     tab.show_preview_sort = false;
                                                                 }
-                                                                if mini_button(ui, tr!("清空"), mini_danger_style()).clicked()
+                                                                if mini_button(ui, tr!("清空"), mini_danger_style(ui.visuals().dark_mode)).clicked()
                                                                 {
                                                                     clear_table_sort_state(&mut tab.preview_sort);
                                                                     tab.current_page = 0;
@@ -9251,7 +9251,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             reload_definition: false,
                                                                         };
                                                                 }
-                                                                if mini_button(ui, tr!("应用"), mini_accent_style()).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
+                                                                if mini_button(ui, tr!("应用"), mini_accent_style(ui.visuals().dark_mode)).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
                                                                 .clicked()
                                                                 {
                                                                     tab.current_page = 0;
@@ -9269,7 +9269,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     let mut add_clause = false;
                                                     let clause_count = tab.preview_sort.clauses.len();
                                                     if clause_count == 0 {
-                                                        if mini_button(ui, tr!("添加排序字段"), mini_subtle_style()).clicked() {
+                                                        if mini_button(ui, tr!("添加排序字段"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                                             add_clause = true;
                                                         }
                                                     }
@@ -9316,13 +9316,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             }
                                                             let add_enabled = clause_count < 8;
                                                             let add_btn = ui.add_enabled_ui(add_enabled, |ui| {
-                                                                mini_button(ui, "+", mini_subtle_style())
+                                                                mini_button(ui, "+", mini_subtle_style(ui.visuals().dark_mode))
                                                             }).inner;
                                                             if add_enabled && add_btn.clicked() {
                                                                 add_clause = true;
                                                             }
                                                             if clause_count > 1 {
-                                                                let del_btn = mini_button(ui, "−", mini_subtle_style());
+                                                                let del_btn = mini_button(ui, "−", mini_subtle_style(ui.visuals().dark_mode));
                                                                 if del_btn.clicked() {
                                                                     pending_remove = Some(index);
                                                                 }
@@ -9363,7 +9363,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 egui::Align::Center,
                                                             ),
                                                             |ui| {
-                                                                if mini_button(ui, tr!("📋 复制"), mini_subtle_style()).clicked()
+                                                                if mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode)).clicked()
                                                                 {
                                                                     action =
                                                                         TabUiAction::CopyTextToClipboard {
@@ -9498,7 +9498,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         // << first page
                         let first_enabled = current_page > 0;
                         let first_btn = ui.add_enabled_ui(first_enabled, |ui| {
-                            mini_button(ui, "<<", mini_subtle_style())
+                            mini_button(ui, "<<", mini_subtle_style(ui.visuals().dark_mode))
                         });
                         let first_hover = first_btn.response.clone();
                         if first_btn.inner.clicked() {
@@ -9513,7 +9513,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         // < prev page
                         let prev_enabled = current_page > 0;
                         let prev_btn = ui.add_enabled_ui(prev_enabled, |ui| {
-                            mini_button(ui, "<", mini_subtle_style())
+                            mini_button(ui, "<", mini_subtle_style(ui.visuals().dark_mode))
                         });
                         let prev_hover = prev_btn.response.clone();
                         if prev_btn.inner.clicked() {
@@ -9541,7 +9541,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         // > next page
                         let next_enabled = !last_page;
                         let next_btn = ui.add_enabled_ui(next_enabled, |ui| {
-                            mini_button(ui, ">", mini_subtle_style())
+                            mini_button(ui, ">", mini_subtle_style(ui.visuals().dark_mode))
                         });
                         let next_hover = next_btn.response.clone();
                         if next_btn.inner.clicked() {
@@ -9561,7 +9561,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                         // >> last page — always disabled (unknown total)
                         let last_btn = ui.add_enabled_ui(false, |ui| {
-                            mini_button(ui, ">>", mini_subtle_style())
+                            mini_button(ui, ">>", mini_subtle_style(ui.visuals().dark_mode))
                         });
                         let last_hover = last_btn.response.clone();
                         last_hover.on_hover_ui(|ui| {
@@ -11673,12 +11673,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .show(ctx, |ui| {
                 // 工具栏按钮
                 ui.horizontal(|ui| {
-                    if toolbar_button(ui, tr!("清空"), danger_button_style()).clicked() {
+                    if toolbar_button(ui, tr!("清空"), danger_button_style(ui.visuals().dark_mode)).clicked() {
                         if let Ok(mut buf) = self.log_buffer.lock() {
                             buf.clear();
                         }
                     }
-                    if toolbar_button(ui, tr!("复制全部"), subtle_button_style()).clicked() {
+                    if toolbar_button(ui, tr!("复制全部"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                         let text = if let Ok(buf) = self.log_buffer.lock() {
                             buf.join("\n")
                         } else {
@@ -11746,12 +11746,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("{:.1}x", self.scroll_speed)).size(11.0));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if mini_button(ui, tr!("默认"), mini_subtle_style()).clicked() {
+                                if mini_button(ui, tr!("默认"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                     self.scroll_speed = if cfg!(target_os = "macos") { 5.0 } else { 7.0 };
                                 }
                             });
                         });
-                        if toolbar_button(ui, tr!("关闭"), subtle_button_style()).clicked() {
+                        if toolbar_button(ui, tr!("关闭"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                             open = false;
                         }
                     });
@@ -12224,7 +12224,7 @@ impl eframe::App for DesktopApp {
                                 UpdateState::Available(info) => {
                                     ui.label("🆕");
                                     ui.colored_label(green_text, format!("FreeDB {} is available!", info.version));
-                                    if mini_button(ui, tr!("更新"), mini_accent_style()).clicked() {
+                                    if mini_button(ui, tr!("更新"), mini_accent_style(ui.visuals().dark_mode)).clicked() {
                                         pending_update_action = Some(UpdateAction::StartDownload);
                                     }
                                 }
@@ -12242,20 +12242,20 @@ impl eframe::App for DesktopApp {
                                 UpdateState::ReadyToApply { .. } => {
                                     ui.label("✅");
                                     ui.colored_label(green_text, tr!("更新已下载完成"));
-                                    if mini_button(ui, tr!("重启完成更新"), mini_accent_style()).clicked() {
+                                    if mini_button(ui, tr!("重启完成更新"), mini_accent_style(ui.visuals().dark_mode)).clicked() {
                                         pending_update_action = Some(UpdateAction::Apply);
                                     }
                                 }
                                 UpdateState::Error(msg) => {
                                     ui.label("⚠");
                                     ui.colored_label(red_text, tr!("更新失败: {}", msg));
-                                    if mini_button(ui, tr!("重试"), mini_subtle_style()).clicked() {
+                                    if mini_button(ui, tr!("重试"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                         pending_update_action = Some(UpdateAction::Retry);
                                     }
                                 }
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if mini_button(ui, "✕", mini_subtle_style()).clicked() {
+                                if mini_button(ui, "✕", mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                     pending_update_action = Some(UpdateAction::Dismiss);
                                 }
                             });
@@ -13367,148 +13367,292 @@ struct ButtonStyle {
 }
 
 // 常用按钮样式
-fn primary_button_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(10, 132, 255),
-        text: Color32::WHITE,
-        stroke: Stroke::NONE,
-        font_size: 12.5,
-        min_width: 0.0,
-        min_height: 26.0,
-        corner_radius: 5.0,
+fn primary_button_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(10, 132, 255),
+            text: Color32::WHITE,
+            stroke: Stroke::NONE,
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(0, 122, 255),
+            text: Color32::WHITE,
+            stroke: Stroke::NONE,
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
     }
 }
 
-fn secondary_button_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(99, 99, 102),
-        text: Color32::WHITE,
-        stroke: Stroke::NONE,
-        font_size: 12.5,
-        min_width: 0.0,
-        min_height: 26.0,
-        corner_radius: 5.0,
+fn secondary_button_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(99, 99, 102),
+            text: Color32::WHITE,
+            stroke: Stroke::NONE,
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(180, 180, 183),
+            text: Color32::WHITE,
+            stroke: Stroke::NONE,
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
     }
 }
 
-fn accent_button_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(44, 44, 46),
-        text: Color32::from_rgb(100, 210, 255),
-        stroke: Stroke::new(1.0, Color32::from_rgb(50, 80, 90)),
-        font_size: 12.5,
-        min_width: 0.0,
-        min_height: 26.0,
-        corner_radius: 5.0,
+fn accent_button_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(44, 44, 46),
+            text: Color32::from_rgb(100, 210, 255),
+            stroke: Stroke::new(1.0, Color32::from_rgb(50, 80, 90)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(246, 246, 246),
+            text: Color32::from_rgb(40, 140, 195),
+            stroke: Stroke::new(1.0, Color32::from_rgb(90, 200, 250)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
     }
 }
 
-fn accent_active_button_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(50, 80, 90),
-        text: Color32::from_rgb(100, 210, 255),
-        stroke: Stroke::new(1.0, Color32::from_rgb(80, 150, 200)),
-        font_size: 12.5,
-        min_width: 0.0,
-        min_height: 26.0,
-        corner_radius: 5.0,
+fn accent_active_button_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(50, 80, 90),
+            text: Color32::from_rgb(100, 210, 255),
+            stroke: Stroke::new(1.0, Color32::from_rgb(80, 150, 200)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(246, 246, 246),
+            text: Color32::from_rgb(140, 105, 15),
+            stroke: Stroke::new(1.0, Color32::from_rgb(190, 140, 20)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
     }
 }
 
-fn accent_muted_button_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(44, 44, 46),
-        text: Color32::from_rgb(100, 180, 220),
-        stroke: Stroke::new(1.0, Color32::from_rgb(50, 70, 80)),
-        font_size: 12.5,
-        min_width: 0.0,
-        min_height: 26.0,
-        corner_radius: 5.0,
+fn accent_muted_button_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(44, 44, 46),
+            text: Color32::from_rgb(100, 180, 220),
+            stroke: Stroke::new(1.0, Color32::from_rgb(50, 70, 80)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(246, 246, 246),
+            text: Color32::from_rgb(40, 140, 195),
+            stroke: Stroke::new(1.0, Color32::from_rgb(90, 200, 250)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
     }
 }
 
-fn subtle_button_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(52, 52, 54),
-        text: Color32::from_rgb(200, 200, 204),
-        stroke: Stroke::new(1.0, Color32::from_rgb(70, 70, 72)),
-        font_size: 12.5,
-        min_width: 0.0,
-        min_height: 26.0,
-        corner_radius: 5.0,
+fn subtle_button_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(52, 52, 54),
+            text: Color32::from_rgb(200, 200, 204),
+            stroke: Stroke::new(1.0, Color32::from_rgb(70, 70, 72)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(248, 248, 248),
+            text: Color32::from_rgb(80, 80, 80),
+            stroke: Stroke::new(1.0, Color32::from_rgb(228, 228, 228)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
     }
 }
 
-fn danger_button_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(44, 44, 46),
-        text: Color32::from_rgb(255, 69, 58),
-        stroke: Stroke::new(1.0, Color32::from_rgb(80, 40, 40)),
-        font_size: 12.5,
-        min_width: 0.0,
-        min_height: 26.0,
-        corner_radius: 5.0,
+fn danger_button_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(44, 44, 46),
+            text: Color32::from_rgb(255, 69, 58),
+            stroke: Stroke::new(1.0, Color32::from_rgb(80, 40, 40)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(255, 255, 255),
+            text: Color32::from_rgb(255, 59, 48),
+            stroke: Stroke::new(1.0, Color32::from_rgb(255, 59, 48)),
+            font_size: 12.5,
+            min_width: 0.0,
+            min_height: 26.0,
+            corner_radius: 5.0,
+        }
     }
 }
 
 // 迷你按钮样式
-fn mini_subtle_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(52, 52, 54),
-        text: Color32::from_rgb(200, 200, 204),
-        stroke: Stroke::new(1.0, Color32::from_rgb(70, 70, 72)),
-        font_size: 11.5,
-        min_width: 34.0,
-        min_height: 22.0,
-        corner_radius: 4.0,
+fn mini_subtle_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(52, 52, 54),
+            text: Color32::from_rgb(200, 200, 204),
+            stroke: Stroke::new(1.0, Color32::from_rgb(70, 70, 72)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(248, 248, 248),
+            text: Color32::from_rgb(80, 80, 80),
+            stroke: Stroke::new(1.0, Color32::from_rgb(228, 228, 228)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
     }
 }
 
-fn mini_danger_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(44, 44, 46),
-        text: Color32::from_rgb(255, 69, 58),
-        stroke: Stroke::new(1.0, Color32::from_rgb(80, 40, 40)),
-        font_size: 11.5,
-        min_width: 34.0,
-        min_height: 22.0,
-        corner_radius: 4.0,
+fn mini_danger_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(44, 44, 46),
+            text: Color32::from_rgb(255, 69, 58),
+            stroke: Stroke::new(1.0, Color32::from_rgb(80, 40, 40)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(255, 255, 255),
+            text: Color32::from_rgb(255, 59, 48),
+            stroke: Stroke::new(1.0, Color32::from_rgb(255, 59, 48)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
     }
 }
 
-fn mini_accent_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(44, 44, 46),
-        text: Color32::from_rgb(100, 210, 255),
-        stroke: Stroke::new(1.0, Color32::from_rgb(50, 80, 90)),
-        font_size: 11.5,
-        min_width: 34.0,
-        min_height: 22.0,
-        corner_radius: 4.0,
+fn mini_accent_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(44, 44, 46),
+            text: Color32::from_rgb(100, 210, 255),
+            stroke: Stroke::new(1.0, Color32::from_rgb(50, 80, 90)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(246, 246, 246),
+            text: Color32::from_rgb(40, 140, 195),
+            stroke: Stroke::new(1.0, Color32::from_rgb(90, 200, 250)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
     }
 }
 
-fn mini_accent_active_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(50, 80, 90),
-        text: Color32::from_rgb(100, 210, 255),
-        stroke: Stroke::new(1.0, Color32::from_rgb(80, 150, 200)),
-        font_size: 11.5,
-        min_width: 34.0,
-        min_height: 22.0,
-        corner_radius: 4.0,
+fn mini_accent_active_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(50, 80, 90),
+            text: Color32::from_rgb(100, 210, 255),
+            stroke: Stroke::new(1.0, Color32::from_rgb(80, 150, 200)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(246, 246, 246),
+            text: Color32::from_rgb(140, 105, 15),
+            stroke: Stroke::new(1.0, Color32::from_rgb(190, 140, 20)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
     }
 }
 
-fn mini_hide_style() -> ButtonStyle {
-    ButtonStyle {
-        fill: Color32::from_rgb(52, 52, 54),
-        text: Color32::from_rgb(170, 170, 174),
-        stroke: Stroke::new(1.0, Color32::from_rgb(60, 60, 62)),
-        font_size: 11.5,
-        min_width: 34.0,
-        min_height: 22.0,
-        corner_radius: 4.0,
+fn mini_hide_style(dark_mode: bool) -> ButtonStyle {
+    if dark_mode {
+        ButtonStyle {
+            fill: Color32::from_rgb(52, 52, 54),
+            text: Color32::from_rgb(170, 170, 174),
+            stroke: Stroke::new(1.0, Color32::from_rgb(60, 60, 62)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
+    } else {
+        ButtonStyle {
+            fill: Color32::from_rgb(230, 245, 245),
+            text: Color32::from_rgb(50, 110, 110),
+            stroke: Stroke::new(1.0, Color32::from_rgb(175, 210, 210)),
+            font_size: 11.5,
+            min_width: 34.0,
+            min_height: 22.0,
+            corner_radius: 4.0,
+        }
     }
 }
 
@@ -18112,7 +18256,7 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str) 
                         ui.separator();
                         ui.label(RichText::new(title).size(13.0).color(palette.weak_text));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if mini_button(ui, tr!("📋 复制"), mini_subtle_style()).clicked() {
+                            if mini_button(ui, tr!("📋 复制"), mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                                 ui.ctx().copy_text(formatted_sql.clone());
                             }
                         });
@@ -18981,9 +19125,9 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
             tr!("✎ 编辑表结构")
         };
         let edit_kind = if has_pending {
-            secondary_button_style()
+            secondary_button_style(ui.visuals().dark_mode)
         } else {
-            subtle_button_style()
+            subtle_button_style(ui.visuals().dark_mode)
         };
         if toolbar_button(ui, edit_label, edit_kind).clicked() {
             if has_pending {
@@ -19015,7 +19159,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
 
         if tab.editing_structure {
             // 添加字段
-            if toolbar_button(ui, tr!("＋ 添加字段"), subtle_button_style()).clicked() {
+            if toolbar_button(ui, tr!("＋ 添加字段"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.edited_columns.push(EditableColumn {
                     name: String::new(),
                     original_name: String::new(),
@@ -19035,12 +19179,12 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
         // 保存按钮 — 有变更时始终可见
         if has_changes {
             // SQL 预览切换按钮（保存按钮左侧）
-            if toolbar_button(ui, tr!("◉ 语句预览"), accent_muted_button_style()).clicked() {
+            if toolbar_button(ui, tr!("◉ 语句预览"), accent_muted_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.show_structure_sql_preview = !tab.show_structure_sql_preview;
             }
 
             let save_btn =
-                toolbar_button(ui, tr!("💾 保存"), accent_button_style());
+                toolbar_button(ui, tr!("💾 保存"), accent_button_style(ui.visuals().dark_mode));
             if save_btn.clicked() {
                 let sql = generate_alter_table_sql(
                     &tab.table,
@@ -19784,7 +19928,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
 
     // 工具栏
     ui.horizontal(|ui| {
-        if toolbar_button(ui, tr!("＋ 增加索引"), subtle_button_style()).clicked() {
+        if toolbar_button(ui, tr!("＋ 增加索引"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
             tab.add_index_dialog_open = true;
             tab.add_index_needs_focus = true;
             tab.new_index_name.clear();
@@ -19795,7 +19939,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
         let has_changes = !tab.deleted_indexes.is_empty() || !tab.pending_indexes.is_empty();
         if has_changes {
             // SQL 预览切换按钮（保存按钮左侧）
-            if toolbar_button(ui, tr!("◉ 语句预览"), accent_muted_button_style()).clicked() {
+            if toolbar_button(ui, tr!("◉ 语句预览"), accent_muted_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.show_index_sql_preview = !tab.show_index_sql_preview;
             }
 
@@ -19806,13 +19950,13 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
                 &tab.pending_indexes,
                 tab.database_kind,
             );
-            if toolbar_button(ui, tr!("💾 保存"), accent_button_style()).clicked() && !sql.is_empty() {
+            if toolbar_button(ui, tr!("💾 保存"), accent_button_style(ui.visuals().dark_mode)).clicked() && !sql.is_empty() {
                 action = TabUiAction::ExecuteStructureSql(sql);
                 tab.pending_indexes.clear();
                 tab.deleted_indexes.clear();
                 tab.add_index_dialog_open = false;
             }
-            if toolbar_button(ui, tr!("✕ 取消编辑"), secondary_button_style()).clicked() {
+            if toolbar_button(ui, tr!("✕ 取消编辑"), secondary_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.pending_indexes.clear();
                 tab.deleted_indexes.clear();
                 tab.add_index_dialog_open = false;
@@ -20695,12 +20839,12 @@ fn render_editor_find_bar(
 
                     // 展开/收起替换
                     let repl_btn_label = if tab.find.show_replace { tr!("替换▲") } else { tr!("替换▼") };
-                    if mini_button(ui, &repl_btn_label, mini_subtle_style()).clicked() {
+                    if mini_button(ui, &repl_btn_label, mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                         tab.find.show_replace = !tab.find.show_replace;
                     }
 
                     // 关闭
-                    if mini_button(ui, "✕", mini_subtle_style()).clicked() {
+                    if mini_button(ui, "✕", mini_subtle_style(ui.visuals().dark_mode)).clicked() {
                         tab.find.open = false;
                         tab.find.find_text.clear();
                         tab.find.replace_text.clear();
