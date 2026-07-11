@@ -347,7 +347,7 @@ impl Theme {
                 egui_selection_stroke: Color32::from_rgba_premultiplied(140, 175, 230, 130),
 
                 // ── 滚动条 ──
-                scrollbar_dormant_opacity: 0.35,
+                scrollbar_dormant_opacity: 0.0,
                 scrollbar_active_opacity: 0.55,
                 scrollbar_interact_opacity: 0.75,
             },
@@ -497,7 +497,7 @@ impl Theme {
                 egui_selection_stroke: Color32::from_rgba_premultiplied(0, 80, 120, 130),
 
                 // ── 滚动条 ──
-                scrollbar_dormant_opacity: 0.30,
+                scrollbar_dormant_opacity: 0.0,
                 scrollbar_active_opacity: 0.50,
                 scrollbar_interact_opacity: 0.70,
             },
