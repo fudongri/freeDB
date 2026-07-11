@@ -9085,8 +9085,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             {
                                                                 add_clause = true;
                                                             }
-                                                            if clause_count > 1
-                                                                && mini_button(
+                                                            if mini_button(
                                                                     ui,
                                                                     "−",
                                                                     mini_subtle_style(ui.visuals().dark_mode),
@@ -9302,22 +9301,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             if add_enabled && add_btn.clicked() {
                                                                 add_clause = true;
                                                             }
-                                                            if clause_count > 1 {
-                                                                let del_btn = mini_button(ui, "−", mini_subtle_style(ui.visuals().dark_mode));
-                                                                if del_btn.clicked() {
-                                                                    pending_remove = Some(index);
-                                                                }
+                                                            if mini_button(ui, "−", mini_subtle_style(ui.visuals().dark_mode)).clicked() {
+                                                                pending_remove = Some(index);
                                                             }
                                                         });
                                                     }
                                                     if let Some(idx) = pending_remove {
                                                         tab.preview_sort.clauses.remove(idx);
-                                                        tab.current_page = 0;
-                                                        tab.mongo_page_cursors.clear();
-                                                        action =
-                                                            TabUiAction::RefreshActiveTable {
-                                                                reload_definition: false,
-                                                            };
                                                     }
                                                     if add_clause && tab.preview_sort.clauses.len() < 8 {
                                                         tab.preview_sort.clauses.push(TableSortClause::default());
