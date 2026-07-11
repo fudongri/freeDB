@@ -231,6 +231,7 @@ pub struct ColumnDefinition {
     pub primary_key: bool,
     pub unique: bool,
     pub auto_increment: bool,
+    pub on_update_current_timestamp: bool,
     pub default_value: Option<String>,
     pub comment: Option<String>,
 }

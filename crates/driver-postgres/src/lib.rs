@@ -254,6 +254,7 @@ impl DatabaseDriver for PostgresDriver {
                     primary_key: row.get(3),
                     unique: row.get(4),
                     auto_increment: is_auto,
+                    on_update_current_timestamp: false,
                     default_value: default_val,
                     comment: row.try_get::<_, String>(6).ok().filter(|v| !v.is_empty()),
                 }

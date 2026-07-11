@@ -140,6 +140,7 @@ impl DatabaseDriver for MySqlDriver {
             .into_iter()
             .map(|row| {
                 let extra: String = row.get::<String, _>(6).unwrap_or_default();
+                let extra_lower = extra.to_ascii_lowercase();
                 ColumnDefinition {
                     name: row.get::<String, _>(0).unwrap_or_default(),
                     data_type: row.get::<String, _>(1).unwrap_or_default(),
@@ -155,7 +156,8 @@ impl DatabaseDriver for MySqlDriver {
                         .get::<String, _>(3)
                         .map(|v| v.eq_ignore_ascii_case("UNI"))
                         .unwrap_or(false),
-                    auto_increment: extra.to_ascii_lowercase().contains("auto_increment"),
+                    auto_increment: extra_lower.contains("auto_increment"),
+                    on_update_current_timestamp: extra_lower.contains("on update current_timestamp"),
                     default_value: row
                         .get::<Option<String>, _>(4)
                         .flatten()

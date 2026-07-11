@@ -179,6 +179,7 @@ impl DatabaseDriver for MongoDbDriver {
                         primary_key: key == "_id",
                         unique: key == "_id",
                         auto_increment: false,
+                        on_update_current_timestamp: false,
                         default_value: None,
                         comment: None,
                     });

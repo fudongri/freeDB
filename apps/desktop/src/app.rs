@@ -808,6 +808,7 @@ struct EditableColumn {
     nullable: bool,
     primary_key: bool,
     auto_increment: bool,
+    on_update_current_timestamp: bool,
     default_value: String,
     comment: String,
     is_new: bool,
@@ -4179,6 +4180,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 nullable: false,
                                 primary_key: true,
                                 auto_increment: true,
+                                on_update_current_timestamp: false,
                                 default_value: String::new(),
                                 comment: tr!("主键").into(),
                                 is_new: true,
@@ -7424,10 +7426,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     ui.ctx().input_mut(|input| { input.consume_key(egui::Modifiers::NONE, egui::Key::Enter); });
                                                 }
                                             }
-                                            if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), danger_button_style(ui.visuals().dark_mode), Some(90.0)).clicked() {
+                                            if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), danger_button_style(ui.visuals().dark_mode), Some(90.0), true).clicked() {
                                                 action = TabUiAction::CancelQueryTabCellChanges;
                                             }
-                                            if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(ui.visuals().dark_mode), Some(90.0)).clicked() {
+                                            if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(ui.visuals().dark_mode), Some(90.0), true).clicked() {
                                                 action = TabUiAction::SaveQueryTabCellChanges;
                                                 query_batch_dialog_open = true;
                                             }
@@ -7820,6 +7822,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     nullable: true,
                     primary_key: false,
                     auto_increment: false,
+                    on_update_current_timestamp: false,
                     default_value: String::new(),
                     comment: String::new(),
                     is_new: true,
@@ -8409,10 +8412,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                 }
                                                 ui.separator();
-                                                if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), danger_button_style(ui.visuals().dark_mode), Some(90.0)).clicked() {
+                                                if toolbar_button_sized(ui, tr!("✕ 取消 (Esc)"), danger_button_style(ui.visuals().dark_mode), Some(90.0), true).clicked() {
                                                     action = TabUiAction::CancelPendingCellChanges;
                                                 }
-                                                if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(ui.visuals().dark_mode), Some(90.0)).clicked() {
+                                                if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(ui.visuals().dark_mode), Some(90.0), true).clicked() {
                                                     action = TabUiAction::SavePendingCellChanges;
                                                 }
                                                 let count = tab.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
@@ -8470,7 +8473,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 area.show(ui.ctx(), |ui| {
                                                     egui::Frame::new()
                                                         .fill(palette.card_bg)
-                                                        .stroke(Stroke::NONE)
+                                                        .stroke(Stroke::new(1.0, palette.border))
                                                         .corner_radius(6.0)
                                                         .inner_margin(egui::Margin::same(8))
                                                         .show(ui, |ui| {
@@ -8569,7 +8572,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     .show(ui.ctx(), |ui| {
                                                         egui::Frame::new()
                                                             .fill(palette.card_bg)
-                                                            .stroke(Stroke::NONE)
+                                                            .stroke(Stroke::new(1.0, palette.border))
                                                             .corner_radius(6.0)
                                                             .inner_margin(egui::Margin::same(8))
                                                             .show(ui, |ui| {
@@ -18532,10 +18535,12 @@ enum ParsedDdlItem {
     Constraint(String),
 }
 
-fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) {
+fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition, db_kind: DatabaseKind) {
     let palette = mac_ui_palette(ui.visuals());
     let viewport_width = ui.available_width().max(0.0);
     let viewport_height = ui.available_height().max(180.0);
+    let show_auto_increment = db_kind == DatabaseKind::MySql;
+    let show_on_update = db_kind == DatabaseKind::MySql;
 
     egui::Frame::new()
         .fill(palette.card_bg)
@@ -18548,26 +18553,42 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    TableBuilder::new(ui)
+                    let mut table = TableBuilder::new(ui)
                         .vscroll(false)
                         .striped(false)
                         .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .column(egui_extras::Column::initial(42.0).at_least(42.0))
                         .column(egui_extras::Column::initial(200.0).at_least(120.0))
-                        .column(egui_extras::Column::remainder().at_least(100.0))
+                        .column(egui_extras::Column::initial(130.0).at_least(80.0))
                         .column(egui_extras::Column::initial(60.0).at_least(50.0))
                         .column(egui_extras::Column::initial(150.0).at_least(80.0))
-                        .column(egui_extras::Column::initial(200.0).at_least(100.0))
-                        .column(egui_extras::Column::initial(100.0).at_least(80.0))
-                        .column(egui_extras::Column::initial(110.0).at_least(80.0))
+                        .column(egui_extras::Column::remainder().at_least(100.0))
+                        .column(egui_extras::Column::initial(100.0).at_least(80.0));
+                    if show_auto_increment {
+                        table = table.column(egui_extras::Column::initial(110.0).at_least(80.0));
+                    }
+                    if show_on_update {
+                        table = table.column(egui_extras::Column::initial(110.0).at_least(80.0));
+                    }
+                    table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
                             });
-                            for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键"), tr!("自增")] {
+                            for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键")] {
                                 header.col(|ui| {
                                     let (_, _, _, _) = table_header_cell(ui, &palette, title, false, None, false, false, None, false);
+                                });
+                            }
+                            if show_auto_increment {
+                                header.col(|ui| {
+                                    let (_, _, _, _) = table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false);
+                                });
+                            }
+                            if show_on_update {
+                                header.col(|ui| {
+                                    let (_, _, _, _) = table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false);
                                 });
                             }
                         })
@@ -18631,15 +18652,28 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition) 
                                             column.primary_key,
                                         );
                                     });
-                                    row.col(|ui| {
-                                        table_status_badge_cell(
-                                            ui,
-                                            &palette,
-                                            fill,
-                                            if column.auto_increment { "AUTO" } else { "" },
-                                            column.auto_increment,
-                                        );
-                                    });
+                                    if show_auto_increment {
+                                        row.col(|ui| {
+                                            table_status_badge_cell(
+                                                ui,
+                                                &palette,
+                                                fill,
+                                                if column.auto_increment { "AUTO" } else { "" },
+                                                column.auto_increment,
+                                            );
+                                        });
+                                    }
+                                    if show_on_update {
+                                        row.col(|ui| {
+                                            table_status_badge_cell(
+                                                ui,
+                                                &palette,
+                                                fill,
+                                                if column.on_update_current_timestamp { "ON UPDATE" } else { "" },
+                                                column.on_update_current_timestamp,
+                                            );
+                                        });
+                                    }
                                 });
                             }
                         });
@@ -18707,6 +18741,9 @@ fn generate_alter_table_sql(
         if !col.default_value.is_empty() {
             clause.push_str(&format!(" DEFAULT {}", quote_default_value(&col.default_value)));
         }
+        if col.on_update_current_timestamp {
+            clause.push_str(" ON UPDATE CURRENT_TIMESTAMP");
+        }
         stmts.push(clause);
     }
 
@@ -18727,8 +18764,9 @@ fn generate_alter_table_sql(
             orig.default_value.as_deref().unwrap_or("") != col.default_value.as_str();
         let comment_changed =
             orig.comment.as_deref().unwrap_or("") != col.comment.as_str();
+        let on_update_changed = orig.on_update_current_timestamp != col.on_update_current_timestamp;
 
-        if !name_changed && !type_changed && !nullable_changed && !default_changed && !comment_changed {
+        if !name_changed && !type_changed && !nullable_changed && !default_changed && !comment_changed && !on_update_changed {
             continue;
         }
 
@@ -18769,6 +18807,9 @@ fn generate_alter_table_sql(
                     if !col.default_value.is_empty() && !col.auto_increment {
                         clause.push_str(&format!(" DEFAULT {}", quote_default_value(&col.default_value)));
                     }
+                    if col.on_update_current_timestamp {
+                        clause.push_str(" ON UPDATE CURRENT_TIMESTAMP");
+                    }
                     if !col.comment.is_empty() {
                         clause.push_str(&format!(" COMMENT '{}'", col.comment.replace('\'', "''")));
                     }
@@ -18790,6 +18831,9 @@ fn generate_alter_table_sql(
                     }
                     if !col.default_value.is_empty() && !col.auto_increment {
                         clause.push_str(&format!(" DEFAULT {}", quote_default_value(&col.default_value)));
+                    }
+                    if col.on_update_current_timestamp {
+                        clause.push_str(" ON UPDATE CURRENT_TIMESTAMP");
                     }
                     if !col.comment.is_empty() {
                         clause.push_str(&format!(" COMMENT '{}'", col.comment.replace('\'', "''")));
@@ -18992,6 +19036,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             || o.data_type != c.data_type
                             || o.nullable != c.nullable
                             || o.primary_key != c.primary_key
+                            || o.on_update_current_timestamp != c.on_update_current_timestamp
                             || o.default_value.as_deref().unwrap_or("") != c.default_value
                             || o.comment.as_deref().unwrap_or("") != c.comment
                     }
@@ -19003,8 +19048,13 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
     ui.horizontal(|ui| {
         let has_pending = tab.editing_structure;
 
-        if !has_pending {
-            if toolbar_button(ui, tr!("✎ 编辑表结构"), subtle_button_style(ui.visuals().dark_mode)).clicked() {
+        {
+            let btn = if has_pending {
+                toolbar_button_disabled(ui, tr!("✎ 编辑表结构"), subtle_button_style(ui.visuals().dark_mode))
+            } else {
+                toolbar_button(ui, tr!("✎ 编辑表结构"), subtle_button_style(ui.visuals().dark_mode))
+            };
+            if btn.clicked() {
                 tab.edited_columns = definition
                     .columns
                     .iter()
@@ -19015,6 +19065,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                         nullable: c.nullable,
                         primary_key: c.primary_key,
                         auto_increment: c.auto_increment,
+                        on_update_current_timestamp: c.on_update_current_timestamp,
                         default_value: c.default_value.clone().unwrap_or_default(),
                         comment: c.comment.clone().unwrap_or_default(),
                         is_new: false,
@@ -19036,6 +19087,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                     nullable: true,
                     primary_key: false,
                     auto_increment: false,
+                    on_update_current_timestamp: false,
                     default_value: String::new(),
                     comment: String::new(),
                     is_new: true,
@@ -19043,19 +19095,19 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                     needs_focus: true,
                 });
             }
+
+            // 取消编辑
+            if toolbar_button(ui, tr!("✕ 取消编辑"), danger_button_style(ui.visuals().dark_mode)).clicked() {
+                tab.editing_structure = false;
+                tab.edited_columns.clear();
+            }
         }
 
-        // 保存按钮 — 有变更时始终可见
+        // 保存按钮 — 有变更时才可见
         if has_changes {
             // SQL 预览切换按钮（保存按钮左侧）
             if toolbar_button(ui, tr!("◉ 语句预览"), accent_muted_button_style(ui.visuals().dark_mode)).clicked() {
                 tab.show_structure_sql_preview = !tab.show_structure_sql_preview;
-            }
-
-            // 取消编辑（保存按钮左侧）
-            if toolbar_button(ui, tr!("✕ 取消编辑"), danger_button_style(ui.visuals().dark_mode)).clicked() {
-                tab.editing_structure = false;
-                tab.edited_columns.clear();
             }
 
             let save_btn =
@@ -19076,15 +19128,6 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                     tab.edited_columns.clear();
                 }
             }
-        } else {
-            let btn = egui::Button::new(
-                RichText::new(tr!("💾 保存")).size(12.5).color(palette.weak_text),
-            )
-            .fill(palette.subtle_button_bg)
-            .stroke(Stroke::new(1.0, palette.subtle_button_stroke))
-            .corner_radius(5.0)
-            .min_size(Vec2::new(0.0, 26.0));
-            ui.add_enabled(false, btn);
         }
 
         if has_changes {
@@ -19137,7 +19180,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
         }
         render_editable_structure_grid(ui, tab);
     } else {
-        render_table_structure_grid(ui, &definition);
+        render_table_structure_grid(ui, &definition, tab.database_kind);
     }
 
     action
@@ -19837,15 +19880,6 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
                     .size(11.0)
                     .color(palette.danger),
             );
-        } else {
-            let btn = egui::Button::new(
-                RichText::new(tr!("💾 保存")).size(12.5).color(palette.weak_text),
-            )
-            .fill(palette.subtle_button_bg)
-            .stroke(Stroke::new(1.0, palette.subtle_button_stroke))
-            .corner_radius(5.0)
-            .min_size(Vec2::new(0.0, 26.0));
-            ui.add_enabled(false, btn);
         }
     });
 
@@ -19910,6 +19944,8 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiActio
 /// 编辑模式下的结构表格
 fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
     let palette = mac_ui_palette(ui.visuals());
+    let show_auto_increment = tab.database_kind == DatabaseKind::MySql;
+    let show_on_update = tab.database_kind == DatabaseKind::MySql;
 
     egui::Frame::new()
         .fill(palette.card_bg)
@@ -19920,30 +19956,52 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    TableBuilder::new(ui)
+                    let mut table = TableBuilder::new(ui)
                         .vscroll(false)
                         .striped(false)
                         .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
                         .column(egui_extras::Column::initial(42.0).at_least(42.0))
                         .column(egui_extras::Column::initial(200.0).at_least(120.0))
-                        .column(egui_extras::Column::remainder().at_least(100.0))
+                        .column(egui_extras::Column::initial(130.0).at_least(80.0))
                         .column(egui_extras::Column::initial(60.0).at_least(50.0))
                         .column(egui_extras::Column::initial(140.0).at_least(70.0))
-                        .column(egui_extras::Column::initial(200.0).at_least(80.0))
-                        .column(egui_extras::Column::initial(100.0).at_least(80.0))
-                        .column(egui_extras::Column::initial(110.0).at_least(80.0))
-                        .column(egui_extras::Column::initial(60.0).at_least(50.0))
+                        .column(egui_extras::Column::remainder().at_least(80.0))
+                        .column(egui_extras::Column::initial(100.0).at_least(80.0));
+                    if show_auto_increment {
+                        table = table.column(egui_extras::Column::initial(110.0).at_least(80.0));
+                    }
+                    if show_on_update {
+                        table = table.column(egui_extras::Column::initial(120.0).at_least(80.0));
+                    }
+                    table = table.column(egui_extras::Column::initial(60.0).at_least(50.0));
+                    table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
                             });
-                            for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键"), tr!("自增"), tr!("删除")] {
+                            for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键")] {
                                 header.col(|ui| {
                                     let (_, _, _, _) =
                                         table_header_cell(ui, &palette, title, false, None, false, false, None, false);
                                 });
                             }
+                            if show_auto_increment {
+                                header.col(|ui| {
+                                    let (_, _, _, _) =
+                                        table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false);
+                                });
+                            }
+                            if show_on_update {
+                                header.col(|ui| {
+                                    let (_, _, _, _) =
+                                        table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false);
+                                });
+                            }
+                            header.col(|ui| {
+                                let (_, _, _, _) =
+                                    table_header_cell(ui, &palette, tr!("删除"), false, None, false, false, None, false);
+                            });
                         })
                         .body(|mut body| {
                             let mut drop_index: Option<usize> = None;
@@ -20046,13 +20104,31 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                         ui.put(cb_rect, egui::Checkbox::new(&mut col.primary_key, ""));
                                     });
                                     // 自增
-                                    row.col(|ui| {
-                                        let col = &mut tab.edited_columns[col_idx];
-                                        let rect = ui.max_rect();
-                                        let center = rect.center();
-                                        let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
-                                        ui.put(cb_rect, egui::Checkbox::new(&mut col.auto_increment, ""));
-                                    });
+                                    if show_auto_increment {
+                                        row.col(|ui| {
+                                            let col = &mut tab.edited_columns[col_idx];
+                                            let rect = ui.max_rect();
+                                            let center = rect.center();
+                                            let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
+                                            ui.put(cb_rect, egui::Checkbox::new(&mut col.auto_increment, ""));
+                                        });
+                                    }
+                                    // 更新时刷新
+                                    if show_on_update {
+                                        row.col(|ui| {
+                                            let col = &mut tab.edited_columns[col_idx];
+                                            let is_time_type = {
+                                                let dt = col.data_type.to_lowercase();
+                                                dt.contains("timestamp") || dt.contains("datetime")
+                                            };
+                                            let rect = ui.max_rect();
+                                            let center = rect.center();
+                                            let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
+                                            ui.add_enabled_ui(is_time_type, |ui| {
+                                                ui.put(cb_rect, egui::Checkbox::new(&mut col.on_update_current_timestamp, ""));
+                                            });
+                                        });
+                                    }
                                     // 删除
                                     row.col(|ui| {
                                         let rect = ui.max_rect();
@@ -20383,7 +20459,11 @@ fn table_status_badge_cell(
         } else {
             palette.soft_border
         };
-        let badge_rect = egui::Rect::from_center_size(rect.center(), Vec2::new(42.0, 18.0));
+        let font_id = FontId::new(11.5, FontFamily::Monospace);
+        let galley = ui.fonts_mut(|f| f.layout(text.to_string(), font_id.clone(), Color32::WHITE, f32::INFINITY));
+        let text_width = galley.rect.width();
+        let badge_w = (text_width + 16.0).max(42.0);
+        let badge_rect = egui::Rect::from_center_size(rect.center(), Vec2::new(badge_w, 18.0));
         ui.painter().rect(
             badge_rect,
             9.0,
@@ -20395,7 +20475,7 @@ fn table_status_badge_cell(
             badge_rect.center(),
             Align2::CENTER_CENTER,
             text,
-            FontId::new(11.5, FontFamily::Monospace),
+            font_id,
             if active {
                 palette.selection_text
             } else {
@@ -23391,7 +23471,15 @@ fn toolbar_button(
     label: &str,
     style: ButtonStyle,
 ) -> egui::Response {
-    toolbar_button_sized(ui, label, style, None)
+    toolbar_button_sized(ui, label, style, None, true)
+}
+
+fn toolbar_button_disabled(
+    ui: &mut egui::Ui,
+    label: &str,
+    style: ButtonStyle,
+) -> egui::Response {
+    toolbar_button_sized(ui, label, style, None, false)
 }
 
 
@@ -23401,14 +23489,23 @@ fn toolbar_button_sized(
     label: &str,
     style: ButtonStyle,
     fixed_width: Option<f32>,
+    enabled: bool,
 ) -> egui::Response {
     let w = fixed_width.unwrap_or(style.min_width);
-    ui.add(
-        egui::Button::new(RichText::new(label).size(style.font_size).color(style.text))
+    let visuals = if enabled {
+        style
+    } else {
+        let mut s = style;
+        s.text = ui.visuals().widgets.inactive.fg_stroke.color;
+        s
+    };
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(label).size(visuals.font_size).color(visuals.text))
             .fill(Color32::TRANSPARENT)
-            .stroke(style.stroke)
-            .corner_radius(style.corner_radius)
-            .min_size(Vec2::new(w, style.min_height)),
+            .stroke(visuals.stroke)
+            .corner_radius(visuals.corner_radius)
+            .min_size(Vec2::new(w, visuals.min_height)),
     )
 }
 
