@@ -529,13 +529,13 @@ impl Theme {
             fonts: FontSizes::default(),
             colors: ThemeColors {
                 // ── 通用 UI ──
-                toolbar_bg: Color32::from_rgb(255, 255, 255),
-                sidebar_bg: Color32::from_rgb(237, 237, 239),
-                workspace_bg: Color32::from_rgb(255, 255, 255),
-                card_bg: Color32::from_rgb(255, 255, 255),
+                toolbar_bg: Color32::from_rgb(246, 246, 246),
+                sidebar_bg: Color32::from_rgb(238, 238, 240),
+                workspace_bg: Color32::from_rgb(246, 246, 246),
+                card_bg: Color32::from_rgb(246, 246, 246),
                 table_header_bg: Color32::from_rgb(243, 243, 243),
                 table_alt_bg: Color32::from_rgb(248, 248, 248),
-                search_bg: Color32::from_rgb(255, 255, 255),
+                search_bg: Color32::from_rgb(246, 246, 246),
                 border: Color32::from_rgb(218, 218, 218),
                 soft_border: Color32::from_rgb(232, 232, 232),
                 table_grid: Color32::from_rgb(224, 224, 224),
@@ -602,7 +602,7 @@ impl Theme {
                 dialog_secondary_button_text: Color32::from_rgb(50, 50, 50),
 
                 // ── 编辑器 ──
-                editor_panel_bg: Color32::from_rgb(255, 255, 255),
+                editor_panel_bg: Color32::from_rgb(252, 252, 252),
                 editor_bg: Color32::from_rgb(250, 250, 250),
                 editor_gutter_bg: Color32::from_rgb(244, 244, 244),
                 editor_current_line_bg: Color32::from_rgb(228, 238, 252),
@@ -673,8 +673,8 @@ impl Theme {
                 context_menu_fg: Color32::WHITE,
 
                 // ── egui 全局视觉 ──
-                panel_fill: Color32::from_rgb(255, 255, 255),
-                window_fill: Color32::from_rgb(255, 255, 255),
+                panel_fill: Color32::from_rgb(246, 246, 246),
+                window_fill: Color32::from_rgb(246, 246, 246),
                 extreme_bg: Color32::from_rgb(230, 230, 230),
                 faint_bg: Color32::from_rgb(248, 248, 248),
                 code_bg: Color32::from_rgb(240, 240, 240),
@@ -835,123 +835,83 @@ impl Theme {
     pub fn dark_layered() -> Self { let mut t = Self::dark(); t.dark_variant = DarkVariant::Layered; Self::apply_dark_layered(&mut t.colors); t }
 
     fn apply_light_warm(c: &mut ThemeColors) {
-        c.toolbar_bg = Color32::from_rgb(255, 250, 245);
-        c.sidebar_bg = Color32::from_rgb(245, 238, 230);
-        c.workspace_bg = Color32::from_rgb(255, 250, 245);
-        c.card_bg = Color32::from_rgb(255, 250, 245);
-        c.table_header_bg = Color32::from_rgb(248, 243, 238);
-        c.table_alt_bg = Color32::from_rgb(252, 248, 244);
-        c.search_bg = Color32::from_rgb(255, 250, 245);
-        c.tab_idle_bg = Color32::from_rgb(250, 245, 240);
-        c.accent_button_bg = Color32::from_rgb(250, 245, 240);
-        c.accent_active_button_bg = Color32::from_rgb(250, 245, 240);
-        c.subtle_button_bg = Color32::from_rgb(252, 248, 244);
-        c.danger_button_bg = Color32::from_rgb(255, 250, 245);
-        c.dialog_window_bg = Color32::from_rgb(250, 245, 240);
-        c.dialog_section_bg = Color32::from_rgb(255, 248, 242);
-        c.dialog_input_bg = Color32::from_rgb(255, 252, 248);
-        c.dialog_input_hover_bg = Color32::from_rgb(255, 250, 245);
-        c.dialog_input_active_bg = Color32::from_rgb(255, 252, 248);
-        c.editor_panel_bg = Color32::from_rgb(255, 250, 245);
-        c.editor_bg = Color32::from_rgb(252, 247, 242);
-        c.editor_gutter_bg = Color32::from_rgb(248, 243, 238);
-        c.autocomplete_popup_bg = Color32::from_rgb(252, 248, 244);
-        c.panel_fill = Color32::from_rgb(255, 250, 245);
-        c.window_fill = Color32::from_rgb(255, 250, 245);
-        c.extreme_bg = Color32::from_rgb(240, 235, 230);
-        c.faint_bg = Color32::from_rgb(252, 248, 244);
-        c.code_bg = Color32::from_rgb(245, 240, 235);
-        c.widget_noninteractive_bg = Color32::from_rgb(248, 243, 238);
+        let main   = Color32::from_rgb(248, 246, 242);
+        let side   = Color32::from_rgb(240, 237, 231);
+        let editor = Color32::from_rgb(252, 251, 249);
+        let mid    = Color32::from_rgb(244, 241, 236);
+        let light  = Color32::from_rgb(250, 249, 246);
+        let input  = Color32::from_rgb(254, 253, 251);
+        c.toolbar_bg = main; c.sidebar_bg = side; c.workspace_bg = main;
+        c.card_bg = main; c.search_bg = main; c.panel_fill = main; c.window_fill = main;
+        c.editor_panel_bg = editor; c.editor_bg = light; c.editor_gutter_bg = mid;
+        c.table_header_bg = mid; c.table_alt_bg = light;
+        c.tab_idle_bg = mid; c.accent_button_bg = mid; c.accent_active_button_bg = mid;
+        c.subtle_button_bg = light; c.danger_button_bg = main;
+        c.dialog_window_bg = mid; c.dialog_section_bg = Color32::from_rgb(252, 250, 247);
+        c.dialog_input_bg = input; c.dialog_input_hover_bg = Color32::from_rgb(252, 250, 247); c.dialog_input_active_bg = input;
+        c.autocomplete_popup_bg = light; c.faint_bg = light;
+        c.extreme_bg = Color32::from_rgb(232, 229, 224); c.code_bg = side;
+        c.widget_noninteractive_bg = mid;
     }
 
     fn apply_light_cool(c: &mut ThemeColors) {
-        c.toolbar_bg = Color32::from_rgb(245, 248, 255);
-        c.sidebar_bg = Color32::from_rgb(232, 236, 245);
-        c.workspace_bg = Color32::from_rgb(245, 248, 255);
-        c.card_bg = Color32::from_rgb(245, 248, 255);
-        c.table_header_bg = Color32::from_rgb(238, 242, 250);
-        c.table_alt_bg = Color32::from_rgb(242, 245, 252);
-        c.search_bg = Color32::from_rgb(245, 248, 255);
-        c.tab_idle_bg = Color32::from_rgb(240, 244, 250);
-        c.accent_button_bg = Color32::from_rgb(240, 244, 250);
-        c.accent_active_button_bg = Color32::from_rgb(240, 244, 250);
-        c.subtle_button_bg = Color32::from_rgb(242, 245, 252);
-        c.danger_button_bg = Color32::from_rgb(245, 248, 255);
-        c.dialog_window_bg = Color32::from_rgb(240, 244, 250);
-        c.dialog_section_bg = Color32::from_rgb(248, 250, 255);
-        c.dialog_input_bg = Color32::from_rgb(252, 253, 255);
-        c.dialog_input_hover_bg = Color32::from_rgb(248, 250, 255);
-        c.dialog_input_active_bg = Color32::from_rgb(252, 253, 255);
-        c.editor_panel_bg = Color32::from_rgb(245, 248, 255);
-        c.editor_bg = Color32::from_rgb(242, 245, 252);
-        c.editor_gutter_bg = Color32::from_rgb(238, 242, 248);
-        c.autocomplete_popup_bg = Color32::from_rgb(242, 245, 252);
-        c.panel_fill = Color32::from_rgb(245, 248, 255);
-        c.window_fill = Color32::from_rgb(245, 248, 255);
-        c.extreme_bg = Color32::from_rgb(228, 232, 240);
-        c.faint_bg = Color32::from_rgb(242, 245, 252);
-        c.code_bg = Color32::from_rgb(235, 238, 245);
-        c.widget_noninteractive_bg = Color32::from_rgb(238, 242, 248);
+        let main   = Color32::from_rgb(246, 247, 252);
+        let side   = Color32::from_rgb(237, 239, 246);
+        let editor = Color32::from_rgb(251, 251, 254);
+        let mid    = Color32::from_rgb(242, 243, 249);
+        let light  = Color32::from_rgb(249, 249, 253);
+        let input  = Color32::from_rgb(253, 253, 255);
+        c.toolbar_bg = main; c.sidebar_bg = side; c.workspace_bg = main;
+        c.card_bg = main; c.search_bg = main; c.panel_fill = main; c.window_fill = main;
+        c.editor_panel_bg = editor; c.editor_bg = light; c.editor_gutter_bg = mid;
+        c.table_header_bg = mid; c.table_alt_bg = light;
+        c.tab_idle_bg = mid; c.accent_button_bg = mid; c.accent_active_button_bg = mid;
+        c.subtle_button_bg = light; c.danger_button_bg = main;
+        c.dialog_window_bg = mid; c.dialog_section_bg = Color32::from_rgb(250, 250, 255);
+        c.dialog_input_bg = input; c.dialog_input_hover_bg = Color32::from_rgb(250, 250, 255); c.dialog_input_active_bg = input;
+        c.autocomplete_popup_bg = light; c.faint_bg = light;
+        c.extreme_bg = Color32::from_rgb(230, 232, 240); c.code_bg = side;
+        c.widget_noninteractive_bg = mid;
     }
 
     fn apply_light_eyecare(c: &mut ThemeColors) {
-        c.toolbar_bg = Color32::from_rgb(250, 245, 235);
-        c.sidebar_bg = Color32::from_rgb(240, 233, 220);
-        c.workspace_bg = Color32::from_rgb(250, 245, 235);
-        c.card_bg = Color32::from_rgb(250, 245, 235);
-        c.table_header_bg = Color32::from_rgb(244, 239, 230);
-        c.table_alt_bg = Color32::from_rgb(248, 244, 236);
-        c.search_bg = Color32::from_rgb(250, 245, 235);
-        c.tab_idle_bg = Color32::from_rgb(246, 241, 232);
-        c.accent_button_bg = Color32::from_rgb(246, 241, 232);
-        c.accent_active_button_bg = Color32::from_rgb(246, 241, 232);
-        c.subtle_button_bg = Color32::from_rgb(248, 244, 236);
-        c.danger_button_bg = Color32::from_rgb(250, 245, 235);
-        c.dialog_window_bg = Color32::from_rgb(246, 241, 232);
-        c.dialog_section_bg = Color32::from_rgb(252, 248, 240);
-        c.dialog_input_bg = Color32::from_rgb(255, 252, 246);
-        c.dialog_input_hover_bg = Color32::from_rgb(252, 248, 240);
-        c.dialog_input_active_bg = Color32::from_rgb(255, 252, 246);
-        c.editor_panel_bg = Color32::from_rgb(250, 245, 235);
-        c.editor_bg = Color32::from_rgb(248, 243, 233);
-        c.editor_gutter_bg = Color32::from_rgb(244, 239, 229);
-        c.autocomplete_popup_bg = Color32::from_rgb(248, 244, 236);
-        c.panel_fill = Color32::from_rgb(250, 245, 235);
-        c.window_fill = Color32::from_rgb(250, 245, 235);
-        c.extreme_bg = Color32::from_rgb(238, 233, 224);
-        c.faint_bg = Color32::from_rgb(248, 244, 236);
-        c.code_bg = Color32::from_rgb(242, 237, 228);
-        c.widget_noninteractive_bg = Color32::from_rgb(244, 239, 230);
+        let main   = Color32::from_rgb(248, 246, 240);
+        let side   = Color32::from_rgb(240, 237, 228);
+        let editor = Color32::from_rgb(252, 251, 248);
+        let mid    = Color32::from_rgb(244, 241, 233);
+        let light  = Color32::from_rgb(250, 249, 244);
+        let input  = Color32::from_rgb(254, 253, 250);
+        c.toolbar_bg = main; c.sidebar_bg = side; c.workspace_bg = main;
+        c.card_bg = main; c.search_bg = main; c.panel_fill = main; c.window_fill = main;
+        c.editor_panel_bg = editor; c.editor_bg = light; c.editor_gutter_bg = mid;
+        c.table_header_bg = mid; c.table_alt_bg = light;
+        c.tab_idle_bg = mid; c.accent_button_bg = mid; c.accent_active_button_bg = mid;
+        c.subtle_button_bg = light; c.danger_button_bg = main;
+        c.dialog_window_bg = mid; c.dialog_section_bg = Color32::from_rgb(252, 250, 245);
+        c.dialog_input_bg = input; c.dialog_input_hover_bg = Color32::from_rgb(252, 250, 245); c.dialog_input_active_bg = input;
+        c.autocomplete_popup_bg = light; c.faint_bg = light;
+        c.extreme_bg = Color32::from_rgb(234, 231, 224); c.code_bg = side;
+        c.widget_noninteractive_bg = mid;
     }
 
     fn apply_light_softgray(c: &mut ThemeColors) {
-        c.toolbar_bg = Color32::from_rgb(242, 242, 246);
-        c.sidebar_bg = Color32::from_rgb(232, 232, 237);
-        c.workspace_bg = Color32::from_rgb(242, 242, 246);
-        c.card_bg = Color32::from_rgb(242, 242, 246);
-        c.table_header_bg = Color32::from_rgb(236, 236, 241);
-        c.table_alt_bg = Color32::from_rgb(240, 240, 244);
-        c.search_bg = Color32::from_rgb(242, 242, 246);
-        c.tab_idle_bg = Color32::from_rgb(238, 238, 242);
-        c.accent_button_bg = Color32::from_rgb(238, 238, 242);
-        c.accent_active_button_bg = Color32::from_rgb(238, 238, 242);
-        c.subtle_button_bg = Color32::from_rgb(240, 240, 244);
-        c.danger_button_bg = Color32::from_rgb(242, 242, 246);
-        c.dialog_window_bg = Color32::from_rgb(238, 238, 242);
-        c.dialog_section_bg = Color32::from_rgb(245, 245, 250);
-        c.dialog_input_bg = Color32::from_rgb(248, 248, 252);
-        c.dialog_input_hover_bg = Color32::from_rgb(245, 245, 250);
-        c.dialog_input_active_bg = Color32::from_rgb(248, 248, 252);
-        c.editor_panel_bg = Color32::from_rgb(242, 242, 246);
-        c.editor_bg = Color32::from_rgb(238, 238, 242);
-        c.editor_gutter_bg = Color32::from_rgb(234, 234, 239);
-        c.autocomplete_popup_bg = Color32::from_rgb(240, 240, 244);
-        c.panel_fill = Color32::from_rgb(242, 242, 246);
-        c.window_fill = Color32::from_rgb(242, 242, 246);
-        c.extreme_bg = Color32::from_rgb(228, 228, 233);
-        c.faint_bg = Color32::from_rgb(240, 240, 244);
-        c.code_bg = Color32::from_rgb(232, 232, 237);
-        c.widget_noninteractive_bg = Color32::from_rgb(236, 236, 241);
+        let main   = Color32::from_rgb(244, 244, 248);
+        let side   = Color32::from_rgb(235, 235, 240);
+        let editor = Color32::from_rgb(250, 250, 253);
+        let mid    = Color32::from_rgb(240, 240, 245);
+        let light  = Color32::from_rgb(248, 248, 251);
+        let input  = Color32::from_rgb(252, 252, 254);
+        c.toolbar_bg = main; c.sidebar_bg = side; c.workspace_bg = main;
+        c.card_bg = main; c.search_bg = main; c.panel_fill = main; c.window_fill = main;
+        c.editor_panel_bg = editor; c.editor_bg = light; c.editor_gutter_bg = mid;
+        c.table_header_bg = mid; c.table_alt_bg = light;
+        c.tab_idle_bg = mid; c.accent_button_bg = mid; c.accent_active_button_bg = mid;
+        c.subtle_button_bg = light; c.danger_button_bg = main;
+        c.dialog_window_bg = mid; c.dialog_section_bg = Color32::from_rgb(251, 251, 254);
+        c.dialog_input_bg = input; c.dialog_input_hover_bg = Color32::from_rgb(251, 251, 254); c.dialog_input_active_bg = input;
+        c.autocomplete_popup_bg = light; c.faint_bg = light;
+        c.extreme_bg = Color32::from_rgb(230, 230, 235); c.code_bg = side;
+        c.widget_noninteractive_bg = mid;
     }
 
     pub fn light_warm() -> Self { let mut t = Self::light(); t.light_variant = LightVariant::Warm; Self::apply_light_warm(&mut t.colors); t }
