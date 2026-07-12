@@ -8423,7 +8423,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let show_table_loading = |ui: &mut egui::Ui, label: &str| {
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
-                ui.add(egui::Spinner::new().size(fonts.spinner));
+                ui.add(egui::Spinner::new().size(fonts.spinner_size));
                 ui.add_space(12.0);
                 ui.label(RichText::new(label).color(palette.weak_text));
             });
@@ -19140,7 +19140,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
         if tab.error.is_none() {
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
-                ui.add(egui::Spinner::new().size(fonts.spinner));
+                ui.add(egui::Spinner::new().size(fonts.spinner_size));
                 ui.add_space(12.0);
                 ui.label(RichText::new(tr!("正在加载表结构...")).color(palette.weak_text));
             });
@@ -19947,7 +19947,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui_t
         if tab.error.is_none() {
             ui.vertical_centered(|ui| {
                 ui.add_space(80.0);
-                ui.add(egui::Spinner::new().size(fonts.spinner));
+                ui.add(egui::Spinner::new().size(fonts.spinner_size));
                 ui.add_space(12.0);
                 ui.label(RichText::new(tr!("正在加载索引...")).color(palette.weak_text));
             });

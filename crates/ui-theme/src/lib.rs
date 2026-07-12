@@ -3,19 +3,19 @@ use egui::Color32;
 /// 命名字体大小
 #[derive(Clone, Copy, Debug)]
 pub struct FontSizes {
-    /// 10.0 — resize handles、group-by 指示器
+    /// 9.0 — resize handles、group-by 指示器（HIG Mini）
     pub tiny: f32,
-    /// 11.0 — kind 标签、历史表
+    /// 11.0 — kind 标签、历史表（HIG Small）
     pub xs: f32,
-    /// 11.5 — 摘要文字
+    /// 11.0 — 摘要文字（HIG Small）
     pub sm: f32,
-    /// 12.0 — 表格单元格、侧边栏项、对话框基础
+    /// 13.0 — 表格单元格、侧边栏项、对话框基础（HIG Body）
     pub base: f32,
-    /// 12.5 — 标签页按钮、combo 项、对话框正文
+    /// 13.0 — 标签页按钮、combo 项、对话框正文（HIG Control）
     pub md: f32,
     /// 13.0 — 表头、autocomplete 标签、输入标签
     pub lg: f32,
-    /// 14.0 — 输入框、右键菜单项
+    /// 13.0 — 输入框、右键菜单项（HIG Menu Item）
     pub xl: f32,
     /// 15.0 — SQL 代码编辑器
     pub code: f32,
@@ -27,26 +27,26 @@ pub struct FontSizes {
     pub hero: f32,
     /// 12.0 — monospace SQL 代码块
     pub mono: f32,
-    /// 40.0 — loading spinner
-    pub spinner: f32,
+    /// 40.0 — loading spinner 直径
+    pub spinner_size: f32,
 }
 
 impl Default for FontSizes {
     fn default() -> Self {
         Self {
-            tiny: 10.0,
+            tiny: 9.0,
             xs: 11.0,
-            sm: 11.5,
-            base: 12.0,
-            md: 12.5,
+            sm: 11.0,
+            base: 13.0,
+            md: 13.0,
             lg: 13.0,
-            xl: 14.0,
+            xl: 13.0,
             code: 15.0,
             heading: 18.0,
             title: 22.0,
             hero: 36.0,
             mono: 12.0,
-            spinner: 40.0,
+            spinner_size: 40.0,
         }
     }
 }
@@ -358,7 +358,7 @@ impl Theme {
                 expand_arrow: Color32::from_rgb(60, 110, 175),
                 text: Color32::from_rgb(245, 245, 245),
                 weak_text: Color32::from_rgb(180, 180, 180),
-                muted_dot: Color32::from_rgb(130, 130, 132),
+                muted_dot: Color32::from_rgb(148, 148, 150),
                 success: Color32::from_rgb(68, 188, 125),
                 danger: Color32::from_rgb(255, 115, 115),
                 warning: Color32::from_rgb(255, 190, 70),
@@ -544,8 +544,8 @@ impl Theme {
                 selection_text: Color32::from_rgb(20, 60, 120),
                 expand_arrow: Color32::from_rgb(68, 128, 200),
                 text: Color32::from_rgb(40, 40, 40),
-                weak_text: Color32::from_rgb(105, 105, 105),
-                muted_dot: Color32::from_rgb(152, 152, 152),
+                weak_text: Color32::from_rgb(130, 130, 130),
+                muted_dot: Color32::from_rgb(125, 125, 125),
                 success: Color32::from_rgb(48, 167, 104),
                 danger: Color32::from_rgb(220, 86, 86),
                 warning: Color32::from_rgb(255, 179, 25),
