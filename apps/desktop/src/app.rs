@@ -11911,7 +11911,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().slider_width = 130.0;
                             ui.label(tr!("慢"));
+                            let orig = ui.visuals().widgets.inactive.bg_fill;
+                            ui.visuals_mut().widgets.inactive.bg_fill = self.theme.colors.soft_border;
                             ui.add(egui::Slider::new(&mut self.scroll_speed, 0.1..=100.0).step_by(0.1));
+                            ui.visuals_mut().widgets.inactive.bg_fill = orig;
                             ui.label(tr!("快"));
                         });
                         ui.horizontal(|ui| {
