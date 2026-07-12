@@ -1117,7 +1117,7 @@ impl DesktopApp {
             .load_ui_state("theme_v2")
             .ok()
             .flatten()
-            .unwrap_or_else(|| "dark_soft".into());
+            .unwrap_or_else(|| "dark_cool".into());
         let use_dark_theme = !theme_str.starts_with("light");
         let dark_variant = ui_theme::DarkVariant::from_str(&theme_str);
         let light_variant = ui_theme::LightVariant::from_str(&theme_str);
