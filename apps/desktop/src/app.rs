@@ -1562,16 +1562,7 @@ impl DesktopApp {
                 self.editing_connection_id = None;
                 self.connection_form = ConnectionFormState::default();
             } else if event.id == "新建查询" {
-                let (conn_id, database) = if let Some(node) = self.selected_sidebar_node() {
-                    let db = node.database.clone().or_else(|| {
-                        matches!(node.node_type, ExplorerNodeType::Database)
-                            .then(|| node.name.clone())
-                    });
-                    (Some(node.connection_id.clone()), db)
-                } else {
-                    (self.selected_connection.clone(), None)
-                };
-                self.create_query_tab(conn_id, database, None);
+                self.new_query_from_selected_node();
             } else if event.id == "导入配置" {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("FreeDB Config", &["dbx"])
@@ -3310,6 +3301,45 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.scroll_tabs_to_end = true;
     }
 
+    /// 根据侧栏选中节点的上下文创建查询，自动预填 SQL
+    fn new_query_from_selected_node(&mut self) {
+        if let Some(node) = self.selected_sidebar_node() {
+            match node.node_type {
+                ExplorerNodeType::Database | ExplorerNodeType::Schema => {
+                    let db = node.database.clone();
+                    let schema = node.schema.clone();
+                    self.create_query_tab(
+                        Some(node.connection_id.clone()),
+                        db.or_else(|| Some(node.name.clone())),
+                        schema.map(|s| format!("-- Schema: {s}\n")),
+                    );
+                }
+                ExplorerNodeType::Table | ExplorerNodeType::View => {
+                    let kind = self.database_kind_for_connection(&node.connection_id);
+                    let db = node.database.clone();
+                    let sql = if kind == DatabaseKind::MongoDb {
+                        format!("db.{}.find({{}}).limit(100);\n", node.name)
+                    } else {
+                        let from_clause = match kind {
+                            DatabaseKind::Postgres => match &node.schema {
+                                Some(s) => format!("{s}.{}", node.name),
+                                None => node.name.clone(),
+                            },
+                            _ => node.name.clone(),
+                        };
+                        format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n")
+                    };
+                    self.create_query_tab(Some(node.connection_id.clone()), db, Some(sql));
+                }
+                _ => {
+                    self.create_query_tab(self.selected_connection.clone(), None, None);
+                }
+            }
+        } else {
+            self.create_query_tab(self.selected_connection.clone(), None, None);
+        }
+    }
+
     fn navigate_to_tab(&mut self, new_tab: usize) {
         if new_tab >= self.tabs.len() || new_tab == self.active_tab {
             return;
@@ -3794,16 +3824,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 .on_hover_text(tr!("新建查询 ({}+D)", MOD_KEY))
                 .clicked()
             {
-                let (conn_id, database) = if let Some(node) = self.selected_sidebar_node() {
-                    let db = node.database.clone().or_else(|| {
-                        matches!(node.node_type, ExplorerNodeType::Database)
-                            .then(|| node.name.clone())
-                    });
-                    (Some(node.connection_id.clone()), db)
-                } else {
-                    (self.selected_connection.clone(), None)
-                };
-                self.create_query_tab(conn_id, database, None);
+                self.new_query_from_selected_node();
             }
             ui.separator();
             // "文件" 菜单：macOS/Windows 使用原生菜单栏，Linux 使用 egui
@@ -3999,16 +4020,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(10.0); // 右侧间距与搜索框 outer_margin 对齐
                 if mini_button(ui, tr!("新建查询"), mini_primary_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
-                    let (conn_id, database) = if let Some(node) = self.selected_sidebar_node() {
-                        let db = node.database.clone().or_else(|| {
-                            matches!(node.node_type, ExplorerNodeType::Database)
-                                .then(|| node.name.clone())
-                        });
-                        (Some(node.connection_id.clone()), db)
-                    } else {
-                        (self.selected_connection.clone(), None)
-                    };
-                    self.create_query_tab(conn_id, database, None);
+                    self.new_query_from_selected_node();
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add_space(10.0); // 左侧间距与搜索框 outer_margin 对齐
@@ -13089,43 +13101,7 @@ impl eframe::App for DesktopApp {
             )) || (input.modifiers.command && input.key_pressed(egui::Key::D))
         });
         if new_query {
-            if let Some(node) = self.selected_sidebar_node() {
-                match node.node_type {
-                    ExplorerNodeType::Database | ExplorerNodeType::Schema => {
-                        let db = node.database.clone();
-                        let schema = node.schema.clone();
-                        self.create_query_tab(
-                            Some(node.connection_id.clone()),
-                            db.or_else(|| Some(node.name.clone())),
-                            schema.map(|s| format!("-- Schema: {s}\n")),
-                        );
-                    }
-                    ExplorerNodeType::Table | ExplorerNodeType::View => {
-                        let kind = self.database_kind_for_connection(&node.connection_id);
-                        let db = node.database.clone();
-                        let sql = if kind == DatabaseKind::MongoDb {
-                            format!("db.{}.find({{}}).limit(100);\n", node.name)
-                        } else {
-                            let from_clause = match kind {
-                                DatabaseKind::Postgres => {
-                                    match &node.schema {
-                                        Some(s) => format!("{s}.{}", node.name),
-                                        None => node.name.clone(),
-                                    }
-                                }
-                                _ => node.name.clone(),
-                            };
-                            format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n")
-                        };
-                        self.create_query_tab(Some(node.connection_id.clone()), db, Some(sql));
-                    }
-                    _ => {
-                        self.create_query_tab(self.selected_connection.clone(), None, None);
-                    }
-                }
-            } else {
-                self.create_query_tab(self.selected_connection.clone(), None, None);
-            }
+            self.new_query_from_selected_node();
         }
 
         // Keyboard shortcut: close current tab with Cmd+W or Cmd+Shift+W
