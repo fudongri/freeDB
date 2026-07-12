@@ -3790,7 +3790,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.editing_connection_id = None;
                 self.connection_form = ConnectionFormState::default();
             }
-            if toolbar_button(ui, tr!("新建查询"), secondary_button_style(&self.theme.colors, self.theme.fonts.md))
+            if toolbar_button(ui, tr!("新建查询"), primary_button_style(&self.theme.colors, self.theme.fonts.md))
                 .on_hover_text(tr!("新建查询 ({}+D)", MOD_KEY))
                 .clicked()
             {
@@ -3998,7 +3998,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(10.0); // 右侧间距与搜索框 outer_margin 对齐
-                if mini_button(ui, tr!("新建查询"), mini_accent_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                if mini_button(ui, tr!("新建查询"), mini_primary_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                     let (conn_id, database) = if let Some(node) = self.selected_sidebar_node() {
                         let db = node.database.clone().or_else(|| {
                             matches!(node.node_type, ExplorerNodeType::Database)
@@ -13681,6 +13681,18 @@ fn mini_accent_active_style(c: &ui_theme::ThemeColors, font_size: f32) -> Button
     }
 }
 
+fn mini_primary_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyle {
+    ButtonStyle {
+        fill: c.primary_button_bg,
+        text: c.primary_button_text,
+        stroke: Stroke::new(1.0, c.primary_button_stroke),
+        font_size,
+        min_width: 34.0,
+        min_height: 22.0,
+        corner_radius: c.radius_md,
+    }
+}
+
 fn mini_hide_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyle {
     ButtonStyle {
         fill: c.hide_button_bg,
@@ -22801,10 +22813,12 @@ fn app_visuals(use_dark_theme: bool, dark_variant: ui_theme::DarkVariant, light_
     visuals.widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, c.widget_hovered_stroke);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, c.widget_hovered_stroke);
+    visuals.widgets.hovered.expansion = 0.0;
     visuals.widgets.active.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.active.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.active.bg_stroke = Stroke::new(1.2, c.widget_active_stroke);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, c.widget_active_stroke);
+    visuals.widgets.active.expansion = 0.0;
     visuals.widgets.open.bg_fill = Color32::TRANSPARENT;
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, c.widget_open_stroke);
     visuals.selection.bg_fill = c.egui_selection_bg;
