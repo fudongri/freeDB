@@ -1,7 +1,7 @@
 use egui::Color32;
 
 /// 命名字体大小
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FontSizes {
     /// 10.0 — resize handles、group-by 指示器
     pub tiny: f32,
@@ -19,8 +19,16 @@ pub struct FontSizes {
     pub xl: f32,
     /// 15.0 — SQL 代码编辑器
     pub code: f32,
+    /// 18.0 — 对话框标题
+    pub heading: f32,
+    /// 22.0 — 页面大标题
+    pub title: f32,
     /// 36.0 — 空状态标题
     pub hero: f32,
+    /// 12.0 — monospace SQL 代码块
+    pub mono: f32,
+    /// 40.0 — loading spinner
+    pub spinner: f32,
 }
 
 impl Default for FontSizes {
@@ -34,7 +42,11 @@ impl Default for FontSizes {
             lg: 13.0,
             xl: 14.0,
             code: 15.0,
+            heading: 18.0,
+            title: 22.0,
             hero: 36.0,
+            mono: 12.0,
+            spinner: 40.0,
         }
     }
 }
@@ -144,6 +156,7 @@ pub struct ThemeColors {
     pub delete_button_bg: Color32,
     pub delete_button_text: Color32,
     pub confirm_button_bg: Color32,
+    pub confirm_button_text: Color32,
     pub warning_icon: Color32,
     pub context_menu_hover: Color32,
     pub context_menu_active: Color32,
@@ -157,6 +170,33 @@ pub struct ThemeColors {
     pub update_error_bg: Color32,
     pub update_success_text: Color32,
     pub update_error_text: Color32,
+
+    // ── 错误徽章 ──
+    pub error_badge_fill: Color32,
+    pub error_badge_stroke: Color32,
+    pub error_badge_text: Color32,
+
+    // ── 弹窗遮罩与卡片 ──
+    pub dialog_backdrop: Color32,
+    pub dialog_card_bg: Color32,
+    pub dialog_card_shadow: Color32,
+    pub dialog_card_border: Color32,
+    pub dialog_sql_block_bg: Color32,
+
+    // ── NULL 预览 ──
+    pub null_preview: Color32,
+
+    // ── Toast ──
+    pub toast_bg: Color32,
+    pub toast_text: Color32,
+
+    // ── 搜索匹配 ──
+    pub search_match_bg: Color32,
+    pub search_current_match_bg: Color32,
+    pub sidebar_search_match_fg: Color32,
+
+    // ── 右键菜单文字 ──
+    pub context_menu_fg: Color32,
 
     // ── egui 全局视觉 ──
     pub panel_fill: Color32,
@@ -185,6 +225,18 @@ pub struct ThemeColors {
     pub scrollbar_dormant_opacity: f32,
     pub scrollbar_active_opacity: f32,
     pub scrollbar_interact_opacity: f32,
+
+    // ── 圆角系统 ──
+    /// 2.0 — 最小圆角
+    pub radius_sm: f32,
+    /// 4.0 — 小组件
+    pub radius_md: f32,
+    /// 6.0 — 按钮/输入框
+    pub radius_lg: f32,
+    /// 10.0 — 弹窗/面板
+    pub radius_xl: f32,
+    /// 16.0 — 大弹窗
+    pub radius_xxl: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,6 +443,7 @@ impl Theme {
                 delete_button_bg: Color32::from_rgb(255, 69, 58),
                 delete_button_text: Color32::WHITE,
                 confirm_button_bg: Color32::from_rgb(0, 122, 255),
+                confirm_button_text: Color32::WHITE,
                 warning_icon: Color32::from_rgb(255, 140, 0),
                 context_menu_hover: Color32::from_rgb(50, 100, 170),
                 context_menu_active: Color32::from_rgb(40, 80, 140),
@@ -404,6 +457,33 @@ impl Theme {
                 update_error_bg: Color32::from_rgb(60, 32, 32),
                 update_success_text: Color32::from_rgb(80, 195, 120),
                 update_error_text: Color32::from_rgb(220, 80, 80),
+
+                // ── 错误徽章 ──
+                error_badge_fill: Color32::from_rgb(60, 35, 35),
+                error_badge_stroke: Color32::from_rgb(120, 50, 50),
+                error_badge_text: Color32::from_rgb(255, 140, 140),
+
+                // ── 弹窗遮罩与卡片 ──
+                dialog_backdrop: Color32::from_rgba_premultiplied(0, 0, 0, 120),
+                dialog_card_bg: Color32::from_rgb(40, 43, 50),
+                dialog_card_shadow: Color32::from_rgba_premultiplied(0, 0, 0, 80),
+                dialog_card_border: Color32::from_rgba_premultiplied(255, 255, 255, 25),
+                dialog_sql_block_bg: Color32::from_rgb(30, 33, 40),
+
+                // ── NULL 预览 ──
+                null_preview: Color32::from_rgba_premultiplied(255, 128, 128, 200),
+
+                // ── Toast ──
+                toast_bg: Color32::from_rgba_premultiplied(40, 40, 40, 220),
+                toast_text: Color32::WHITE,
+
+                // ── 搜索匹配 ──
+                search_match_bg: Color32::from_rgba_unmultiplied(255, 230, 0, 70),
+                search_current_match_bg: Color32::from_rgba_unmultiplied(255, 100, 0, 160),
+                sidebar_search_match_fg: Color32::from_rgb(255, 230, 0),
+
+                // ── 右键菜单文字 ──
+                context_menu_fg: Color32::WHITE,
 
                 // ── egui 全局视觉 ──
                 panel_fill: Color32::from_rgb(54, 54, 56),
@@ -430,6 +510,13 @@ impl Theme {
                 scrollbar_dormant_opacity: 0.0,
                 scrollbar_active_opacity: 0.55,
                 scrollbar_interact_opacity: 0.75,
+
+                // ── 圆角系统 ──
+                radius_sm: 2.0,
+                radius_md: 4.0,
+                radius_lg: 6.0,
+                radius_xl: 10.0,
+                radius_xxl: 16.0,
             },
         }
     }
@@ -543,6 +630,7 @@ impl Theme {
                 delete_button_bg: Color32::from_rgb(255, 59, 48),
                 delete_button_text: Color32::WHITE,
                 confirm_button_bg: Color32::from_rgb(0, 122, 255),
+                confirm_button_text: Color32::WHITE,
                 warning_icon: Color32::from_rgb(230, 130, 0),
                 context_menu_hover: Color32::from_rgb(65, 125, 200),
                 context_menu_active: Color32::from_rgb(50, 100, 170),
@@ -556,6 +644,33 @@ impl Theme {
                 update_error_bg: Color32::from_rgb(255, 225, 225),
                 update_success_text: Color32::from_rgb(30, 120, 60),
                 update_error_text: Color32::from_rgb(180, 50, 50),
+
+                // ── 错误徽章 ──
+                error_badge_fill: Color32::from_rgb(255, 235, 235),
+                error_badge_stroke: Color32::from_rgb(220, 100, 100),
+                error_badge_text: Color32::from_rgb(180, 30, 30),
+
+                // ── 弹窗遮罩与卡片 ──
+                dialog_backdrop: Color32::from_rgba_premultiplied(0, 0, 0, 60),
+                dialog_card_bg: Color32::from_rgb(252, 252, 252),
+                dialog_card_shadow: Color32::from_rgba_premultiplied(0, 0, 0, 25),
+                dialog_card_border: Color32::from_rgba_premultiplied(0, 0, 0, 20),
+                dialog_sql_block_bg: Color32::from_rgb(246, 248, 250),
+
+                // ── NULL 预览 ──
+                null_preview: Color32::from_rgba_premultiplied(255, 128, 128, 200),
+
+                // ── Toast ──
+                toast_bg: Color32::from_rgba_premultiplied(40, 40, 40, 220),
+                toast_text: Color32::WHITE,
+
+                // ── 搜索匹配 ──
+                search_match_bg: Color32::from_rgba_unmultiplied(255, 255, 0, 90),
+                search_current_match_bg: Color32::from_rgba_unmultiplied(255, 80, 0, 180),
+                sidebar_search_match_fg: Color32::from_rgb(200, 160, 0),
+
+                // ── 右键菜单文字 ──
+                context_menu_fg: Color32::WHITE,
 
                 // ── egui 全局视觉 ──
                 panel_fill: Color32::from_rgb(255, 255, 255),
@@ -582,6 +697,13 @@ impl Theme {
                 scrollbar_dormant_opacity: 0.0,
                 scrollbar_active_opacity: 0.50,
                 scrollbar_interact_opacity: 0.70,
+
+                // ── 圆角系统 ──
+                radius_sm: 2.0,
+                radius_md: 4.0,
+                radius_lg: 6.0,
+                radius_xl: 10.0,
+                radius_xxl: 16.0,
             },
         }
     }
