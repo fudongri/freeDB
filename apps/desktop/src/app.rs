@@ -134,6 +134,7 @@ pub struct DesktopApp {
     update_state: Option<UpdateState>,
     update_download_rx: Option<Receiver<UpdateEvent>>,
     update_dismissed: bool,
+    last_update_check: Option<Instant>,
     is_shortcuts_open: bool,
     is_log_window_open: bool,
     is_scroll_speed_open: bool,
@@ -1215,6 +1216,7 @@ impl DesktopApp {
             update_state: None,
             update_download_rx: None,
             update_dismissed: false,
+            last_update_check: None,
             is_shortcuts_open: false,
             is_log_window_open: false,
             is_scroll_speed_open: false,
@@ -1246,6 +1248,7 @@ impl DesktopApp {
                 let _ = tx.send(result);
             });
             app.pending_update_check = Some(rx);
+            app.last_update_check = Some(Instant::now());
         }
 
         app
@@ -2107,6 +2110,22 @@ impl DesktopApp {
                 Err(TryRecvError::Empty) => { self.pending_update_check = Some(receiver); }
                 Err(TryRecvError::Disconnected) => {}
             }
+        }
+
+        // 运行中定时检测新版本（每 30 分钟）
+        const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+        if self.pending_update_check.is_none()
+            && self.update_state.is_none()
+            && self.last_update_check.map_or(true, |t| t.elapsed() >= UPDATE_CHECK_INTERVAL)
+        {
+            let (tx, rx) = mpsc::channel();
+            let handle = self.runtime.handle().clone();
+            handle.spawn(async move {
+                let result = check_for_update().await;
+                let _ = tx.send(result);
+            });
+            self.pending_update_check = Some(rx);
+            self.last_update_check = Some(Instant::now());
         }
 
         // 轮询下载进度
