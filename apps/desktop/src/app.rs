@@ -12370,6 +12370,25 @@ impl eframe::App for DesktopApp {
                             }
                             self.native_menu_initialized = true;
                             tracing::info!("原生菜单栏初始化完成 (Windows)");
+                            // 菜单挂载后设置主题选中状态
+                            let active_id = if self.use_dark_theme {
+                                match self.dark_variant {
+                                    ui_theme::DarkVariant::Standard => "主题_深色",
+                                    ui_theme::DarkVariant::Cool => "主题_深色_冷调",
+                                    ui_theme::DarkVariant::Soft => "主题_深色_柔和",
+                                    ui_theme::DarkVariant::Warm => "主题_深色_暖调",
+                                    ui_theme::DarkVariant::Layered => "主题_深色_层次",
+                                }
+                            } else {
+                                match self.light_variant {
+                                    ui_theme::LightVariant::Standard => "主题_浅色",
+                                    ui_theme::LightVariant::Warm => "主题_浅色_暖调",
+                                    ui_theme::LightVariant::Cool => "主题_浅色_冷调",
+                                    ui_theme::LightVariant::EyeCare => "主题_浅色_护眼",
+                                    ui_theme::LightVariant::SoftGray => "主题_浅色_柔灰",
+                                }
+                            };
+                            self.set_active_theme_menu(active_id);
                         }
                     }
                 }
