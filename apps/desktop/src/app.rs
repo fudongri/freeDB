@@ -5601,6 +5601,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 if let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) {
                     tab.editing_cell = None;
                     tab.pending_cell_changes.clear();
+                    // 清除矩形选区状态，防止 sync_cell_selection_to_pending 重新填充变更
+                    tab.cell_selection_anchor = None;
+                    tab.cell_selection_current = None;
+                    tab.cell_selection_typing = false;
+                    tab.cell_selection_input.clear();
+                    tab.cell_selection_is_null = false;
+                    tab.cell_selection_drag_started = false;
                     self.refresh_active_table_preview(false);
                 }
             }
