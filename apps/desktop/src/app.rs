@@ -12291,6 +12291,16 @@ fn apply_update_and_restart(exe_path: &std::path::Path) -> Result<(), String> {
         s.as_ref().encode_wide().chain(std::iter::once(0)).collect()
     }
 
+    // 去除 Zone.Identifier（Mark of the Web），防止 Windows SmartScreen 静默拦截安装器
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!(
+            "Unblock-File -Path '{}'; Remove-Item -Path '{}:Zone.Identifier' -ErrorAction SilentlyContinue",
+            exe_path.display(), exe_path.display()
+        )])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
     let file_w = to_wide(exe_path);
     let verb_w = to_wide("runas");
     let params_w = if is_nsis_install() {
