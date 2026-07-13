@@ -19838,7 +19838,7 @@ fn render_index_table(
                                 let r = egui::Rect::from_center_size(center, egui::vec2(60.0, 20.0));
                                 let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
                                 child.label(
-                                    RichText::new(&idx.index_type).size(palette.fonts.xs).color(palette.weak_text),
+                                    RichText::new(&idx.index_type).size(palette.fonts.xs),
                                 );
                                 index_cell_double_click_copy(ui, rect, &idx.index_type);
                             });
@@ -19850,9 +19850,7 @@ fn render_index_table(
                                 child.add_space(4.0);
                                 let cols_text = idx.columns.join(", ");
                                 child.label(
-                                    RichText::new(&cols_text)
-                                        .size(palette.fonts.base)
-                                        .color(palette.weak_text),
+                                    RichText::new(&cols_text).size(palette.fonts.base),
                                 );
                                 index_cell_double_click_copy(ui, rect, &cols_text);
                             });
@@ -19863,7 +19861,7 @@ fn render_index_table(
                                 let content_rect = rect.shrink2(egui::vec2(4.0, 0.0));
                                 let mut child = ui.child_ui(content_rect, egui::Layout::left_to_right(egui::Align::Center), None);
                                 child.label(
-                                    RichText::new(tr!("已有")).size(palette.fonts.xs).color(palette.weak_text),
+                                    RichText::new(tr!("已有")).size(palette.fonts.xs),
                                 );
                                 index_cell_double_click_copy(ui, rect, tr!("已有"));
                             });
