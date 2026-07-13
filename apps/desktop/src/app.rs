@@ -119,6 +119,7 @@ pub struct DesktopApp {
     schema_cache: SchemaCache,
     cache_loaded_connections: HashSet<String>,
     connection_test_result: Option<(bool, String)>,
+    pending_test_connection: Option<Receiver<(bool, String)>>,
     loading_connections: HashSet<String>,
     loading_nodes: HashSet<String>,
     pending_node_children: Vec<Receiver<NodeChildrenResult>>,
@@ -1198,6 +1199,7 @@ impl DesktopApp {
             schema_cache: SchemaCache::new(),
             cache_loaded_connections: HashSet::new(),
             connection_test_result: None,
+            pending_test_connection: None,
             pending_database_list: None,
             loading_connections: HashSet::new(),
             loading_nodes: HashSet::new(),
@@ -3396,11 +3398,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn test_connection_form(&mut self) {
         let input = self.connection_form.to_input();
-        let result = match self.runtime.block_on(self.services.test_connection(input)) {
-            Ok(_) => (true, tr!("连接测试成功").into()),
-            Err(error) => (false, tr!("连接测试失败: {}", error)),
-        };
-        self.connection_test_result = Some(result);
+        let services = self.services.clone();
+        let handle = self.runtime.handle().clone();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_test_connection = Some(receiver);
+        handle.spawn(async move {
+            let result = match services.test_connection(input).await {
+                Ok(_) => (true, tr!("连接测试成功").into()),
+                Err(error) => (false, tr!("连接测试失败: {}", error)),
+            };
+            let _ = sender.send(result);
+        });
     }
 
     fn save_connection_form(&mut self) {
@@ -10070,6 +10078,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
 
                 ui.add_space(12.0);
+                if let Some(rx) = self.pending_test_connection.take() {
+                    match rx.try_recv() {
+                        Ok(result) => {
+                            self.connection_test_result = Some(result);
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            self.pending_test_connection = Some(rx);
+                            ui.spinner();
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+                    }
+                }
                 if let Some((success, msg)) = &self.connection_test_result {
                     let ui_palette = MacUiPalette::from(&self.theme);
                     let color = if *success {
@@ -10095,6 +10115,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if should_close || !self.is_connection_dialog_open {
             self.is_connection_dialog_open = false;
             self.connection_test_result = None;
+            self.pending_test_connection = None;
         }
     }
 
