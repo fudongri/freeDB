@@ -3830,12 +3830,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.editing_connection_id = None;
                 self.connection_form = ConnectionFormState::default();
             }
-            if toolbar_button(ui, tr!("新建查询"), primary_button_style(&self.theme.colors, self.theme.fonts.md))
-                .on_hover_text(tr!("新建查询 ({}+D)", MOD_KEY))
-                .clicked()
-            {
-                self.new_query_from_selected_node();
-            }
             ui.separator();
             // "文件" 菜单：macOS/Windows 使用原生菜单栏，Linux 使用 egui
             if cfg!(not(any(target_os = "macos", target_os = "windows"))) {
@@ -3922,6 +3916,64 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut pending_actions = Vec::new();
         ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         ui.spacing_mut().item_spacing = egui::vec2(2.0, 3.0);
+        let title_btn_h = 18.0;
+        let title_btn_cr = egui::CornerRadius::same(self.theme.colors.radius_md as u8);
+        let title_btn_y = 9.0;
+        let sidebar_w = ui.available_width();
+        // 从右往左计算各按钮 x 坐标
+        let has_update = self.update_state.is_some() && !self.update_dismissed;
+        let mut cursor_x = sidebar_w - 10.0; // 右侧起始
+        // 更新 badge 宽度预留
+        if has_update {
+            cursor_x -= 100.0;
+        }
+        // 新建查询按钮（透明背景 + 描边，与 mini_button 一致）
+        let nq_label = tr!("新建查询");
+        let nq_style = mini_primary_style(&self.theme.colors, self.theme.fonts.sm);
+        let nq_font = FontId::new(nq_style.font_size, FontFamily::Proportional);
+        let nq_galley = ui.fonts_mut(|f| f.layout(nq_label.to_string(), nq_font.clone(), nq_style.text, f32::INFINITY));
+        let nq_w = (nq_galley.rect.width() + 14.0).max(nq_style.min_width);
+        cursor_x -= nq_w;
+        let nq_rect = egui::Rect::from_min_size(egui::pos2(cursor_x, title_btn_y), Vec2::new(nq_w, title_btn_h));
+        let nq_resp = ui.allocate_rect(nq_rect, egui::Sense::click());
+        let nq_fill = if nq_resp.hovered() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            nq_style.stroke.color.linear_multiply(0.15)
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(nq_rect, title_btn_cr, nq_fill);
+        ui.painter().rect_stroke(nq_rect, title_btn_cr, nq_style.stroke, egui::StrokeKind::Outside);
+        ui.painter().text(nq_rect.center(), Align2::CENTER_CENTER, nq_label, nq_font, nq_style.text);
+        if nq_resp.clicked() {
+            self.new_query_from_selected_node();
+        }
+        // 仅活跃按钮
+        cursor_x -= 10.0;
+        let ao_label = tr!("仅活跃");
+        let ao_style = if self.sidebar_active_only {
+            mini_accent_active_style(&self.theme.colors, self.theme.fonts.sm)
+        } else {
+            mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)
+        };
+        let ao_font = FontId::new(ao_style.font_size, FontFamily::Proportional);
+        let ao_galley = ui.fonts_mut(|f| f.layout(ao_label.to_string(), ao_font.clone(), ao_style.text, f32::INFINITY));
+        let ao_w = (ao_galley.rect.width() + 14.0).max(ao_style.min_width);
+        cursor_x -= ao_w;
+        let ao_rect = egui::Rect::from_min_size(egui::pos2(cursor_x, title_btn_y), Vec2::new(ao_w, title_btn_h));
+        let ao_resp = ui.allocate_rect(ao_rect, egui::Sense::click());
+        let ao_fill = if ao_resp.hovered() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            ao_style.stroke.color.linear_multiply(0.15)
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(ao_rect, title_btn_cr, ao_fill);
+        ui.painter().rect_stroke(ao_rect, title_btn_cr, ao_style.stroke, egui::StrokeKind::Outside);
+        ui.painter().text(ao_rect.center(), Align2::CENTER_CENTER, ao_label, ao_font, ao_style.text);
+        if ao_resp.clicked() {
+            self.sidebar_active_only = !self.sidebar_active_only;
+        }
         // 更新 badge — 标题栏区域（交通灯同一排），绝对定位
         if let Some(ref state) = self.update_state {
             if !self.update_dismissed {
@@ -4024,28 +4076,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
             }
         }
-        ui.add_space(8.0); // 与交通灯保持间距
-        // 按钮行
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(10.0); // 右侧间距与搜索框 outer_margin 对齐
-                if mini_button(ui, tr!("新建查询"), mini_primary_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
-                    self.new_query_from_selected_node();
-                }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add_space(10.0); // 左侧间距与搜索框 outer_margin 对齐
-                    let style = if self.sidebar_active_only {
-                        mini_accent_active_style(&self.theme.colors, self.theme.fonts.sm)
-                    } else {
-                        mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)
-                    };
-                    if mini_button(ui, tr!("仅活跃"), style).clicked() {
-                        self.sidebar_active_only = !self.sidebar_active_only;
-                    }
-                });
-            });
-        });
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         egui::Frame::new()
             .fill(palette.search_bg)
             .stroke(Stroke::NONE)
