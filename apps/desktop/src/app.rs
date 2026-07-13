@@ -9972,12 +9972,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.add_space(14.0);
                     ui.small(RichText::new(tr!("配置数据库连接信息")).color(palette.subtitle));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(tr!("关闭")).size(self.theme.fonts.base).color(palette.subtitle))
-                                    .fill(Color32::TRANSPARENT)
-                                    .stroke(Stroke::NONE),
-                            )
+                        if mini_button(ui, tr!("关闭"), mini_hide_style(&self.theme.colors, self.theme.fonts.sm))
                             .clicked()
                         {
                             should_close = true;
@@ -9987,59 +9982,54 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ui.add_space(10.0);
 
                 egui::Frame::new()
-                    .fill(palette.section_bg)
-                    .stroke(Stroke::new(1.0, palette.section_border))
-                    .corner_radius(self.theme.colors.radius_xl)
                     .inner_margin(egui::Margin::symmetric(18, 16))
                     .show(ui, |ui| {
+                        let prev_inactive = ui.style().visuals.widgets.inactive.bg_stroke;
+                        let prev_non_bg = ui.style().visuals.widgets.noninteractive.bg_fill;
+                        let prev_non_stroke = ui.style().visuals.widgets.noninteractive.bg_stroke;
+                        ui.style_mut().visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
+                        ui.style_mut().visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
                         egui::Grid::new("connection-form-grid")
                             .num_columns(2)
                             .spacing([16.0, 12.0])
                             .min_col_width(108.0)
                             .show(ui, |ui| {
                                 form_grid_row(ui, tr!("数据库"), |ui| {
-                                    egui::ComboBox::from_id_salt("db-kind")
-                                        .selected_text(match self.connection_form.kind {
-                                            DatabaseKind::MySql => "MySQL",
-                                            DatabaseKind::Postgres => "PostgreSQL",
-                                            DatabaseKind::MongoDb => "MongoDB",
-                                        })
-                                        .width(380.0)
-                                        .show_ui(ui, |ui| {
-                                            if ui
-                                                .selectable_label(
-                                                    matches!(self.connection_form.kind, DatabaseKind::MySql),
-                                                    "MySQL",
-                                                )
-                                                .clicked()
-                                            {
+                                    let kind_label = match self.connection_form.kind {
+                                        DatabaseKind::MySql => "MySQL",
+                                        DatabaseKind::Postgres => "PostgreSQL",
+                                        DatabaseKind::MongoDb => "MongoDB",
+                                    };
+                                    let kind_items = [
+                                        ("MySQL", matches!(self.connection_form.kind, DatabaseKind::MySql)),
+                                        ("PostgreSQL", matches!(self.connection_form.kind, DatabaseKind::Postgres)),
+                                        ("MongoDB", matches!(self.connection_form.kind, DatabaseKind::MongoDb)),
+                                    ];
+                                    if let Some(sel) = toolbar_dropdown(
+                                        ui,
+                                        egui::Id::new("connection-db-kind"),
+                                        kind_label,
+                                        380.0,
+                                        &kind_items,
+                                    ) {
+                                        match sel {
+                                            0 => {
                                                 self.connection_form.kind = DatabaseKind::MySql;
                                                 self.connection_form.port = 3306;
                                                 self.connection_form.direct_connection = false;
                                             }
-                                            if ui
-                                                .selectable_label(
-                                                    matches!(self.connection_form.kind, DatabaseKind::Postgres),
-                                                    "PostgreSQL",
-                                                )
-                                                .clicked()
-                                            {
+                                            1 => {
                                                 self.connection_form.kind = DatabaseKind::Postgres;
                                                 self.connection_form.port = 5432;
                                                 self.connection_form.direct_connection = false;
                                             }
-                                            if ui
-                                                .selectable_label(
-                                                    matches!(self.connection_form.kind, DatabaseKind::MongoDb),
-                                                    "MongoDB",
-                                                )
-                                                .clicked()
-                                            {
+                                            _ => {
                                                 self.connection_form.kind = DatabaseKind::MongoDb;
                                                 self.connection_form.port = 27017;
                                                 self.connection_form.direct_connection = true;
                                             }
-                                        });
+                                        }
+                                    }
                                 });
                                 form_row(ui, tr!("名称"), &mut self.connection_form.name);
                                 form_row(ui, tr!("主机"), &mut self.connection_form.host);
@@ -10053,32 +10043,34 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 });
                                 form_row(ui, tr!("默认数据库"), &mut self.connection_form.default_database);
                                 form_grid_row(ui, "SSL", |ui| {
-                                    egui::ComboBox::from_id_salt("ssl-mode")
-                                        .selected_text(match self.connection_form.ssl_mode {
-                                            SslMode::Disable => "Disable",
-                                            SslMode::Prefer => "Prefer",
-                                            SslMode::Require => "Require",
-                                        })
-                                        .width(140.0)
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(
-                                                &mut self.connection_form.ssl_mode,
-                                                SslMode::Disable,
-                                                "Disable",
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.connection_form.ssl_mode,
-                                                SslMode::Prefer,
-                                                "Prefer",
-                                            );
-                                            ui.selectable_value(
-                                                &mut self.connection_form.ssl_mode,
-                                                SslMode::Require,
-                                                "Require",
-                                            );
-                                        });
+                                    let ssl_label = match self.connection_form.ssl_mode {
+                                        SslMode::Disable => "Disable",
+                                        SslMode::Prefer => "Prefer",
+                                        SslMode::Require => "Require",
+                                    };
+                                    let ssl_items = [
+                                        ("Disable", self.connection_form.ssl_mode == SslMode::Disable),
+                                        ("Prefer", self.connection_form.ssl_mode == SslMode::Prefer),
+                                        ("Require", self.connection_form.ssl_mode == SslMode::Require),
+                                    ];
+                                    if let Some(sel) = toolbar_dropdown(
+                                        ui,
+                                        egui::Id::new("connection-ssl-mode"),
+                                        ssl_label,
+                                        140.0,
+                                        &ssl_items,
+                                    ) {
+                                        self.connection_form.ssl_mode = match sel {
+                                            0 => SslMode::Disable,
+                                            1 => SslMode::Prefer,
+                                            _ => SslMode::Require,
+                                        };
+                                    }
                                 });
                             });
+                        ui.style_mut().visuals.widgets.inactive.bg_stroke = prev_inactive;
+                        ui.style_mut().visuals.widgets.noninteractive.bg_fill = prev_non_bg;
+                        ui.style_mut().visuals.widgets.noninteractive.bg_stroke = prev_non_stroke;
                     });
 
                 ui.add_space(8.0);
@@ -10132,11 +10124,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if dialog_button(ui, tr!("保存连接"), true, &self.theme.colors, &self.theme.fonts).clicked() {
+                        if mini_button(ui, tr!("保存连接"), mini_primary_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                             self.save_connection_form();
                         }
                         ui.add_space(8.0);
-                        if dialog_button(ui, tr!("测试连接"), false, &self.theme.colors, &self.theme.fonts).clicked() {
+                        if mini_button(ui, tr!("测试连接"), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                             self.test_connection_form();
                         }
                     });
@@ -22908,29 +22900,33 @@ fn app_style(base_style: &egui::Style, dark_variant: ui_theme::DarkVariant, ligh
 
 fn apply_mac_dialog_style(ui: &mut egui::Ui, palette: MacDialogPalette) {
     let style = ui.style_mut();
-    let primary = palette.primary_button_bg;
-    style.visuals.override_text_color = Some(palette.text);
+    let accent = palette.primary_button_stroke;
     style.visuals.extreme_bg_color = palette.input_bg;
     style.visuals.faint_bg_color = palette.section_bg;
     style.visuals.code_bg_color = palette.input_bg;
-    style.visuals.selection.bg_fill = Color32::from_rgba_premultiplied(primary.r(), primary.g(), primary.b(), 80);
-    style.visuals.selection.stroke = Stroke::new(1.0, primary);
+    style.visuals.selection.bg_fill = Color32::from_rgba_premultiplied(accent.r(), accent.g(), accent.b(), 220);
+    style.visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
 
     style.visuals.widgets.noninteractive.bg_fill = palette.section_bg;
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.section_border);
-    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, palette.weak_text);
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, palette.text);
     style.visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
     style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.input_border);
     style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, palette.text);
     style.visuals.widgets.hovered.bg_fill = Color32::TRANSPARENT;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, primary);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, accent);
     style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, palette.text);
     style.visuals.widgets.active.bg_fill = Color32::TRANSPARENT;
-    style.visuals.widgets.active.bg_stroke = Stroke::new(1.2, primary);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.2, accent);
     style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, palette.text);
     style.visuals.widgets.open.bg_fill = Color32::TRANSPARENT;
     style.visuals.widgets.open.bg_stroke = Stroke::new(1.0, palette.input_border);
     style.visuals.widgets.open.fg_stroke = Stroke::new(1.0, palette.text);
+    let cr = egui::CornerRadius::same(6);
+    style.visuals.widgets.inactive.corner_radius = cr;
+    style.visuals.widgets.hovered.corner_radius = cr;
+    style.visuals.widgets.active.corner_radius = cr;
+    style.visuals.widgets.open.corner_radius = cr;
 }
 
 fn dialog_button(ui: &mut egui::Ui, label: &str, primary: bool, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> egui::Response {
@@ -23728,7 +23724,7 @@ fn toolbar_dropdown(
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, palette.secondary_button_stroke))
             .corner_radius(palette.radius_lg)
-            .min_size(Vec2::new(width, 22.0)),
+            .min_size(Vec2::new(width, 30.0)),
     );
 
     let is_open = ui.data_mut(|d| d.get_temp::<bool>(id).unwrap_or(false));
