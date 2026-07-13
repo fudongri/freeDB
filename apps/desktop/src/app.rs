@@ -14717,7 +14717,6 @@ fn render_result_table(
                                     column_right_edges.push(cell_rect.right() - 1.0);
                                     if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) { is_hovering_header = true; hovered_header_col_idx = Some(col_idx + 1); }
                                     let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
-                                    let is_selected = selected_columns.contains(&col_idx);
                                     let has_column_values = !result.rows.is_empty();
                                     let (sort_choice, clicked, cell_dragged, copy_action) = table_header_cell(
                                         ui,
@@ -14725,7 +14724,7 @@ fn render_result_table(
                                         column,
                                         true,
                                         sort_indicator(sort_state, column),
-                                        is_selected,
+                                        false,
                                         is_dragged,
                                         None,
                                         has_column_values,
@@ -15359,7 +15358,6 @@ fn render_editable_result_table(
                                 header.col(|ui| {
                                     let cell_rect = ui.max_rect();
                                     let is_dragged = column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
-                                    let is_selected = selected_columns.contains(&col_idx);
                                     let col_data_type = edit.definition.as_ref()
                                         .and_then(|d| d.columns.iter().find(|c| c.name == *column))
                                         .map(|c| c.data_type.clone());
@@ -15370,7 +15368,7 @@ fn render_editable_result_table(
                                         column,
                                         true,
                                         sort_indicator(sort_state, column),
-                                        is_selected,
+                                        false,
                                         is_dragged,
                                         col_data_type.as_deref(),
                                         has_column_values,
@@ -16387,7 +16385,6 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 header.col(|ui| {
                                     let cell_rect = ui.max_rect();
                                     column_right_edges.push(cell_rect.right() - 1.0);
-                                    let is_selected = tab.selected_columns.contains(&col_idx);
                                     let is_dragged = tab.column_drag.as_ref().map_or(false, |d| d.source_index == col_idx);
                                     let col_data_type = tab.definition.as_ref()
                                         .and_then(|d| d.columns.iter().find(|c| c.name == *column))
@@ -16400,7 +16397,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         column,
                                         true,
                                         sort_indicator(&tab.preview_sort, column),
-                                        is_selected,
+                                        false,
                                         is_dragged,
                                         col_data_type.as_deref(),
                                         has_column_values,
