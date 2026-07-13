@@ -112,6 +112,18 @@ impl SessionManager {
         self.pool.start_keepalive();
     }
 
+    /// 预热连接池：后台建立一个额外连接，供并发操作复用，避免首次打开表时两个查询争抢同一个连接。
+    pub async fn prewarm_connection(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        database: Option<&str>,
+    ) {
+        if let Err(e) = self.pool.prewarm(profile, password, database).await {
+            tracing::warn!(connection_id = %profile.id, error = %e, "连接池预热失败（不影响正常使用）");
+        }
+    }
+
     fn driver(&self, kind: DatabaseKind) -> &dyn DatabaseDriver {
         match kind {
             DatabaseKind::MySql => &self.pool.mysql,

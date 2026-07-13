@@ -151,6 +151,29 @@ impl ConnectionPool {
         self.entries.lock().unwrap().clear();
     }
 
+    /// 预热连接池：建立一个新连接并放入池中，供后续并发操作复用。
+    pub async fn prewarm(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        database: Option<&str>,
+    ) -> AppResult<()> {
+        let effective_db = if matches!(profile.kind, DatabaseKind::Postgres) {
+            profile.default_database.as_deref()
+        } else {
+            database
+        };
+        let key = pool_key(&profile.id, profile.kind, effective_db);
+        let count = self.entries.lock().unwrap().get(&key).map_or(0, |v| v.len());
+        if count >= 2 {
+            return Ok(());
+        }
+        tracing::info!(key = %key, "预热连接池");
+        let conn = self.provider(profile.kind).connect(profile, password, effective_db).await?;
+        self.push(&key, Arc::new(AsyncMutex::new(conn)));
+        Ok(())
+    }
+
     pub fn start_keepalive(self: &Arc<Self>) {
         if tokio::runtime::Handle::try_current().is_ok() {
             let pool = Arc::downgrade(self);

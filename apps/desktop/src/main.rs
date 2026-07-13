@@ -174,9 +174,17 @@ fn configure_fonts(ctx: &egui::Context) {
             "/System/Library/Fonts/Hiragino Sans GB.ttc",
             "/System/Library/Fonts/STHeiti Medium.ttc",
         ];
+        // 并行尝试加载系统 CJK 字体，减少阻塞 UI 线程的时间
+        let handles: Vec<_> = platform_fonts
+            .iter()
+            .map(|p| {
+                let path = p.to_string();
+                std::thread::spawn(move || std::fs::read(&path).ok())
+            })
+            .collect();
         let mut found = false;
-        for path in platform_fonts {
-            if let Ok(bytes) = std::fs::read(path) {
+        for h in handles {
+            if let Ok(Some(bytes)) = h.join() {
                 fonts
                     .font_data
                     .insert("system-cjk".into(), FontData::from_owned(bytes).into());
@@ -204,15 +212,24 @@ fn configure_fonts(ctx: &egui::Context) {
 
     // ---- Windows ----
     else if cfg!(target_os = "windows") {
-        // CJK font for Chinese text
+        // CJK 字体和 Symbol 字体并行加载，减少阻塞 UI 线程时间（更新后磁盘缓存冷，msyh.ttc 约 22MB）
         let cjk_fonts = &[
             "C:\\Windows\\Fonts\\msyh.ttc",   // Microsoft YaHei 微软雅黑 (Win10+)
             "C:\\Windows\\Fonts\\simhei.ttf", // SimHei 黑体 (legacy)
             "C:\\Windows\\Fonts\\simsun.ttc", // SimSun 宋体 (legacy)
         ];
+        let cjk_handles: Vec<_> = cjk_fonts
+            .iter()
+            .map(|p| {
+                let path = p.to_string();
+                std::thread::spawn(move || std::fs::read(&path).ok())
+            })
+            .collect();
+        let symbol_handle = std::thread::spawn(|| std::fs::read("C:\\Windows\\Fonts\\seguisym.ttf").ok());
+
         let mut cjk_found = false;
-        for path in cjk_fonts {
-            if let Ok(bytes) = std::fs::read(path) {
+        for h in cjk_handles {
+            if let Ok(Some(bytes)) = h.join() {
                 fonts
                     .font_data
                     .insert("system-cjk".into(), FontData::from_owned(bytes).into());
@@ -234,7 +251,7 @@ fn configure_fonts(ctx: &egui::Context) {
             .families
             .entry(FontFamily::Proportional)
             .or_default();
-        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\seguisym.ttf") {
+        if let Ok(Some(bytes)) = symbol_handle.join() {
             fonts
                 .font_data
                 .insert("system-symbol".into(), FontData::from_owned(bytes).into());
@@ -256,9 +273,16 @@ fn configure_fonts(ctx: &egui::Context) {
             "/usr/share/fonts/cjk/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
         ];
+        let handles: Vec<_> = platform_fonts
+            .iter()
+            .map(|p| {
+                let path = p.to_string();
+                std::thread::spawn(move || std::fs::read(&path).ok())
+            })
+            .collect();
         let mut found = false;
-        for path in platform_fonts {
-            if let Ok(bytes) = std::fs::read(path) {
+        for h in handles {
+            if let Ok(Some(bytes)) = h.join() {
                 fonts
                     .font_data
                     .insert("system-cjk".into(), FontData::from_owned(bytes).into());

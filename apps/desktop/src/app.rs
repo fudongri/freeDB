@@ -1397,6 +1397,8 @@ impl DesktopApp {
                 connection_id: connection_id.clone(),
                 result,
             });
+            // 预热连接池：建立一个额外连接，避免首次打开表时两个并发查询争抢同一个连接
+            let _ = services.prewarm_connection(&connection_id).await;
         });
     }
 

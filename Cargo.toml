@@ -62,3 +62,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 urlencoding = "2.1"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 winres = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

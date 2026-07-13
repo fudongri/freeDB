@@ -621,6 +621,15 @@ impl AppServices {
         self.session_manager.start_keepalive();
     }
 
+    /// 预热连接池：后台建立一个额外连接，供并发操作复用。
+    pub async fn prewarm_connection(&self, connection_id: &str) -> Result<()> {
+        let profile = self.require_connection(connection_id)?;
+        let password = self.require_saved_password(connection_id)?;
+        let db = profile.default_database.clone();
+        self.session_manager.prewarm_connection(&profile, &password, db.as_deref()).await;
+        Ok(())
+    }
+
     pub fn connection_status(&self, connection_id: &str) -> SessionStatus {
         self.session_manager.connection_status(connection_id)
     }
