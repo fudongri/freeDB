@@ -23743,7 +23743,7 @@ fn toolbar_dropdown(
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, palette.secondary_button_stroke))
             .corner_radius(palette.radius_lg)
-            .min_size(Vec2::new(width, 30.0)),
+            .min_size(Vec2::new(width, 22.0)),
     );
 
     let is_open = ui.data_mut(|d| d.get_temp::<bool>(id).unwrap_or(false));
