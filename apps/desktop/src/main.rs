@@ -77,7 +77,7 @@ fn main() -> eframe::Result<()> {
         }
 
         let mi_new_conn = muda::MenuItem::with_id("新建连接", &tr!("新建连接"), true, None::<muda::accelerator::Accelerator>);
-        let mi_new_query = muda::MenuItem::with_id("新建查询", &tr!("新建查询"), true, Some(muda::accelerator::Accelerator::new(Some(muda::accelerator::Modifiers::SUPER), muda::accelerator::Code::KeyD)));
+        let mi_new_query = muda::MenuItem::with_id("新建查询", &tr!("新建查询"), true, Some(muda::accelerator::Accelerator::new(Some(muda::accelerator::CMD_OR_CTRL), muda::accelerator::Code::KeyD)));
         let mi_import = muda::MenuItem::with_id("导入配置", &tr!("导入配置"), true, None::<muda::accelerator::Accelerator>);
         let mi_export = muda::MenuItem::with_id("导出配置", &tr!("导出配置"), true, None::<muda::accelerator::Accelerator>);
 
@@ -95,8 +95,8 @@ fn main() -> eframe::Result<()> {
         .unwrap();
         menu.append(&file_menu).unwrap();
 
-        let mi_tab_back = muda::MenuItem::with_id("标签页后退", &tr!("标签页后退"), true, Some(muda::accelerator::Accelerator::new(Some(muda::accelerator::Modifiers::SUPER), muda::accelerator::Code::BracketLeft)));
-        let mi_tab_forward = muda::MenuItem::with_id("标签页前进", &tr!("标签页前进"), true, Some(muda::accelerator::Accelerator::new(Some(muda::accelerator::Modifiers::SUPER), muda::accelerator::Code::BracketRight)));
+        let mi_tab_back = muda::MenuItem::with_id("标签页后退", &tr!("标签页后退"), true, Some(muda::accelerator::Accelerator::new(Some(muda::accelerator::CMD_OR_CTRL), muda::accelerator::Code::BracketLeft)));
+        let mi_tab_forward = muda::MenuItem::with_id("标签页前进", &tr!("标签页前进"), true, Some(muda::accelerator::Accelerator::new(Some(muda::accelerator::CMD_OR_CTRL), muda::accelerator::Code::BracketRight)));
         let mi_shortcuts = muda::MenuItem::with_id("快捷键速查表", &tr!("快捷键速查表"), true, None::<muda::accelerator::Accelerator>);
         let mi_log = muda::MenuItem::with_id("运行日志", &tr!("运行日志"), true, None::<muda::accelerator::Accelerator>);
         let lang_label = if locale == Locale::En { "中文" } else { "English" };
