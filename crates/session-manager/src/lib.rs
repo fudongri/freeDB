@@ -397,6 +397,26 @@ impl SessionManager {
         with_pool!(self, profile, password, Some(database), h, d => d.rename_table(h, database, schema, old_name, new_name))
     }
 
+    pub async fn load_tables_summary(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        database: &str,
+        schema: Option<&str>,
+    ) -> AppResult<Vec<driver_api::TableSummary>> {
+        with_pool!(self, profile, password, Some(database), h, d => d.load_tables_summary(h, database, schema))
+    }
+
+    pub async fn load_collection_stats(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        database: &str,
+        collection: &str,
+    ) -> AppResult<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>> {
+        with_pool!(self, profile, password, Some(database), h, d => d.load_collection_stats(h, database, collection))
+    }
+
     // ── 连接生命周期 ──
 
     pub fn disconnect_connection(&self, connection_id: &str) {

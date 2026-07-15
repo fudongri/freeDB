@@ -17,6 +17,7 @@ app-services = { path = "../../crates/app-services" }
 arboard = "3"
 chrono.workspace = true
 core-domain = { path = "../../crates/core-domain" }
+driver-api = { path = "../../crates/driver-api" }
 eframe.workspace = true
 futures-util = "0.3"
 egui.workspace = true

@@ -351,6 +351,103 @@ impl DatabaseDriver for MySqlDriver {
         );
         query_rows(conn, &sql).await
     }
+
+    async fn load_tables_summary(
+        &self,
+        handle: &mut ConnectionHandle,
+        database: &str,
+        _schema: Option<&str>,
+    ) -> AppResult<Vec<driver_api::TableSummary>> {
+        let conn = mysql_conn_mut(handle)?;
+        conn.query_drop(format!("USE {}", quote_mysql(database)))
+            .await
+            .map_err(map_mysql_error)?;
+
+        // SHOW TABLE STATUS 获取表元数据
+        let sql = format!("SHOW TABLE STATUS FROM {}", quote_mysql(database));
+        let rows: Vec<Row> = conn.query(sql).await.map_err(map_mysql_error)?;
+        let mut summaries: Vec<driver_api::TableSummary> = rows
+            .into_iter()
+            .map(|row| {
+                let name: String = row.get::<String, _>(0).unwrap_or_default();
+                let engine: Option<String> = row.get(1);
+                let rows_est: Option<i64> = row.get(4);
+                let data_len: Option<i64> = row.get(6);
+                let index_len: Option<i64> = row.get(8);
+                let collation: Option<String> = row.get(14);
+                let comment: Option<String> = row.get(17);
+                let create_time: Option<String> = row
+                    .get::<Option<mysql_async::Value>, _>(11)
+                    .flatten()
+                    .and_then(|v| match v {
+                        mysql_async::Value::Bytes(b) => Some(String::from_utf8_lossy(&b).to_string()),
+                        mysql_async::Value::Date(y, m, d, hh, mm, ss, _) => {
+                            Some(format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}"))
+                        }
+                        _ => None,
+                    });
+
+                let total = match (data_len, index_len) {
+                    (Some(d), Some(i)) => Some(d + i),
+                    (Some(d), None) => Some(d),
+                    (None, Some(i)) => Some(i),
+                    _ => None,
+                };
+
+                driver_api::TableSummary {
+                    name,
+                    table_type: "TABLE".into(),
+                    row_count: rows_est,
+                    total_size: total,
+                    data_size: data_len,
+                    index_size: index_len,
+                    engine,
+                    collation,
+                    primary_keys: Vec::new(),
+                    comment: comment.filter(|c| !c.is_empty()),
+                    create_time: create_time.filter(|c| !c.is_empty()),
+                }
+            })
+            .collect();
+
+        // 查询主键列
+        let pk_sql = format!(
+            "SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{}' AND COLUMN_KEY = 'PRI' ORDER BY ORDINAL_POSITION",
+            escape_mysql_literal(database),
+        );
+        let pk_rows: Vec<Row> = conn.query(pk_sql).await.map_err(map_mysql_error)?;
+        let mut pk_map: HashMap<String, Vec<String>> = HashMap::new();
+        for row in pk_rows {
+            let tbl: String = row.get::<String, _>(0).unwrap_or_default();
+            let col: String = row.get::<String, _>(1).unwrap_or_default();
+            pk_map.entry(tbl).or_default().push(col);
+        }
+        // 同时更新 table_type（检测 VIEW）
+        let type_sql = format!(
+            "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{}'",
+            escape_mysql_literal(database),
+        );
+        let type_rows: Vec<Row> = conn.query(type_sql).await.map_err(map_mysql_error)?;
+        let mut type_map: HashMap<String, String> = HashMap::new();
+        for row in type_rows {
+            let tbl: String = row.get::<String, _>(0).unwrap_or_default();
+            let ttype: String = row.get::<String, _>(1).unwrap_or_default();
+            type_map.insert(tbl, ttype);
+        }
+
+        for s in &mut summaries {
+            if let Some(pks) = pk_map.remove(&s.name) {
+                s.primary_keys = pks;
+            }
+            if let Some(ttype) = type_map.get(&s.name) {
+                if ttype.contains("VIEW") {
+                    s.table_type = "VIEW".into();
+                }
+            }
+        }
+
+        Ok(summaries)
+    }
 }
 
 // ── helpers ──

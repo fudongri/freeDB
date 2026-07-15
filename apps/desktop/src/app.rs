@@ -111,6 +111,7 @@ pub struct DesktopApp {
     database_cache: HashMap<String, Vec<String>>,
     pending_database_list: Option<Receiver<DatabaseListResult>>,
     pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
+    pending_table_summary: Option<Receiver<TableSummaryLoadResult>>,
     generate_data_receiver: Option<Receiver<GenerateDataEvent>>,
     generate_data_cancel: Option<Arc<AtomicBool>>,
     pending_query_definition: Option<Receiver<QueryDefinitionLoadResult>>,
@@ -219,11 +220,58 @@ struct SqlDumpLoadResult {
     path: std::path::PathBuf,
 }
 
+struct TableSummaryLoadResult {
+    tab_id: String,
+    result: Result<Vec<driver_api::TableSummary>, String>,
+}
+
+#[derive(Clone)]
+struct TableSummaryTabState {
+    id: String,
+    title: String,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+    database_kind: DatabaseKind,
+    loading: bool,
+    table_summaries: Vec<driver_api::TableSummary>,
+    selected_indices: HashSet<usize>,
+    sort_column: Option<usize>,
+    sort_ascending: bool,
+    search_filter: String,
+    needs_reload: bool,
+    pending_open_table: Option<usize>, // 行索引，双击时设置
+    pending_actions: Vec<SummaryContextAction>,
+    col_widths: Vec<f32>,
+    resize_drag: Option<(usize, f32)>,
+    renaming_row: Option<usize>,
+    rename_edit: String,
+    rename_focus_requested: bool,
+    pending_stats: HashSet<String>,
+    visible_rows: HashSet<usize>,
+    stats_loading: bool,
+    stats_sender: Option<mpsc::Sender<(String, Result<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String>)>>,
+    stats_receiver: Option<Arc<std::sync::Mutex<mpsc::Receiver<(String, Result<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String>)>>>>,
+}
+
+#[derive(Clone)]
+enum SummaryContextAction {
+    OpenTable { node: ExplorerNode, load_data: bool },
+    NewQuery { connection_id: String, database: Option<String>, sql: String },
+    TriggerSqlDump { connection_id: String, database: Option<String>, schema: Option<String>, table: String, is_view: bool, kind: DatabaseKind, include_data: bool },
+    CopyTable { node: ExplorerNode, include_data: bool },
+    DdlDelete(DdlPendingDelete),
+    RenameTable { connection_id: String, database: String, schema: Option<String>, old_name: String, new_name: String, is_view: bool, kind: DatabaseKind },
+    Reload,
+    LoadCollectionStats { connection_id: String, database: String, collections: Vec<String> },
+}
+
 #[derive(Clone)]
 enum WorkspaceTab {
     Query(QueryTabState),
     Table(TableTabState),
     CreateTable(CreateTableState),
+    TableSummary(TableSummaryTabState),
     Dashboard,
 }
 
@@ -558,6 +606,7 @@ impl Default for TableSortState {
 struct TableSortClause {
     column: Option<String>,
     descending: bool,
+    enabled: bool,
 }
 
 impl Default for TableSortClause {
@@ -565,6 +614,7 @@ impl Default for TableSortClause {
         Self {
             column: None,
             descending: false,
+            enabled: true,
         }
     }
 }
@@ -748,6 +798,7 @@ struct TableFilterClause {
     operator: TableFilterOperator,
     value: String,
     second_value: String,
+    enabled: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -894,6 +945,8 @@ struct DdlPendingDelete {
     action: DdlAction,
     confirm_on_enter: bool,
     is_truncate: bool,
+    batch_count: usize,
+    names: Vec<String>,
 }
 
 struct TreeRenameState {
@@ -1192,6 +1245,7 @@ impl DesktopApp {
             tab_forward_stack: Vec::new(),
             database_cache: HashMap::new(),
             pending_table_preview: None,
+            pending_table_summary: None,
             generate_data_receiver: None,
             generate_data_cancel: None,
             pending_query_definition: None,
@@ -2100,7 +2154,73 @@ impl DesktopApp {
             }
         }
 
+        // Poll table summary results (async: OpenTableSummary)
+        if let Some(receiver) = self.pending_table_summary.take() {
+            match receiver.try_recv() {
+                Ok(message) => {
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::TableSummary(ts) if ts.id == message.tab_id)
+                    }) {
+                        match message.result {
+                            Ok(summaries) => {
+                                tab.table_summaries = summaries;
+                                tab.loading = false;
+                                tab.renaming_row = None;
+                            }
+                            Err(error) => {
+                                tab.loading = false;
+                                self.status_message = error;
+                                self.status_level = StatusLevel::Error;
+                            }
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_table_summary = Some(receiver);
+                }
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+
         self.poll_sql_dump();
+
+        // 轮询集合统计信息懒加载结果
+        for tab in self.tabs.iter_mut() {
+            if let WorkspaceTab::TableSummary(ts) = tab {
+                let receiver_arc = ts.stats_receiver.clone();
+                if let Some(ref receiver) = receiver_arc {
+                    let receiver = receiver.lock().unwrap();
+                    loop {
+                        match receiver.try_recv() {
+                            Ok((coll_name, Ok(Some((count, data, index, total))))) => {
+                                tracing::info!(collection = %coll_name, ?count, ?data, ?index, ?total, "收到集合统计");
+                                if let Some(s) = ts.table_summaries.iter_mut().find(|s| s.name == coll_name) {
+                                    s.row_count = count;
+                                    s.data_size = data;
+                                    s.index_size = index;
+                                    s.total_size = total;
+                                }
+                                ts.pending_stats.remove(&coll_name);
+                            }
+                            Ok((coll_name, Ok(None))) => {
+                                ts.pending_stats.remove(&coll_name);
+                            }
+                            Ok((coll_name, Err(e))) => {
+                                tracing::warn!(collection = %coll_name, error = %e, "集合统计信息加载失败");
+                                ts.pending_stats.remove(&coll_name);
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => {
+                                ts.stats_receiver = None;
+                                ts.stats_loading = false;
+                                ts.pending_stats.clear();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // 轮询更新检查结果
         if let Some(receiver) = self.pending_update_check.take() {
@@ -2244,6 +2364,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             WorkspaceTab::Dashboard => {}
             WorkspaceTab::CreateTable(_) => {}
+            WorkspaceTab::TableSummary(tab) => {
+                tab.selected_indices.clear();
+            }
         }
         self.status_message = tr!("已清除选择").into();
     }
@@ -2428,6 +2551,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             WorkspaceTab::CreateTable(_) => {}
             WorkspaceTab::Dashboard => {}
+            WorkspaceTab::TableSummary(_) => {}
         }
     }
 
@@ -3235,7 +3359,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.pending_table_preview = Some(receiver);
 
         // MongoDB 游标分页：无排序或按 _id 排序时使用 _id 游标，避免 skip() 性能问题
-        let sort_active_clauses: Vec<_> = tab.preview_sort.clauses.iter().filter(|c| c.column.is_some()).collect();
+        let sort_active_clauses: Vec<_> = tab.preview_sort.clauses.iter().filter(|c| c.enabled && c.column.is_some()).collect();
         let use_cursor_pagination = database_kind == DatabaseKind::MongoDb
             && (sort_active_clauses.is_empty()
                 || (sort_active_clauses.len() == 1
@@ -3668,7 +3792,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let result = match self.tabs.get(self.active_tab) {
             Some(WorkspaceTab::Query(tab)) => tab.result.clone(),
             Some(WorkspaceTab::Table(tab)) => tab.preview.clone(),
-            Some(WorkspaceTab::CreateTable(_)) | Some(WorkspaceTab::Dashboard) => None,
+            Some(WorkspaceTab::CreateTable(_)) | Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::TableSummary(_)) => None,
             None => None,
         };
         let Some(result) = result else {
@@ -3787,7 +3911,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn refresh_active_workspace(&mut self) {
-        match self.tabs.get(self.active_tab) {
+        match self.tabs.get_mut(self.active_tab) {
             Some(WorkspaceTab::Table(_)) => {
                 self.refresh_active_table_preview(true);
                 self.status_message = tr!("已刷新当前表数据").into();
@@ -3807,6 +3931,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
             }
             Some(WorkspaceTab::CreateTable(_)) => {}
+            Some(WorkspaceTab::TableSummary(tab)) => {
+                tab.loading = true;
+                tab.table_summaries.clear();
+                let connection_id = tab.connection_id.clone();
+                let database = tab.database.clone();
+                let schema = tab.schema.clone();
+                let tab_id = tab.id.clone();
+                let services = self.services.clone();
+                let handle = self.runtime.handle().clone();
+                let (sender, receiver) = mpsc::channel();
+                self.pending_table_summary = Some(receiver);
+                handle.spawn(async move {
+                    let result = services.load_tables_summary(&connection_id, &database, schema.as_deref()).await;
+                    let _ = sender.send(TableSummaryLoadResult {
+                        tab_id,
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
+                self.status_message = tr!("正在刷新表信息...").into();
+            }
             Some(WorkspaceTab::Dashboard) | None => {
                 self.refresh_connections();
                 self.status_message = tr!("已刷新连接列表").into();
@@ -4439,6 +4583,58 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                 }
                 SidebarAction::OpenTable { node, load_data } => self.open_table_tab(&node, load_data),
+                SidebarAction::OpenTableSummary { connection_id, database, schema, db_label } => {
+                    let database_kind = self.database_kind_for_connection(&connection_id);
+                    let tab_id = format!("table-summary-{}", uuid::Uuid::new_v4());
+                    let conn_name = self.connections.iter().find(|c| c.id == connection_id).map(|c| c.name.as_str()).unwrap_or(&connection_id);
+                    let label = if database_kind == DatabaseKind::MongoDb {
+                        format!("{}@{} 集合信息", db_label, conn_name)
+                    } else {
+                        format!("{}@{} 表信息", db_label, conn_name)
+                    };
+                    let state = TableSummaryTabState {
+                        id: tab_id.clone(),
+                        title: label.clone(),
+                        connection_id: connection_id.clone(),
+                        database: database.clone(),
+                        schema: schema.clone(),
+                        database_kind,
+                        loading: true,
+                        table_summaries: Vec::new(),
+                        selected_indices: HashSet::new(),
+                        sort_column: None,
+                        sort_ascending: true,
+                        search_filter: String::new(),
+                        needs_reload: false,
+                        pending_open_table: None,
+                        pending_actions: Vec::new(),
+                        col_widths: Vec::new(),
+                        resize_drag: None,
+                        renaming_row: None,
+                        rename_edit: String::new(),
+                        rename_focus_requested: false,
+                        pending_stats: HashSet::new(),
+                        visible_rows: HashSet::new(),
+                        stats_loading: false,
+                        stats_sender: None,
+                        stats_receiver: None,
+                    };
+                    self.tabs.push(WorkspaceTab::TableSummary(state));
+                    self.active_tab = self.tabs.len().saturating_sub(1);
+                    self.scroll_tabs_to_end = true;
+
+                    let services = self.services.clone();
+                    let handle = self.runtime.handle().clone();
+                    let (sender, receiver) = mpsc::channel();
+                    self.pending_table_summary = Some(receiver);
+                    handle.spawn(async move {
+                        let result = services.load_tables_summary(&connection_id, &database, schema.as_deref()).await;
+                        let _ = sender.send(TableSummaryLoadResult {
+                            tab_id,
+                            result: result.map_err(|e| e.to_string()),
+                        });
+                    });
+                }
                 SidebarAction::RefreshConnection(connection_id) => {
                     self.collapse_connection_tree(&connection_id);
                     self.load_connection_tree(&connection_id);
@@ -4770,6 +4966,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.close();
                                 }
                             }
+                            // 查看所有表/集合信息
+                            let summary_label = if kind == DatabaseKind::MongoDb {
+                                tr!("查看所有集合信息")
+                            } else {
+                                tr!("查看所有表信息")
+                            };
+                            if ui.button(summary_label).clicked() {
+                                actions.push(SidebarAction::OpenTableSummary {
+                                    connection_id: node.connection_id.clone(),
+                                    database: node.name.clone(),
+                                    schema: None,
+                                    db_label: node.name.clone(),
+                                });
+                                ui.close();
+                            }
                             // 转储子菜单
                             let dump_label = if kind == DatabaseKind::MongoDb {
                                 tr!("转储数据 ▸")
@@ -4817,6 +5028,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     },
                                     confirm_on_enter: false,
                                     is_truncate: false,
+                                    batch_count: 1,
+                                    names: Vec::new(),
                                 }));
                                 ui.close();
                             }
@@ -4848,6 +5061,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }));
                                 ui.close();
                             }
+                            // 查看所有表信息
+                            if ui.button(tr!("查看所有表信息")).clicked() {
+                                actions.push(SidebarAction::OpenTableSummary {
+                                    connection_id: node.connection_id.clone(),
+                                    database: node.database.clone().unwrap_or_default(),
+                                    schema: Some(node.name.clone()),
+                                    db_label: node.name.clone(),
+                                });
+                                ui.close();
+                            }
                             ui.separator();
                             if ui.button(tr!("删除 Schema")).clicked() {
                                 actions.push(SidebarAction::DdlDelete(DdlPendingDelete {
@@ -4860,6 +5083,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     },
                                     confirm_on_enter: false,
                                     is_truncate: false,
+                                    batch_count: 1,
+                                    names: Vec::new(),
                                 }));
                                 ui.close();
                             }
@@ -5013,6 +5238,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     },
                                     confirm_on_enter: false,
                                     is_truncate: true,
+                                    batch_count: 1,
+                                    names: Vec::new(),
                                 }));
                                 ui.close();
                             }
@@ -5039,6 +5266,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 },
                                 confirm_on_enter: false,
                                 is_truncate: false,
+                                batch_count: 1,
+                                names: Vec::new(),
                             }));
                             ui.close();
                         }
@@ -5238,6 +5467,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         (title, "△")
                                                     },
                                                     WorkspaceTab::Dashboard => ("Dashboard", "◉"),
+                                                    WorkspaceTab::TableSummary(tab) => (tab.title.as_str(), "☰"),
                                                 };
                                                 let interaction = tab_button(
                                                     ui, index, icon, title, self.active_tab == index,
@@ -5373,6 +5603,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     (title.to_string(), "△")
                 },
                 WorkspaceTab::Dashboard => ("Dashboard".to_string(), "◉"),
+                WorkspaceTab::TableSummary(tab) => (tab.title.clone(), "☰"),
             };
 
             // 使用egui::Area绘制幽灵标题
@@ -5477,8 +5708,164 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             self.render_dashboard_tab(ui);
                             TabUiAction::None
                         }
+                        WorkspaceTab::TableSummary(tab) => {
+                            Self::render_table_summary_tab(ui, tab, &self.theme.colors, &self.theme.fonts)
+                        }
                     };
                     self.handle_tab_action(ui.ctx(), action);
+
+                    // 检查 TableSummary 标签是否需要重新加载
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                        if tab.needs_reload {
+                            tab.needs_reload = false;
+                            tab.loading = true;
+                            tab.table_summaries.clear();
+                            tab.pending_stats.clear();
+                            tab.visible_rows.clear();
+                            tab.stats_loading = false;
+                            tab.stats_sender = None;
+                            tab.stats_receiver = None;
+                            let connection_id = tab.connection_id.clone();
+                            let database = tab.database.clone();
+                            let schema = tab.schema.clone();
+                            let tab_id = tab.id.clone();
+                            let services = self.services.clone();
+                            let handle = self.runtime.handle().clone();
+                            let (sender, receiver) = mpsc::channel();
+                            self.pending_table_summary = Some(receiver);
+                            handle.spawn(async move {
+                                let result = services.load_tables_summary(&connection_id, &database, schema.as_deref()).await;
+                                let _ = sender.send(TableSummaryLoadResult {
+                                    tab_id,
+                                    result: result.map_err(|e| e.to_string()),
+                                });
+                            });
+                        }
+                    }
+
+                    // 处理双击打开表
+                    let pending_open = if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get(self.active_tab) {
+                        tab.pending_open_table.and_then(|ri| tab.table_summaries.get(ri).map(|s| {
+                            let node = ExplorerNode {
+                                id: format!("{}::{}", tab.connection_id, s.name),
+                                connection_id: tab.connection_id.clone(),
+                                name: s.name.clone(),
+                                node_type: if s.table_type == "VIEW" || s.table_type == "MATERIALIZED VIEW" {
+                                    ExplorerNodeType::View
+                                } else {
+                                    ExplorerNodeType::Table
+                                },
+                                parent_id: Some(String::new()),
+                                database: Some(tab.database.clone()),
+                                schema: tab.schema.clone(),
+                                expandable: false,
+                                loaded: true,
+                            };
+                            node
+                        }))
+                    } else {
+                        None
+                    };
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                        tab.pending_open_table = None;
+                    }
+                    if let Some(node) = pending_open {
+                        self.open_table_tab(&node, true);
+                    }
+
+                    // 处理右键菜单动作
+                    let actions: Vec<SummaryContextAction> = if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                        std::mem::take(&mut tab.pending_actions)
+                    } else {
+                        Vec::new()
+                    };
+                    for action in actions {
+                        match action {
+                            SummaryContextAction::OpenTable { node, load_data } => {
+                                self.open_table_tab(&node, load_data);
+                            }
+                            SummaryContextAction::NewQuery { connection_id, database, sql } => {
+                                self.create_query_tab(Some(connection_id), database, Some(sql));
+                            }
+                            SummaryContextAction::TriggerSqlDump { connection_id, database, schema, table, is_view, kind, include_data } => {
+                                self.trigger_sql_dump(connection_id, database, schema, Some(table), is_view, kind, include_data);
+                            }
+                            SummaryContextAction::CopyTable { node, include_data } => {
+                                self.execute_copy_table(&node, include_data);
+                                if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                                    tab.needs_reload = true;
+                                }
+                            }
+                            SummaryContextAction::DdlDelete(pending) => {
+                                self.ddl_pending_delete = Some(pending);
+                            }
+                            SummaryContextAction::RenameTable { connection_id, database, schema, old_name, new_name, is_view, kind } => {
+                                let services = self.services.clone();
+                                let handle = self.runtime.handle().clone();
+                                let cid = connection_id.clone();
+                                let db = database.clone();
+                                let sc = schema.clone();
+                                let old = old_name.clone();
+                                let new_n = new_name.clone();
+                                let (sender, receiver) = mpsc::channel();
+                                handle.spawn(async move {
+                                    let result = services.rename_table(&cid, &db, sc.as_deref(), &old, &new_n).await;
+                                    let _ = sender.send(result.map_err(|e| e.to_string()));
+                                });
+                                self.ddl_pending_action = Some((
+                                    new_name.clone(),
+                                    DdlAction::RenameTable { connection_id, database, schema, old_name, is_view, kind },
+                                    receiver,
+                                ));
+                            }
+                            SummaryContextAction::Reload => {
+                                if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                                    tab.needs_reload = true;
+                                }
+                            }
+                            SummaryContextAction::LoadCollectionStats { connection_id, database, collections } => {
+                                let services = self.services.clone();
+                                let handle = self.runtime.handle().clone();
+                                let cid = connection_id.clone();
+                                let db = database.clone();
+                                // 复用同一个 channel，首次调用时创建
+                                let tx = if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                                    if let Some(ref tx) = tab.stats_sender {
+                                        tx.clone()
+                                    } else {
+                                        let (tx, rx) = mpsc::channel();
+                                        tab.stats_sender = Some(tx.clone());
+                                        tab.stats_receiver = Some(Arc::new(std::sync::Mutex::new(rx)));
+                                        tx
+                                    }
+                                } else {
+                                    continue;
+                                };
+                                // 并发加载所有集合统计信息（限制 10 并发）
+                                let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
+                                for coll in collections {
+                                    let services = services.clone();
+                                    let cid = cid.clone();
+                                    let db = db.clone();
+                                    let tx = tx.clone();
+                                    let sem = semaphore.clone();
+                                    handle.spawn(async move {
+                                        let _permit = sem.acquire().await.unwrap();
+                                        let result = services.load_collection_stats(&cid, &db, &coll).await;
+                                        match result {
+                                            Ok(stats) => {
+                                                let _ = tx.send((coll, Ok(stats)));
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(collection = %coll, error = %e, "加载集合统计信息失败");
+                                                let _ = tx.send((coll, Err(e.to_string())));
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             });
     }
@@ -8496,6 +8883,694 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         action
     }
 
+    fn render_table_summary_tab(
+        ui: &mut egui::Ui,
+        tab: &mut TableSummaryTabState,
+        colors: &ui_theme::ThemeColors,
+        fonts: &ui_theme::FontSizes,
+    ) -> TabUiAction {
+        let palette = mac_ui_palette_from_ui(ui);
+
+        // 计算过滤后的行
+        let filtered_indices: Vec<usize> = if tab.search_filter.is_empty() {
+            (0..tab.table_summaries.len()).collect()
+        } else {
+            let q = tab.search_filter.to_lowercase();
+            tab.table_summaries.iter().enumerate()
+                .filter(|(_, s)| s.name.to_lowercase().contains(&q))
+                .map(|(i, _)| i)
+                .collect()
+        };
+
+        // 排序：默认按表名升序
+        let mut sorted_indices = filtered_indices;
+        if let Some(sort_col) = tab.sort_column {
+            sorted_indices.sort_by(|&a, &b| {
+                let va = summary_cell_value(&tab.table_summaries[a], sort_col, tab.database_kind);
+                let vb = summary_cell_value(&tab.table_summaries[b], sort_col, tab.database_kind);
+                // 尝试数字排序
+                let na = va.replace(",", "").parse::<f64>().ok();
+                let nb = vb.replace(",", "").parse::<f64>().ok();
+                let ord = match (na, nb) {
+                    (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                    _ => va.cmp(&vb),
+                };
+                if tab.sort_ascending { ord } else { ord.reverse() }
+            });
+        } else {
+            sorted_indices.sort_by(|&a, &b| {
+                tab.table_summaries[a].name.cmp(&tab.table_summaries[b].name)
+            });
+        }
+
+        let total = tab.table_summaries.len();
+        let selected_count = tab.selected_indices.len();
+        let cols = summary_table_columns(tab.database_kind);
+
+        // StripBuilder: toolbar(38) + content(rest) + status(26)
+        StripBuilder::new(ui)
+            .size(Size::exact(38.0))
+            .size(Size::remainder())
+            .size(Size::exact(26.0))
+            .vertical(|mut strip| {
+                // ── 工具栏 ──
+                strip.cell(|ui| {
+                    egui::Frame::new()
+                        .fill(palette.toolbar_bg)
+                        .stroke(Stroke::NONE)
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(tab.title.as_str())
+                                        .strong()
+                                        .color(palette.text),
+                                );
+                                ui.separator();
+
+                                // 搜索框
+                                let search_frame = egui::Frame::new()
+                                    .fill(palette.search_bg)
+                                    .stroke(egui::Stroke::new(1.0, palette.table_grid))
+                                    .corner_radius(palette.radius_lg)
+                                    .inner_margin(egui::Margin::symmetric(8, 4));
+                                search_frame.show(ui, |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut tab.search_filter)
+                                            .font(egui::TextStyle::Small)
+                                            .desired_width(200.0)
+                                            .frame(false)
+                                            .hint_text(tr!("搜索表名...")),
+                                    );
+                                });
+
+                                // 选中计数
+                                if selected_count > 0 {
+                                    ui.separator();
+                                    ui.label(
+                                        RichText::new(tr!("已选 {} 个", selected_count))
+                                            .size(fonts.sm)
+                                            .color(palette.weak_text),
+                                    );
+                                }
+                            });
+                        });
+                });
+
+                // ── 内容区 ──
+                strip.cell(|ui| {
+                    egui::Frame::new()
+                        .fill(palette.card_bg)
+                        .stroke(Stroke::NONE)
+                        .inner_margin(egui::Margin::symmetric(8, 8))
+                        .show(ui, |ui| {
+                            if tab.loading {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(80.0);
+                                    ui.add(egui::Spinner::new().size(fonts.spinner_size));
+                                    ui.add_space(12.0);
+                                    ui.label(RichText::new(tr!("加载中...")).color(palette.weak_text));
+                                });
+                                return;
+                            }
+
+                            if tab.table_summaries.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(60.0);
+                                    ui.label(RichText::new(tr!("暂无数据")).color(palette.weak_text));
+                                });
+                                return;
+                            }
+
+                            // 外层水平 ScrollArea（与数据表格一致），TableBuilder 负责垂直滚动
+                            tab.visible_rows.clear();
+                            egui::ScrollArea::horizontal()
+                                .id_salt(format!("ts-hscroll-{}", tab.id))
+                                .auto_shrink([false, false])
+                                .drag_to_scroll(false)
+                                .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+
+                            let grid_h = subtle_grid_color(palette.table_grid, 30);
+                            let grid_v = Color32::TRANSPARENT;
+
+                            // 初始化列宽（首次使用估算值，之后由拖拽状态保持）
+                            if tab.col_widths.len() != cols.len() {
+                                let estimated = estimate_summary_column_widths(&cols, &tab.table_summaries, tab.database_kind);
+                                tab.col_widths = estimated;
+                            }
+
+                            let mut table = TableBuilder::new(ui)
+                                .vscroll(true)
+                                .striped(true)
+                                .resizable(false)
+                                .drag_to_scroll(false)
+                                .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+
+                            let col_count = tab.col_widths.len();
+                            for (i, w) in tab.col_widths.iter().enumerate() {
+                                if i + 1 == col_count {
+                                    table = table.column(egui_extras::Column::remainder().at_least(w.max(72.0)).clip(true));
+                                } else {
+                                    table = table.column(egui_extras::Column::initial(*w).at_least(72.0).clip(true));
+                                }
+                            }
+
+                            let row_count = sorted_indices.len();
+
+                            // 提取到局部变量，供 header 闭包内使用（避免对 tab 的多层借用）
+                            let mut local_widths = tab.col_widths.clone();
+                            let mut local_resize = tab.resize_drag.take();
+
+                            table
+                                .header(30.0, |mut header| {
+                                    for (col_idx, &(title, _, _)) in cols.iter().enumerate() {
+                                        header.col(|ui| {
+                                            let sort_state = if tab.sort_column == Some(col_idx) {
+                                                Some(!tab.sort_ascending)
+                                            } else {
+                                                None
+                                            };
+                                            let (sort_choice, _, _, _) = table_header_cell(
+                                                ui, &palette, title, true, sort_state, false, false, None, false,
+                                            );
+                                            match sort_choice {
+                                                Some(TableHeaderSortChoice::Ascending) => {
+                                                    tab.sort_column = Some(col_idx);
+                                                    tab.sort_ascending = true;
+                                                }
+                                                Some(TableHeaderSortChoice::Descending) => {
+                                                    tab.sort_column = Some(col_idx);
+                                                    tab.sort_ascending = false;
+                                                }
+                                                Some(TableHeaderSortChoice::Clear) => {
+                                                    tab.sort_column = None;
+                                                }
+                                                None => {}
+                                            }
+
+                                            // 列宽拖拽调整手柄（仅表头）
+                                            let cell_rect = ui.max_rect();
+                                            let resize_handle_x = cell_rect.right() - 3.0;
+                                            let resize_handle_rect = egui::Rect::from_min_max(
+                                                egui::pos2(resize_handle_x, cell_rect.top()),
+                                                cell_rect.right_bottom(),
+                                            );
+                                            let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                            let on_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                            let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                            let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                            let is_resizing = local_resize.as_ref().map_or(false, |&(rc, _)| rc == col_idx);
+                                            if on_handle || is_resizing {
+                                                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                            }
+                                            if on_handle && just_pressed {
+                                                local_resize = Some((col_idx, pointer_pos.unwrap().x));
+                                            }
+                                            if let Some((rc, start_x)) = local_resize {
+                                                if rc == col_idx && pointer_down {
+                                                    if let Some(pos) = pointer_pos {
+                                                        let delta = pos.x - start_x;
+                                                        if col_idx < local_widths.len() {
+                                                            local_widths[col_idx] = (local_widths[col_idx] + delta).max(72.0);
+                                                            local_resize = Some((col_idx, pos.x));
+                                                            ui.ctx().request_repaint();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                })
+                                .body(|mut body| {
+                                    for &ri in &sorted_indices {
+                                        let row_selected = summary_row_selected(tab, ri);
+                                        let fill = if row_selected {
+                                            blend_color(palette.selection_bg, palette.card_bg, 0.18)
+                                        } else {
+                                            palette.card_bg
+                                        };
+
+                                        body.row(28.0, |mut row| {
+                                            tab.visible_rows.insert(ri);
+                                            for (col_idx, &(_, _, is_numeric)) in cols.iter().enumerate() {
+                                                row.col(|ui| {
+                                                    let rect = ui.max_rect();
+                                                    let response = ui.allocate_rect(rect, egui::Sense::click());
+
+                                                    paint_table_grid_lines(ui, rect, grid_v, grid_h);
+
+                                                    let cell_fill = if row_selected {
+                                                        fill
+                                                    } else if ri % 2 == 1 {
+                                                        palette.table_alt_bg
+                                                    } else {
+                                                        fill
+                                                    };
+                                                    ui.painter().rect_filled(rect, 0.0, cell_fill);
+
+                                                    let content_rect = rect.shrink2(egui::vec2(4.0, 1.0));
+
+                                                    // 重命名模式：表名单元格渲染 TextEdit（与数据表 editing_cell 一致）
+                                                    if col_idx == 0 && tab.renaming_row == Some(ri) {
+                                                        // 编辑态背景色（与数据表一致，不使用选中背景色）
+                                                        let editor_fill = table_active_cell_fill(&palette, cell_fill, false, false);
+                                                        ui.painter().rect_filled(table_cell_fill_rect(rect, row_selected), 0.0, editor_fill);
+                                                        // 蓝色描边
+                                                        ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(1.0, palette.selection_stroke), egui::StrokeKind::Inside);
+                                                        let mut inner = ui.allocate_ui_at_rect(content_rect, |ui| {
+                                                            ui.set_min_height(28.0);
+                                                            egui::TextEdit::singleline(&mut tab.rename_edit)
+                                                                .id_source(egui::Id::new(("ts_rename", ri)))
+                                                                .frame(false)
+                                                                .margin(egui::Margin::symmetric(4, 1))
+                                                                .desired_width(ui.available_width().max(24.0))
+                                                                .show(ui)
+                                                        });
+                                                        if tab.rename_focus_requested {
+                                                            inner.inner.response.request_focus();
+                                                            let cursor = egui::text::CCursor::new(tab.rename_edit.chars().count());
+                                                            inner.inner.state.cursor.set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+                                                            inner.inner.state.store(ui.ctx(), inner.inner.response.id);
+                                                            tab.rename_focus_requested = false;
+                                                        }
+                                                        let lost = inner.inner.response.lost_focus();
+                                                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                                        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                                        if enter || (lost && !escape) {
+                                                            let new_name = tab.rename_edit.trim().to_string();
+                                                            let old_name = tab.table_summaries[ri].name.clone();
+                                                            if !new_name.is_empty() && new_name != old_name {
+                                                                let is_view = tab.table_summaries[ri].table_type == "VIEW"
+                                                                    || tab.table_summaries[ri].table_type == "MATERIALIZED VIEW";
+                                                                tab.pending_actions.push(SummaryContextAction::RenameTable {
+                                                                    connection_id: tab.connection_id.clone(),
+                                                                    database: tab.database.clone(),
+                                                                    schema: tab.schema.clone(),
+                                                                    old_name,
+                                                                    new_name,
+                                                                    is_view,
+                                                                    kind: tab.database_kind,
+                                                                });
+                                                            }
+                                                            tab.renaming_row = None;
+                                                        } else if escape {
+                                                            tab.renaming_row = None;
+                                                        }
+                                                        inner.inner.response.on_hover_cursor(egui::CursorIcon::Text);
+                                                    } else {
+                                                    // 正常文本绘制
+                                                    let text = summary_cell_value(&tab.table_summaries[ri], col_idx, tab.database_kind);
+                                                    if text.is_empty() {
+                                                        // 空值不绘制
+                                                    } else {
+                                                        let text_color = if row_selected {
+                                                            palette.selection_text
+                                                        } else {
+                                                            palette.text
+                                                        };
+                                                        let font_id = if is_numeric {
+                                                            egui::FontId::new(fonts.base, egui::FontFamily::Monospace)
+                                                        } else {
+                                                            egui::FontId::new(fonts.base, egui::FontFamily::Proportional)
+                                                        };
+                                                        let galley = ui.painter().layout_no_wrap(text.clone(), font_id, text_color);
+                                                        let text_pos = if is_numeric {
+                                                            egui::pos2(
+                                                                content_rect.right() - galley.size().x,
+                                                                content_rect.center().y - galley.size().y / 2.0,
+                                                            )
+                                                        } else {
+                                                            egui::pos2(
+                                                                content_rect.left(),
+                                                                content_rect.center().y - galley.size().y / 2.0,
+                                                            )
+                                                        };
+                                                        ui.painter().galley(text_pos, galley, text_color);
+                                                    }
+                                                    } // end else (not renaming)
+
+                                                    // 处理点击事件
+                                                    let modifiers = ui.ctx().input(|i| i.modifiers);
+                                                    if response.double_clicked() {
+                                                        tab.pending_open_table = Some(ri);
+                                                    } else if response.clicked() {
+                                                        if modifiers.shift {
+                                                            extend_summary_selection(tab, ri);
+                                                        } else if modifiers.ctrl || modifiers.command {
+                                                            toggle_summary_selection(tab, ri);
+                                                        } else {
+                                                            set_single_summary_selection(tab, ri);
+                                                        }
+                                                    }
+                                                    // 首列 tooltip
+                                                    let response = if col_idx == 0 {
+                                                        let row_name = tab.table_summaries[ri].name.clone();
+                                                        response.on_hover_text(&row_name)
+                                                    } else {
+                                                        response
+                                                    };
+                                                    // 所有列都支持右键菜单
+                                                    {
+                                                        let row_name = tab.table_summaries[ri].name.clone();
+                                                        let row_type = tab.table_summaries[ri].table_type.clone();
+                                                        let node = summary_to_node(&tab.table_summaries[ri], tab);
+                                                        let _ = response.context_menu(|ui| {
+                                                            ctx_menu_style(ui);
+                                                            let is_view = row_type == "VIEW" || row_type == "MATERIALIZED VIEW";
+                                                            let kind = tab.database_kind;
+
+                                                            // 如果多选，显示批量操作
+                                                            let selected = if tab.selected_indices.contains(&ri) {
+                                                                tab.selected_indices.len()
+                                                            } else {
+                                                                tab.selected_indices.insert(ri);
+                                                                tab.selected_indices.len()
+                                                            };
+                                                            if selected > 1 {
+                                                                if ui.button(tr!("打开 {} 个表", selected)).clicked() {
+                                                                    for &idx in &tab.selected_indices {
+                                                                        if let Some(s) = tab.table_summaries.get(idx) {
+                                                                            tab.pending_actions.push(SummaryContextAction::OpenTable {
+                                                                                node: summary_to_node(s, tab),
+                                                                                load_data: true,
+                                                                            });
+                                                                        }
+                                                                    }
+                                                                    ui.close();
+                                                                }
+                                                                ui.separator();
+                                                            }
+
+                                                            // 查看定义
+                                                            let def_label = if is_view {
+                                                                tr!("查看视图定义")
+                                                            } else if kind == DatabaseKind::MongoDb {
+                                                                tr!("查看集合定义")
+                                                            } else {
+                                                                tr!("查看表定义")
+                                                            };
+                                                            if ui.button(def_label).clicked() {
+                                                                tab.pending_actions.push(SummaryContextAction::OpenTable {
+                                                                    node: node.clone(),
+                                                                    load_data: false,
+                                                                });
+                                                                ui.close();
+                                                            }
+                                                            ui.separator();
+
+                                                            // 在表上新建查询
+                                                            let query_label = if is_view {
+                                                                tr!("在视图上新建查询")
+                                                            } else if kind == DatabaseKind::MongoDb {
+                                                                tr!("在集合上新建查询")
+                                                            } else {
+                                                                tr!("在表上新建查询")
+                                                            };
+                                                            if ui.button(query_label).clicked() {
+                                                                let sql = if kind == DatabaseKind::MongoDb {
+                                                                    format!("db.{}.find({{}}).limit(100);\n", row_name)
+                                                                } else {
+                                                                    let from_clause = match kind {
+                                                                        DatabaseKind::Postgres => match &tab.schema {
+                                                                            Some(sc) => format!("{sc}.{row_name}"),
+                                                                            None => row_name.clone(),
+                                                                        },
+                                                                        _ => row_name.clone(),
+                                                                    };
+                                                                    format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n")
+                                                                };
+                                                                tab.pending_actions.push(SummaryContextAction::NewQuery {
+                                                                    connection_id: tab.connection_id.clone(),
+                                                                    database: Some(tab.database.clone()),
+                                                                    sql,
+                                                                });
+                                                                ui.close();
+                                                            }
+                                                            ui.separator();
+
+                                                            // 转储子菜单
+                                                            let dump_label = if kind == DatabaseKind::MongoDb {
+                                                                tr!("转储数据 ▸")
+                                                            } else {
+                                                                tr!("转储 ▸")
+                                                            };
+                                                            ctx_menu_button(ui, dump_label, |ui| {
+                                                                if ui.button(tr!("仅结构")).clicked() {
+                                                                    tab.pending_actions.push(SummaryContextAction::TriggerSqlDump {
+                                                                        connection_id: tab.connection_id.clone(),
+                                                                        database: Some(tab.database.clone()),
+                                                                        schema: tab.schema.clone(),
+                                                                        table: row_name.clone(),
+                                                                        is_view,
+                                                                        kind,
+                                                                        include_data: false,
+                                                                    });
+                                                                    ui.close_menu();
+                                                                }
+                                                                if ui.button(tr!("结构和数据")).clicked() {
+                                                                    tab.pending_actions.push(SummaryContextAction::TriggerSqlDump {
+                                                                        connection_id: tab.connection_id.clone(),
+                                                                        database: Some(tab.database.clone()),
+                                                                        schema: tab.schema.clone(),
+                                                                        table: row_name.clone(),
+                                                                        is_view,
+                                                                        kind,
+                                                                        include_data: true,
+                                                                    });
+                                                                    ui.close_menu();
+                                                                }
+                                                            });
+
+                                                            // 复制表子菜单
+                                                            let copy_label = if kind == DatabaseKind::MongoDb {
+                                                                tr!("复制集合 ▸")
+                                                            } else if is_view {
+                                                                tr!("复制视图 ▸")
+                                                            } else {
+                                                                tr!("复制表 ▸")
+                                                            };
+                                                            ctx_menu_button(ui, copy_label, |ui| {
+                                                                if ui.button(tr!("仅结构")).clicked() {
+                                                                    tab.pending_actions.push(SummaryContextAction::CopyTable {
+                                                                        node: node.clone(),
+                                                                        include_data: false,
+                                                                    });
+                                                                    ui.close_menu();
+                                                                }
+                                                                if ui.button(tr!("结构和数据")).clicked() {
+                                                                    tab.pending_actions.push(SummaryContextAction::CopyTable {
+                                                                        node: node.clone(),
+                                                                        include_data: true,
+                                                                    });
+                                                                    ui.close_menu();
+                                                                }
+                                                            });
+
+                                                            // 重命名
+                                                            let rename_label = if is_view {
+                                                                tr!("重命名视图")
+                                                            } else if kind == DatabaseKind::MongoDb {
+                                                                tr!("重命名集合")
+                                                            } else {
+                                                                tr!("重命名表")
+                                                            };
+                                                            if ui.button(rename_label).clicked() {
+                                                                let name = tab.table_summaries[ri].name.clone();
+                                                                tab.renaming_row = Some(ri);
+                                                                tab.rename_edit = name;
+                                                                tab.rename_focus_requested = true;
+                                                                ui.close();
+                                                            }
+
+                                                            ui.separator();
+                                                            if selected > 1 {
+                                                                // 批量清空（仅含非视图时显示）
+                                                                let has_tables = tab.selected_indices.iter().any(|&idx| {
+                                                                    tab.table_summaries.get(idx).map_or(false, |s| s.table_type != "VIEW" && s.table_type != "MATERIALIZED VIEW")
+                                                                });
+                                                                if has_tables {
+                                                                    let batch_truncate_label = tr!("清空 {} 个表", selected);
+                                                                    if ui.button(batch_truncate_label).clicked() {
+                                                                        let names: Vec<String> = tab.selected_indices.iter()
+                                                                            .filter_map(|&idx| tab.table_summaries.get(idx))
+                                                                            .filter(|s| s.table_type != "VIEW" && s.table_type != "MATERIALIZED VIEW")
+                                                                            .map(|s| s.name.clone())
+                                                                            .collect();
+                                                                        let rep_name = names.first().cloned().unwrap_or_default();
+                                                                        let title = if kind == DatabaseKind::MongoDb { tr!("清空 {} 个集合", names.len()) } else { tr!("清空 {} 个表", names.len()) };
+                                                                        tab.pending_actions.push(SummaryContextAction::DdlDelete(DdlPendingDelete {
+                                                                            title: title.into(),
+                                                                            name: rep_name.clone(),
+                                                                            action: DdlAction::TruncateTable {
+                                                                                connection_id: tab.connection_id.clone(),
+                                                                                database: tab.database.clone(),
+                                                                                schema: tab.schema.clone(),
+                                                                                name: rep_name,
+                                                                                kind,
+                                                                            },
+                                                                            confirm_on_enter: false,
+                                                                            is_truncate: true,
+                                                                            batch_count: names.len(),
+                                                                            names,
+                                                                        }));
+                                                                        ui.close();
+                                                                    }
+                                                                }
+                                                                // 批量删除
+                                                                let batch_del_label = tr!("删除 {} 个表", selected);
+                                                                if ui.button(batch_del_label).clicked() {
+                                                                    let names: Vec<String> = tab.selected_indices.iter()
+                                                                        .filter_map(|&idx| tab.table_summaries.get(idx))
+                                                                        .map(|s| s.name.clone())
+                                                                        .collect();
+                                                                    let rep_name = names.first().cloned().unwrap_or_default();
+                                                                    let title = if kind == DatabaseKind::MongoDb { tr!("删除 {} 个集合", names.len()) } else { tr!("删除 {} 个表", names.len()) };
+                                                                    tab.pending_actions.push(SummaryContextAction::DdlDelete(DdlPendingDelete {
+                                                                        title: title.into(),
+                                                                        name: rep_name.clone(),
+                                                                        action: DdlAction::DropTable {
+                                                                            connection_id: tab.connection_id.clone(),
+                                                                            database: tab.database.clone(),
+                                                                            schema: tab.schema.clone(),
+                                                                            name: rep_name,
+                                                                            is_view,
+                                                                            kind,
+                                                                        },
+                                                                        confirm_on_enter: false,
+                                                                        is_truncate: false,
+                                                                        batch_count: names.len(),
+                                                                        names,
+                                                                    }));
+                                                                    ui.close();
+                                                                }
+                                                            } else {
+                                                                // 单个清空
+                                                                if !is_view {
+                                                                    let truncate_label = if kind == DatabaseKind::MongoDb {
+                                                                        tr!("清空集合")
+                                                                    } else {
+                                                                        tr!("清空表")
+                                                                    };
+                                                                    if ui.button(truncate_label).clicked() {
+                                                                        tab.pending_actions.push(SummaryContextAction::DdlDelete(DdlPendingDelete {
+                                                                            title: truncate_label.into(),
+                                                                            name: row_name.clone(),
+                                                                            action: DdlAction::TruncateTable {
+                                                                                connection_id: tab.connection_id.clone(),
+                                                                                database: tab.database.clone(),
+                                                                                schema: tab.schema.clone(),
+                                                                                name: row_name.clone(),
+                                                                                kind,
+                                                                            },
+                                                                            confirm_on_enter: false,
+                                                                            is_truncate: true,
+                                                                            batch_count: 1,
+                                                                            names: Vec::new(),
+                                                                        }));
+                                                                        ui.close();
+                                                                    }
+                                                                }
+                                                                // 单个删除
+                                                                let del_label = if is_view {
+                                                                    tr!("删除视图")
+                                                                } else if kind == DatabaseKind::MongoDb {
+                                                                    tr!("删除集合")
+                                                                } else {
+                                                                    tr!("删除表")
+                                                                };
+                                                                if ui.button(del_label).clicked() {
+                                                                    tab.pending_actions.push(SummaryContextAction::DdlDelete(DdlPendingDelete {
+                                                                        title: del_label.into(),
+                                                                        name: row_name.clone(),
+                                                                        action: DdlAction::DropTable {
+                                                                            connection_id: tab.connection_id.clone(),
+                                                                            database: tab.database.clone(),
+                                                                            schema: tab.schema.clone(),
+                                                                            name: row_name.clone(),
+                                                                            is_view,
+                                                                            kind,
+                                                                        },
+                                                                        confirm_on_enter: false,
+                                                                        is_truncate: false,
+                                                                        batch_count: 1,
+                                                                        names: Vec::new(),
+                                                                    }));
+                                                                    ui.close();
+                                                                }
+                                                            }
+                                                            ui.separator();
+                                                            // 刷新
+                                                            if ui.button(tr!("刷新")).clicked() {
+                                                                tab.pending_actions.push(SummaryContextAction::Reload);
+                                                                ui.close();
+                                                            }
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    }
+                                });
+                                // 写回列宽和拖拽状态
+                                tab.col_widths = local_widths;
+                                tab.resize_drag = local_resize;
+                                }); // ScrollArea::horizontal
+                        });
+                });
+
+                // ── 状态栏 ──
+                strip.cell(|ui| {
+                    egui::Frame::new()
+                        .fill(palette.toolbar_bg)
+                        .stroke(Stroke::NONE)
+                        .inner_margin(egui::Margin::symmetric(10, 4))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let label = if tab.database_kind == DatabaseKind::MongoDb {
+                                    tr!("共 {} 个集合", total)
+                                } else {
+                                    tr!("共 {} 个表", total)
+                                };
+                                ui.label(RichText::new(label).size(fonts.sm).color(palette.weak_text));
+                                if selected_count > 0 {
+                                    ui.separator();
+                                    ui.label(RichText::new(tr!("已选 {} 个", selected_count)).size(fonts.sm).color(palette.weak_text));
+                                }
+                                if !tab.search_filter.is_empty() {
+                                    ui.separator();
+                                    ui.label(RichText::new(tr!("筛选 {} 个", sorted_indices.len())).size(fonts.sm).color(palette.weak_text));
+                                }
+                            });
+                        });
+                });
+            });
+
+        // 懒加载所有未加载的集合统计信息（仅 MongoDB）
+        // 启动单个后台任务，按顺序加载所有集合，避免连接池竞争
+        if tab.database_kind == DatabaseKind::MongoDb && !tab.loading && !tab.stats_loading {
+            let collections: Vec<String> = tab.table_summaries.iter()
+                .filter(|s| s.row_count.is_none() && !tab.pending_stats.contains(&s.name))
+                .map(|s| s.name.clone())
+                .collect();
+            if !collections.is_empty() {
+                tracing::info!(count = collections.len(), "开始加载集合统计信息");
+                for name in &collections {
+                    tab.pending_stats.insert(name.clone());
+                }
+                tab.stats_loading = true;
+                let action = SummaryContextAction::LoadCollectionStats {
+                    connection_id: tab.connection_id.clone(),
+                    database: tab.database.clone(),
+                    collections,
+                };
+                tab.pending_actions.push(action);
+            }
+        }
+
+        TabUiAction::None
+    }
+
     fn render_table_tab(ui: &mut egui::Ui, tab: &mut TableTabState, pending_batch_save: bool, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> TabUiAction {
         tab.committed_edit_this_frame = false;
         let palette = mac_ui_palette_from_ui(ui);
@@ -8566,7 +9641,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     if tab.preview.is_some() || tab.error.is_some() {
                                         let live_preview_cursor = if tab.database_kind == DatabaseKind::MongoDb
                                             && {
-                                                let active: Vec<_> = tab.preview_sort.clauses.iter().filter(|c| c.column.is_some()).collect();
+                                                let active: Vec<_> = tab.preview_sort.clauses.iter().filter(|c| c.enabled && c.column.is_some()).collect();
                                                 active.is_empty()
                                                     || (active.len() == 1 && active[0].column.as_deref() == Some("_id"))
                                             }
@@ -9414,6 +10489,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 );
                                                             }
                                                             ui.style_mut().visuals.widgets.inactive.bg_stroke = prev_inactive_stroke;
+                                                            let toggle_label = if clause.enabled { "✓" } else { "⊘" };
+                                                            let toggle_style = if clause.enabled {
+                                                                mini_accent_style(colors, fonts.sm)
+                                                            } else {
+                                                                mini_subtle_style(colors, fonts.sm)
+                                                            };
+                                                            let toggle_btn = mini_button(ui, toggle_label, toggle_style);
+                                                            let check_hint = if clause.enabled { tr!("禁用条件") } else { tr!("启用条件") };
+                                                            if toggle_btn.on_hover_text(check_hint).clicked() {
+                                                                clause.enabled = !clause.enabled;
+                                                            }
                                                             let add_enabled = clause_count < 8;
                                                             let add_btn = ui.add_enabled_ui(add_enabled, |ui| {
                                                                 mini_button(ui, "+", mini_subtle_style(colors, fonts.sm))
@@ -9601,6 +10687,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 &dir_items,
                                                             ) {
                                                                 clause.descending = sel == 1;
+                                                            }
+                                                            let toggle_label = if clause.enabled { "✓" } else { "⊘" };
+                                                            let toggle_style = if clause.enabled {
+                                                                mini_accent_style(colors, fonts.sm)
+                                                            } else {
+                                                                mini_subtle_style(colors, fonts.sm)
+                                                            };
+                                                            let toggle_btn = mini_button(ui, toggle_label, toggle_style);
+                                                            let check_hint = if clause.enabled { tr!("禁用条件") } else { tr!("启用条件") };
+                                                            if toggle_btn.on_hover_text(check_hint).clicked() {
+                                                                clause.enabled = !clause.enabled;
                                                             }
                                                             let add_enabled = clause_count < 8;
                                                             let add_btn = ui.add_enabled_ui(add_enabled, |ui| {
@@ -11349,7 +12446,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             ui.label(RichText::new("⚠").size(self.theme.fonts.heading).color(colors.warning_icon));
                             ui.label(RichText::new(&title).size(self.theme.fonts.code).color(palette.title).strong());
                         });
-                        if pending.is_truncate {
+                        if pending.batch_count > 1 {
+                            if pending.is_truncate {
+                                ui.label(RichText::new(tr!("确认要清空 {} 个表吗？此操作不可撤销。", pending.batch_count)).size(self.theme.fonts.lg).color(palette.text));
+                            } else {
+                                ui.label(RichText::new(tr!("确认要删除 {} 个表吗？此操作不可撤销。", pending.batch_count)).size(self.theme.fonts.lg).color(palette.text));
+                            }
+                        } else if pending.is_truncate {
                             ui.label(RichText::new(tr!("确认要清空「{}」吗？此操作不可撤销。", name)).size(self.theme.fonts.lg).color(palette.text));
                         } else {
                             ui.label(RichText::new(tr!("确认要删除「{}」吗？此操作不可撤销。", name)).size(self.theme.fonts.lg).color(palette.text));
@@ -11376,7 +12479,41 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         if should_confirm {
             if let Some(pending) = self.ddl_pending_delete.take() {
-                self.spawn_ddl_action(pending.action, String::new(), String::new(), String::new());
+                if pending.batch_count > 1 {
+                    // 批量操作：为每个表名创建独立的 DDL action
+                    let action = &pending.action;
+                    for name in &pending.names {
+                        let item_action = match action {
+                            DdlAction::TruncateTable { connection_id, database, schema, kind, .. } => {
+                                DdlAction::TruncateTable {
+                                    connection_id: connection_id.clone(),
+                                    database: database.clone(),
+                                    schema: schema.clone(),
+                                    name: name.clone(),
+                                    kind: *kind,
+                                }
+                            }
+                            DdlAction::DropTable { connection_id, database, schema, is_view, kind, .. } => {
+                                DdlAction::DropTable {
+                                    connection_id: connection_id.clone(),
+                                    database: database.clone(),
+                                    schema: schema.clone(),
+                                    name: name.clone(),
+                                    is_view: *is_view,
+                                    kind: *kind,
+                                }
+                            }
+                            _ => continue,
+                        };
+                        self.spawn_ddl_action(item_action, String::new(), String::new(), String::new());
+                    }
+                    // 清空选中状态
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                        tab.selected_indices.clear();
+                    }
+                } else {
+                    self.spawn_ddl_action(pending.action, String::new(), String::new(), String::new());
+                }
             }
         } else if should_close {
             self.ddl_pending_delete = None;
@@ -11806,6 +12943,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let (conn_id, action, _) = self.ddl_pending_action.take().unwrap();
                 self.status_message = tr!("操作成功").into();
                 self.apply_ddl_to_cache(&conn_id, &action, "");
+                // 如果当前是表信息标签，重命名/删除后需刷新
+                if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.needs_reload = true;
+                }
             }
             Ok(Err(e)) => {
                 self.ddl_pending_action = None;
@@ -13522,6 +14663,12 @@ enum SidebarAction {
     CommitTreeRename,
     CancelTreeRename,
     StartTreeRename(ExplorerNode),
+    OpenTableSummary {
+        connection_id: String,
+        database: String,
+        schema: Option<String>,
+        db_label: String,
+    },
 }
 
 enum TabUiAction {
@@ -18187,6 +19334,138 @@ fn preview_selected_row_indices(tab: &TableTabState, fallback_row_index: usize) 
     }
 }
 
+fn summary_row_selected(tab: &TableSummaryTabState, row_index: usize) -> bool {
+    tab.selected_indices.contains(&row_index)
+}
+
+fn set_single_summary_selection(tab: &mut TableSummaryTabState, row_index: usize) {
+    tab.selected_indices.clear();
+    tab.selected_indices.insert(row_index);
+}
+
+fn toggle_summary_selection(tab: &mut TableSummaryTabState, row_index: usize) {
+    if !tab.selected_indices.remove(&row_index) {
+        tab.selected_indices.insert(row_index);
+    }
+}
+
+fn extend_summary_selection(tab: &mut TableSummaryTabState, row_index: usize) {
+    let anchor = tab.selected_indices.iter().copied().max().unwrap_or(row_index);
+    tab.selected_indices.clear();
+    for index in anchor.min(row_index)..=anchor.max(row_index) {
+        tab.selected_indices.insert(index);
+    }
+}
+
+fn format_count(v: i64) -> String {
+    let s = v.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
+fn summary_table_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)> {
+    // (header, initial_width, is_numeric)
+    match db_kind {
+        DatabaseKind::MySql => vec![
+            (tr!("表名"), 150.0, false),
+            (tr!("行数"), 90.0, true),
+            (tr!("总大小"), 80.0, true),
+            (tr!("数据大小"), 80.0, true),
+            (tr!("索引大小"), 80.0, true),
+            (tr!("引擎"), 70.0, false),
+            (tr!("排序规则"), 110.0, false),
+            (tr!("主键"), 100.0, false),
+            (tr!("注释"), 150.0, false),
+            (tr!("类型"), 80.0, false),
+            (tr!("创建时间"), 140.0, false),
+        ],
+        DatabaseKind::Postgres => vec![
+            (tr!("表名"), 150.0, false),
+            (tr!("行数"), 90.0, true),
+            (tr!("总大小"), 80.0, true),
+            (tr!("数据大小"), 80.0, true),
+            (tr!("索引大小"), 80.0, true),
+            (tr!("主键"), 100.0, false),
+            (tr!("注释"), 200.0, false),
+            (tr!("类型"), 100.0, false),
+        ],
+        DatabaseKind::MongoDb => vec![
+            (tr!("集合名"), 150.0, false),
+            (tr!("文档数"), 90.0, true),
+            (tr!("总大小"), 80.0, true),
+            (tr!("数据大小"), 80.0, true),
+            (tr!("索引大小"), 80.0, true),
+            (tr!("主键"), 100.0, false),
+            (tr!("类型"), 80.0, false),
+        ],
+    }
+}
+
+fn estimate_summary_column_widths(
+    cols: &[(&str, f32, bool)],
+    summaries: &[driver_api::TableSummary],
+    db_kind: DatabaseKind,
+) -> Vec<f32> {
+    cols.iter()
+        .enumerate()
+        .map(|(col_idx, &(header, _, _))| {
+            let header_w = estimate_table_header_width(header);
+            let body_w = summaries
+                .iter()
+                .take(300)
+                .map(|s| estimate_table_text_width(&summary_cell_value(s, col_idx, db_kind)) + 20.0)
+                .fold(0.0, f32::max);
+            let body_auto = body_w.clamp(88.0, 300.0);
+            header_w.max(body_auto).max(88.0)
+        })
+        .collect()
+}
+
+fn summary_cell_value(summary: &driver_api::TableSummary, col_index: usize, db_kind: DatabaseKind) -> String {
+    let cols = summary_table_columns(db_kind);
+    let col_name = cols.get(col_index).map(|c| c.0).unwrap_or_default();
+    match col_name {
+        "表名" | "集合名" => summary.name.clone(),
+        "类型" => summary.table_type.clone(),
+        "行数" | "文档数" => summary.row_count.map_or(String::new(), |v| format_count(v)),
+        "总大小" => summary.total_size.map_or(String::new(), |v| format_bytes(v as u64)),
+        "数据大小" => summary.data_size.map_or(String::new(), |v| format_bytes(v as u64)),
+        "索引大小" => summary.index_size.map_or(String::new(), |v| format_bytes(v as u64)),
+        "引擎" => summary.engine.clone().unwrap_or_default(),
+        "排序规则" => summary.collation.clone().unwrap_or_default(),
+        "主键" => summary.primary_keys.join(", "),
+        "注释" => summary.comment.clone().unwrap_or_default(),
+        "创建时间" => summary.create_time.as_ref().map_or(String::new(), |v| {
+            if v.len() >= 19 { v[..19].to_string() } else { v.clone() }
+        }),
+        _ => String::new(),
+    }
+}
+
+fn summary_to_node(s: &driver_api::TableSummary, tab: &TableSummaryTabState) -> ExplorerNode {
+    ExplorerNode {
+        id: format!("{}::{}", tab.connection_id, s.name),
+        connection_id: tab.connection_id.clone(),
+        name: s.name.clone(),
+        node_type: if s.table_type == "VIEW" || s.table_type == "MATERIALIZED VIEW" {
+            ExplorerNodeType::View
+        } else {
+            ExplorerNodeType::Table
+        },
+        parent_id: Some(String::new()),
+        database: Some(tab.database.clone()),
+        schema: tab.schema.clone(),
+        expandable: false,
+        loaded: true,
+    }
+}
+
 fn query_row_is_selected(rows: &BTreeSet<usize>, row: &Option<usize>, row_index: usize) -> bool {
     rows.contains(&row_index) || *row == Some(row_index)
 }
@@ -21212,7 +22491,7 @@ fn paint_table_grid_lines(
 
 fn sort_indicator(sort_state: &TableSortState, column: &str) -> Option<bool> {
     for clause in &sort_state.clauses {
-        if clause.column.as_deref() == Some(column) {
+        if clause.enabled && clause.column.as_deref() == Some(column) {
             return Some(clause.descending);
         }
     }
@@ -21224,6 +22503,7 @@ fn set_table_sort_state(sort_state: &mut TableSortState, column: &str, descendin
     sort_state.clauses.push(TableSortClause {
         column: Some(column.to_string()),
         descending,
+        enabled: true,
     });
 }
 
@@ -21235,6 +22515,7 @@ fn table_sort_summary(sort_state: &TableSortState) -> Option<String> {
     let parts: Vec<String> = sort_state
         .clauses
         .iter()
+        .filter(|c| c.enabled)
         .filter_map(|c| {
             c.column.as_ref().map(|col| {
                 format!(
@@ -21262,7 +22543,7 @@ fn has_active_sort(sort_state: &TableSortState) -> bool {
     sort_state
         .clauses
         .iter()
-        .any(|c| c.column.is_some())
+        .any(|c| c.enabled && c.column.is_some())
 }
 
 fn apply_table_sort_choice(
@@ -21372,6 +22653,7 @@ impl Default for TableFilterClause {
             operator: TableFilterOperator::default(),
             value: String::new(),
             second_value: String::new(),
+            enabled: true,
         }
     }
 }
@@ -21431,18 +22713,19 @@ fn ensure_table_filter_column(filter: &mut TableFilterState, columns: &[String])
 }
 
 fn table_filter_summary(filter: &TableFilterState) -> Option<String> {
-    let summaries = filter
+    let enabled_and_summaries: Vec<_> = filter
         .clauses
         .iter()
-        .filter_map(table_filter_clause_summary)
-        .collect::<Vec<_>>();
-    if summaries.is_empty() {
+        .filter(|c| c.enabled)
+        .filter_map(|c| table_filter_clause_summary(c).map(|s| (c.joiner, s)))
+        .collect();
+    if enabled_and_summaries.is_empty() {
         return None;
     }
 
-    let mut result = vec![summaries[0].clone()];
-    for (clause, summary) in filter.clauses.iter().skip(1).zip(summaries.iter().skip(1)) {
-        result.push(format!("{} {summary}", clause.joiner.label()));
+    let mut result = vec![enabled_and_summaries[0].1.clone()];
+    for (joiner, summary) in enabled_and_summaries.into_iter().skip(1) {
+        result.push(format!("{} {summary}", joiner.label()));
     }
     Some(result.join(" "))
 }
@@ -21466,6 +22749,7 @@ fn build_mongo_preview_cmd(
     let sort_parts: Vec<String> = sort
         .clauses
         .iter()
+        .filter(|c| c.enabled)
         .filter_map(|c| {
             c.column.as_ref().filter(|col| !col.trim().is_empty()).map(|col| {
                 let dir = if c.descending { -1 } else { 1 };
@@ -21495,6 +22779,9 @@ fn build_mongo_filter_doc(filter: &TableFilterState, definition: Option<&TableDe
         .clauses
         .iter()
         .filter(|c| {
+            if !c.enabled {
+                return false;
+            }
             if c.operator == TableFilterOperator::Custom {
                 return !c.value.trim().is_empty();
             }
@@ -21685,6 +22972,7 @@ fn build_table_preview_sql(
     let order_parts: Vec<String> = sort
         .clauses
         .iter()
+        .filter(|c| c.enabled)
         .filter_map(|c| {
             c.column.as_ref().map(|col| {
                 format!(
@@ -21734,6 +23022,7 @@ fn build_table_preview_display_sql(
     let order_parts: Vec<String> = sort
         .clauses
         .iter()
+        .filter(|c| c.enabled)
         .filter_map(|c| {
             c.column.as_ref().map(|col| {
                 format!(
@@ -21765,6 +23054,7 @@ fn build_table_filter_clause(
     let clauses = filter
         .clauses
         .iter()
+        .filter(|c| c.enabled)
         .filter_map(|clause| {
             build_single_table_filter_clause(database_kind, clause).map(|sql| (clause.joiner, sql))
         })
@@ -21784,6 +23074,7 @@ fn build_table_filter_display_clause(filter: &TableFilterState) -> Option<String
     let clauses = filter
         .clauses
         .iter()
+        .filter(|c| c.enabled)
         .filter_map(|clause| {
             build_single_table_filter_display_clause(clause).map(|sql| (clause.joiner, sql))
         })
@@ -22556,7 +23847,7 @@ fn sort_query_result_rows(result: &mut QueryResult, sort_state: &TableSortState)
     let active: Vec<_> = sort_state
         .clauses
         .iter()
-        .filter(|c| c.column.is_some())
+        .filter(|c| c.enabled && c.column.is_some())
         .collect();
     if active.is_empty() {
         return;
@@ -24621,6 +25912,12 @@ impl TabKindMarker for QueryTabState {
 impl TabKindMarker for TableTabState {
     fn tab_icon(&self) -> &'static str {
         "▦"
+    }
+}
+
+impl TabKindMarker for TableSummaryTabState {
+    fn tab_icon(&self) -> &'static str {
+        "☰"
     }
 }
 

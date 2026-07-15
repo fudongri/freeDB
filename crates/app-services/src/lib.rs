@@ -682,6 +682,24 @@ impl AppServices {
         self.session_manager.rename_table(&profile, &password, database, schema, old_name, new_name).await.map_err(into_anyhow)
     }
 
+    pub async fn load_tables_summary(&self, connection_id: &str, database: &str, schema: Option<&str>) -> Result<Vec<driver_api::TableSummary>> {
+        let profile = self.require_connection(connection_id)?;
+        let password = self.require_saved_password(connection_id)?;
+        self.session_manager
+            .load_tables_summary(&profile, &password, database, schema)
+            .await
+            .map_err(into_anyhow)
+    }
+
+    pub async fn load_collection_stats(&self, connection_id: &str, database: &str, collection: &str) -> Result<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>> {
+        let profile = self.require_connection(connection_id)?;
+        let password = self.require_saved_password(connection_id)?;
+        self.session_manager
+            .load_collection_stats(&profile, &password, database, collection)
+            .await
+            .map_err(into_anyhow)
+    }
+
     pub fn save_ui_state(&self, key: &str, value: &str) -> Result<()> {
         if let Err(error) = self.connection_store.save_ui_state(UiStateValue {
             key: key.to_string(),

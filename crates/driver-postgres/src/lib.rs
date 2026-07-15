@@ -523,6 +523,87 @@ impl DatabaseDriver for PostgresDriver {
         let client = pg_client(handle)?;
         simple_query(client, &sql).await
     }
+
+    async fn load_tables_summary(
+        &self,
+        handle: &mut ConnectionHandle,
+        _database: &str,
+        schema: Option<&str>,
+    ) -> AppResult<Vec<driver_api::TableSummary>> {
+        let client = pg_client(handle)?;
+        let schema_name = schema.unwrap_or("public");
+
+        // 主查询：表信息 + 大小
+        let sql = format!(
+            "SELECT c.relname, \
+                    CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' END, \
+                    COALESCE(s.n_live_tup, 0), \
+                    pg_total_relation_size(c.oid), \
+                    pg_relation_size(c.oid), \
+                    pg_indexes_size(c.oid), \
+                    obj_description(c.oid) \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid \
+             WHERE n.nspname = '{}' \
+               AND c.relkind IN ('r','v','m') \
+             ORDER BY c.relname",
+            schema_name.replace('\'', "''"),
+        );
+        let pg_rows = client.simple_query(&sql).await.map_err(map_pg_error)?;
+        let mut summaries = Vec::new();
+        for msg in &pg_rows {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let name = row.get(0).unwrap_or_default().to_string();
+                let table_type = row.get(1).unwrap_or("TABLE").to_string();
+                let row_count = row.get(2).and_then(|v| v.parse::<i64>().ok());
+                let total_size = row.get(3).and_then(|v| v.parse::<i64>().ok());
+                let data_size = row.get(4).and_then(|v| v.parse::<i64>().ok());
+                let index_size = row.get(5).and_then(|v| v.parse::<i64>().ok());
+                let comment = row.get(6).map(|s| s.to_string());
+                summaries.push(driver_api::TableSummary {
+                    name,
+                    table_type,
+                    row_count,
+                    total_size,
+                    data_size,
+                    index_size,
+                    engine: None,
+                    collation: None,
+                    primary_keys: Vec::new(),
+                    comment,
+                    create_time: None,
+                });
+            }
+        }
+
+        // 主键查询
+        let pk_sql = format!(
+            "SELECT tc.table_name, kcu.column_name \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema \
+             WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = '{}' \
+             ORDER BY kcu.ordinal_position",
+            schema_name.replace('\'', "''"),
+        );
+        let pk_rows = client.simple_query(&pk_sql).await.map_err(map_pg_error)?;
+        let mut pk_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for msg in &pk_rows {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let tbl = row.get(0).unwrap_or_default().to_string();
+                let col = row.get(1).unwrap_or_default().to_string();
+                pk_map.entry(tbl).or_default().push(col);
+            }
+        }
+        for s in &mut summaries {
+            if let Some(pks) = pk_map.remove(&s.name) {
+                s.primary_keys = pks;
+            }
+        }
+
+        Ok(summaries)
+    }
 }
 
 // ── helpers ──

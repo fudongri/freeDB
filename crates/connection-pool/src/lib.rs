@@ -81,18 +81,12 @@ impl ConnectionPool {
         };
         let key = pool_key(&profile.id, profile.kind, effective_db);
 
-        // 找一个空闲健康连接；一个 ping 失败则全部清掉（链路断开）
+        // 复用空闲连接（不做逐次 ping，keepalive 已定期清理死连接，操作失败时上层处理重连）
         let snapshot = self.snapshot(&key);
         for handle in &snapshot {
-            if let Ok(mut guard) = handle.try_lock() {
-                if self.timed_ping(&mut guard).await {
-                    tracing::debug!(key = %key, "连接池命中，复用空闲连接");
-                    return Ok(handle.clone());
-                }
-                drop(guard);
-                tracing::info!(key = %key, "ping 失败，清空该 key 下所有连接并重建");
-                self.clear_key(&key);
-                break;
+            if handle.try_lock().is_ok() {
+                tracing::debug!(key = %key, "连接池命中，复用空闲连接");
+                return Ok(handle.clone());
             }
         }
 

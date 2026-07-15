@@ -271,6 +271,7 @@ impl DatabaseDriver for MongoDbDriver {
         let start = Instant::now();
         let opts = FindOptions::builder()
             .limit(Some(limit as i64))
+            .batch_size(Some(limit.max(1024)))
             .build();
         let mut cursor = coll
             .find(doc! {})
@@ -440,6 +441,75 @@ impl DatabaseDriver for MongoDbDriver {
             message: None,
             mongo_types,
         })
+    }
+
+    async fn load_tables_summary(
+        &self,
+        handle: &mut ConnectionHandle,
+        database: &str,
+        _schema: Option<&str>,
+    ) -> AppResult<Vec<driver_api::TableSummary>> {
+        let (client, _) = mongo_client_db(handle)?;
+        let client = client.clone(); // cheap — 内部是 Arc
+        let db = client.database(database);
+
+        // 用 listCollections 一条命令获取集合列表（秒返回，不获取统计信息）
+        let mut specs: Vec<_> = db.list_collections().await.map_err(map_mongo_error)?
+            .try_collect().await.map_err(map_mongo_error)?;
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut summaries = Vec::new();
+        for spec in specs {
+            let table_type = match spec.collection_type {
+                mongodb::results::CollectionType::View => "VIEW",
+                _ => "COLLECTION",
+            }.into();
+            summaries.push(driver_api::TableSummary {
+                name: spec.name,
+                table_type,
+                row_count: None,
+                total_size: None,
+                data_size: None,
+                index_size: None,
+                engine: None,
+                collation: None,
+                primary_keys: vec!["_id".into()],
+                comment: None,
+                create_time: None,
+            });
+        }
+        Ok(summaries)
+    }
+
+    async fn load_collection_stats(
+        &self,
+        handle: &mut ConnectionHandle,
+        database: &str,
+        collection: &str,
+    ) -> AppResult<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>> {
+        let (client, _) = mongo_client_db(handle)?;
+        let client = client.clone();
+        let db = client.database(database);
+        let stats = db.run_command(doc! { "collStats": collection }).await.map_err(map_mongo_error)?;
+
+        fn to_i64(doc: &Document, key: &str) -> Option<i64> {
+            match doc.get(key)? {
+                Bson::Int32(v) => Some(*v as i64),
+                Bson::Int64(v) => Some(*v),
+                Bson::Double(v) => Some(*v as i64),
+                _ => None,
+            }
+        }
+
+        let count = to_i64(&stats, "count");
+        let size = to_i64(&stats, "size");
+        let storage = to_i64(&stats, "storageSize");
+        let idx_size = to_i64(&stats, "totalIndexSize");
+        let data_size = size.or(storage);
+        let total = match (data_size, idx_size) {
+            (Some(s), Some(i)) => Some(s + i),
+            (s, i) => s.or(i),
+        };
+        Ok(Some((count, data_size, idx_size, total)))
     }
 }
 
@@ -1398,11 +1468,10 @@ async fn collect_cursor(
     let mut mongo_types = HashMap::new();
     let mut t_fetch_total = 0u128;
     let mut t_convert_total = 0u128;
-    loop {
+    while cursor.advance().await.map_err(map_mongo_error)? {
         let t_fetch = std::time::Instant::now();
-        let maybe_doc = cursor.try_next().await.map_err(map_mongo_error)?;
+        let doc = cursor.deserialize_current().map_err(map_mongo_error)?;
         t_fetch_total += t_fetch.elapsed().as_micros();
-        let Some(doc) = maybe_doc else { break };
 
         let t_convert = std::time::Instant::now();
         let row_idx = rows.len();

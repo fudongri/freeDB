@@ -39,6 +39,22 @@ pub trait ConnectionProvider: Send + Sync {
     async fn ping(&self, handle: &mut ConnectionHandle) -> AppResult<()>;
 }
 
+/// 表/集合的汇总统计信息
+#[derive(Clone, Debug)]
+pub struct TableSummary {
+    pub name: String,
+    pub table_type: String,
+    pub row_count: Option<i64>,
+    pub total_size: Option<i64>,
+    pub data_size: Option<i64>,
+    pub index_size: Option<i64>,
+    pub engine: Option<String>,
+    pub collation: Option<String>,
+    pub primary_keys: Vec<String>,
+    pub comment: Option<String>,
+    pub create_time: Option<String>,
+}
+
 /// 数据库操作 trait —— 所有方法接收池化的 `&mut ConnectionHandle`，
 /// 不再自行建立连接。
 #[async_trait]
@@ -147,4 +163,21 @@ pub trait DatabaseDriver: Send + Sync {
         handle: &mut ConnectionHandle,
         table: &core_domain::TableRef,
     ) -> AppResult<core_domain::QueryResult>;
+
+    async fn load_tables_summary(
+        &self,
+        handle: &mut ConnectionHandle,
+        database: &str,
+        schema: Option<&str>,
+    ) -> AppResult<Vec<TableSummary>>;
+
+    /// 懒加载单个表/集合的统计信息（行数、大小）。默认不支持。
+    async fn load_collection_stats(
+        &self,
+        _handle: &mut ConnectionHandle,
+        _database: &str,
+        _collection: &str,
+    ) -> AppResult<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>> {
+        Ok(None)
+    }
 }
