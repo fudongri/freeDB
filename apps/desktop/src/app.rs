@@ -2778,7 +2778,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             is_view: matches!(node.node_type, ExplorerNodeType::View),
         };
 
-        // 非强制模式下，检查是否已有相同表的标签页，有则切换
+        // 非强制模式下，检查是否已有相同表的标签页，有则移到最右侧并切换
         if !force_new_tab {
             if let Some(idx) = self.tabs.iter().position(|t| {
                 matches!(t, WorkspaceTab::Table(tab) if
@@ -2788,7 +2788,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     && tab.table.table == table.table
                 )
             }) {
-                self.active_tab = idx;
+                let tab = self.tabs.remove(idx);
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len().saturating_sub(1);
+                self.scroll_tabs_to_end = true;
                 return;
             }
         }
