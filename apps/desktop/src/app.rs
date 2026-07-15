@@ -3957,6 +3957,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             Some(WorkspaceTab::TableSummary(tab)) => {
                 tab.loading = true;
                 tab.table_summaries.clear();
+                tab.pending_stats.clear();
+                tab.stats_loading = false;
+                tab.stats_sender = None;
+                tab.stats_receiver = None;
                 let connection_id = tab.connection_id.clone();
                 let database = tab.database.clone();
                 let schema = tab.schema.clone();
@@ -3972,7 +3976,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         result: result.map_err(|e| e.to_string()),
                     });
                 });
-                self.status_message = tr!("正在刷新表信息...").into();
+                self.status_message = if tab.database_kind == DatabaseKind::MongoDb { tr!("正在刷新集合信息...").into() } else { tr!("正在刷新表信息...").into() };
             }
             Some(WorkspaceTab::Dashboard) | None => {
                 self.refresh_connections();
@@ -4607,6 +4611,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
                 SidebarAction::OpenTable { node, load_data, force_new_tab } => self.open_table_tab(&node, load_data, force_new_tab),
                 SidebarAction::OpenTableSummary { connection_id, database, schema, db_label } => {
+                    // 检查是否已有相同库的表汇总标签页，有则移到最右侧并切换
+                    if let Some(idx) = self.tabs.iter().position(|t| {
+                        matches!(t, WorkspaceTab::TableSummary(ts) if
+                            ts.connection_id == connection_id
+                            && ts.database == database
+                            && ts.schema == schema
+                        )
+                    }) {
+                        let tab = self.tabs.remove(idx);
+                        self.tabs.push(tab);
+                        self.active_tab = self.tabs.len().saturating_sub(1);
+                        self.scroll_tabs_to_end = true;
+                    } else {
                     let database_kind = self.database_kind_for_connection(&connection_id);
                     let tab_id = format!("table-summary-{}", uuid::Uuid::new_v4());
                     let conn_name = self.connections.iter().find(|c| c.id == connection_id).map(|c| c.name.as_str()).unwrap_or(&connection_id);
@@ -4657,6 +4674,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             result: result.map_err(|e| e.to_string()),
                         });
                     });
+                    } // end else (new tab)
                 }
                 SidebarAction::RefreshConnection(connection_id) => {
                     self.collapse_connection_tree(&connection_id);
@@ -5324,6 +5342,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View) {
                     actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: true, force_new_tab: false });
                 } else if node.expandable {
+                    // Database/Schema 双击同时打开表汇总
+                    match node.node_type {
+                        ExplorerNodeType::Database => {
+                            actions.push(SidebarAction::OpenTableSummary {
+                                connection_id: node.connection_id.clone(),
+                                database: node.name.clone(),
+                                schema: None,
+                                db_label: node.name.clone(),
+                            });
+                        }
+                        ExplorerNodeType::Schema => {
+                            actions.push(SidebarAction::OpenTableSummary {
+                                connection_id: node.connection_id.clone(),
+                                database: node.database.clone().unwrap_or_default(),
+                                schema: Some(node.name.clone()),
+                                db_label: node.name.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
                     actions.push(SidebarAction::ToggleNode(
                         node.connection_id.clone(),
                         node.clone(),
@@ -5744,6 +5782,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     // 检查 TableSummary 标签是否需要重新加载
                     if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
                         if tab.needs_reload {
+                            let db_kind = tab.database_kind;
                             tab.needs_reload = false;
                             tab.loading = true;
                             tab.table_summaries.clear();
@@ -5767,6 +5806,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     result: result.map_err(|e| e.to_string()),
                                 });
                             });
+                            self.status_message = if db_kind == DatabaseKind::MongoDb { tr!("正在刷新集合信息...").into() } else { tr!("正在刷新表信息...").into() };
                         }
                     }
 
@@ -8933,14 +8973,28 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut sorted_indices = filtered_indices;
         if let Some(sort_col) = tab.sort_column {
             sorted_indices.sort_by(|&a, &b| {
-                let va = summary_cell_value(&tab.table_summaries[a], sort_col, tab.database_kind);
-                let vb = summary_cell_value(&tab.table_summaries[b], sort_col, tab.database_kind);
-                // 尝试数字排序
-                let na = va.replace(",", "").parse::<f64>().ok();
-                let nb = vb.replace(",", "").parse::<f64>().ok();
+                let sa = &tab.table_summaries[a];
+                let sb = &tab.table_summaries[b];
+                let cols = summary_table_columns(tab.database_kind);
+                let col_name = cols.get(sort_col).map(|c| c.0).unwrap_or_default();
+                // 优先用原始数值排序
+                let (na, nb) = match col_name {
+                    "行数" | "文档数" => (sa.row_count.map(|v| v as f64), sb.row_count.map(|v| v as f64)),
+                    "总大小" => (sa.total_size.map(|v| v as f64), sb.total_size.map(|v| v as f64)),
+                    "数据大小" => (sa.data_size.map(|v| v as f64), sb.data_size.map(|v| v as f64)),
+                    "索引大小" => (sa.index_size.map(|v| v as f64), sb.index_size.map(|v| v as f64)),
+                    _ => {
+                        let va = summary_cell_value(sa, sort_col, tab.database_kind);
+                        let vb = summary_cell_value(sb, sort_col, tab.database_kind);
+                        let ord = va.cmp(&vb);
+                        return if tab.sort_ascending { ord } else { ord.reverse() };
+                    }
+                };
                 let ord = match (na, nb) {
                     (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
-                    _ => va.cmp(&vb),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
                 };
                 if tab.sort_ascending { ord } else { ord.reverse() }
             });
@@ -8987,7 +9041,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             .font(egui::TextStyle::Small)
                                             .desired_width(200.0)
                                             .frame(false)
-                                            .hint_text(tr!("搜索表名...")),
+                                            .hint_text(if tab.database_kind == DatabaseKind::MongoDb { tr!("搜索集合名...") } else { tr!("搜索表名...") }),
                                     );
                                 });
 
@@ -9047,6 +9101,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 tab.col_widths = estimated;
                             }
 
+                            let header_painter = ui.painter().clone();
+                            let mut column_right_edges: Vec<f32> = vec![];
+                            let mut is_hovering_header = false;
+                            let mut hovered_header_col_idx: Option<usize> = None;
+                            let header_y_start = ui.cursor().top();
+
                             let mut table = TableBuilder::new(ui)
                                 .vscroll(true)
                                 .striped(true)
@@ -9096,8 +9156,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 None => {}
                                             }
 
-                                            // 列宽拖拽调整手柄（仅表头）
                                             let cell_rect = ui.max_rect();
+                                            column_right_edges.push(cell_rect.right() - 1.0);
+                                            if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                                is_hovering_header = true;
+                                                hovered_header_col_idx = Some(col_idx);
+                                            }
+
+                                            // 列宽拖拽调整手柄（仅表头）
                                             let resize_handle_x = cell_rect.right() - 3.0;
                                             let resize_handle_rect = egui::Rect::from_min_max(
                                                 egui::pos2(resize_handle_x, cell_rect.top()),
@@ -9222,17 +9288,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             egui::FontId::new(fonts.base, egui::FontFamily::Proportional)
                                                         };
                                                         let galley = ui.painter().layout_no_wrap(text.clone(), font_id, text_color);
-                                                        let text_pos = if is_numeric {
-                                                            egui::pos2(
-                                                                content_rect.right() - galley.size().x,
-                                                                content_rect.center().y - galley.size().y / 2.0,
-                                                            )
-                                                        } else {
-                                                            egui::pos2(
-                                                                content_rect.left(),
-                                                                content_rect.center().y - galley.size().y / 2.0,
-                                                            )
-                                                        };
+                                                        let text_pos = egui::pos2(
+                                                            content_rect.left(),
+                                                            content_rect.center().y - galley.size().y / 2.0,
+                                                        );
                                                         ui.painter().galley(text_pos, galley, text_color);
                                                     }
                                                     } // end else (not renaming)
@@ -9267,15 +9326,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             let is_view = row_type == "VIEW" || row_type == "MATERIALIZED VIEW";
                                                             let kind = tab.database_kind;
 
-                                                            // 如果多选，显示批量操作
-                                                            let selected = if tab.selected_indices.contains(&ri) {
-                                                                tab.selected_indices.len()
-                                                            } else {
+                                                            // 右键未选中行：选中该行并取消其他选中；已选中则不改变选区
+                                                            if !tab.selected_indices.contains(&ri) {
+                                                                tab.selected_indices.clear();
                                                                 tab.selected_indices.insert(ri);
-                                                                tab.selected_indices.len()
-                                                            };
+                                                            }
+                                                            let selected = tab.selected_indices.len();
                                                             if selected > 1 {
-                                                                if ui.button(tr!("打开 {} 个表", selected)).clicked() {
+                                                                if ui.button(if tab.database_kind == DatabaseKind::MongoDb { tr!("打开 {} 个集合", selected) } else { tr!("打开 {} 个表", selected) }).clicked() {
                                                                     for &idx in &tab.selected_indices {
                                                                         if let Some(s) = tab.table_summaries.get(idx) {
                                                                             tab.pending_actions.push(SummaryContextAction::OpenTable {
@@ -9427,7 +9485,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     tab.table_summaries.get(idx).map_or(false, |s| s.table_type != "VIEW" && s.table_type != "MATERIALIZED VIEW")
                                                                 });
                                                                 if has_tables {
-                                                                    let batch_truncate_label = tr!("清空 {} 个表", selected);
+                                                                    let batch_truncate_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("清空 {} 个集合", selected) } else { tr!("清空 {} 个表", selected) };
                                                                     if ui.button(batch_truncate_label).clicked() {
                                                                         let names: Vec<String> = tab.selected_indices.iter()
                                                                             .filter_map(|&idx| tab.table_summaries.get(idx))
@@ -9455,7 +9513,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     }
                                                                 }
                                                                 // 批量删除
-                                                                let batch_del_label = tr!("删除 {} 个表", selected);
+                                                                let batch_del_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("删除 {} 个集合", selected) } else { tr!("删除 {} 个表", selected) };
                                                                 if ui.button(batch_del_label).clicked() {
                                                                     let names: Vec<String> = tab.selected_indices.iter()
                                                                         .filter_map(|&idx| tab.table_summaries.get(idx))
@@ -9549,9 +9607,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         });
                                     }
                                 });
-                                // 写回列宽和拖拽状态
+                                // 写回列宽和拖拽状态，鼠标松开时清除拖拽
                                 tab.col_widths = local_widths;
-                                tab.resize_drag = local_resize;
+                                tab.resize_drag = if local_resize.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+                                    None
+                                } else {
+                                    local_resize
+                                };
+                                // 表头悬停时绘制列边界指示线
+                                if is_hovering_header && !column_right_edges.is_empty() {
+                                    let header_y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                    if let Some(idx) = hovered_header_col_idx {
+                                        if idx < column_right_edges.len() {
+                                            header_painter.vline(column_right_edges[idx], header_y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                        }
+                                        if idx > 0 && idx - 1 < column_right_edges.len() {
+                                            header_painter.vline(column_right_edges[idx - 1], header_y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                        }
+                                    }
+                                }
                                 }); // ScrollArea::horizontal
                         });
                 });
@@ -13562,8 +13636,10 @@ fn format_bytes(bytes: u64) -> String {
         format!("{} B", bytes)
     } else if bytes < 1024 * 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
+    } else if bytes < 1024 * 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 
@@ -13712,7 +13788,9 @@ impl eframe::App for DesktopApp {
             || self.ddl_pending_action.is_some()
             || self.pending_update_check.is_some()
             || self.update_download_rx.is_some()
+            || self.pending_table_summary.is_some()
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Table(t) if t.generate_data_running))
+            || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::TableSummary(ts) if ts.stats_loading))
         {
             // 后台任务进行中时主动请求后续帧，避免必须等鼠标再次移动才显示结果。
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -19474,13 +19552,13 @@ fn summary_table_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)
             (tr!("类型"), 100.0, false),
         ],
         DatabaseKind::MongoDb => vec![
-            (tr!("集合名"), 150.0, false),
-            (tr!("文档数"), 90.0, true),
-            (tr!("总大小"), 80.0, true),
-            (tr!("数据大小"), 80.0, true),
-            (tr!("索引大小"), 80.0, true),
-            (tr!("主键"), 100.0, false),
-            (tr!("类型"), 80.0, false),
+            (tr!("集合名"), 200.0, false),
+            (tr!("文档数"), 120.0, true),
+            (tr!("总大小"), 120.0, true),
+            (tr!("数据大小"), 120.0, true),
+            (tr!("索引大小"), 120.0, true),
+            (tr!("主键"), 150.0, false),
+            (tr!("类型"), 100.0, false),
         ],
     }
 }
