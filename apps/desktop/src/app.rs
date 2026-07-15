@@ -578,6 +578,8 @@ struct TableTabState {
     row_num_resize_drag: Option<f32>,
     show_column_filter: bool,
     search: TableSearchState,
+    // 筛选值智能提示缓存：列名 → [(值, 出现次数)]，仅缓存去重数 ≤ 20 的列
+    filter_value_suggestions: HashMap<String, Vec<(String, usize)>>,
     // MongoDB 游标分页：每页最后一条的 _id
     mongo_page_cursors: Vec<String>,
     // 生成测试数据
@@ -2105,6 +2107,7 @@ impl DesktopApp {
                                     }
                                 }
                                 tab.preview = Some(preview);
+                                tab.filter_value_suggestions.clear();
                                 tab.selected_preview_rows
                                     .retain(|index| *index < row_count);
                                 if tab
@@ -2833,6 +2836,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             row_num_resize_drag: None,
             show_column_filter: false,
             search: TableSearchState::default(),
+            filter_value_suggestions: HashMap::new(),
             mongo_page_cursors: Vec::new(),
             show_generate_data_popup: false,
             generate_data_needs_focus: false,
@@ -10343,6 +10347,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             &mut tab.preview_sort,
                                             &available_columns,
                                         );
+                                        update_filter_value_suggestions(tab);
                                         if tab.show_preview_filter
                                         {
                                             ui.add_space(6.0);
@@ -10477,11 +10482,51 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     .hint_text(RichText::new(tr!("结束值")).color(ui.visuals().weak_text_color())),
                                                                 );
                                                             } else if clause.operator.uses_primary_value() {
-                                                                ui.add_sized(
+                                                                let has_suggestions = clause.column.as_ref()
+                                                                    .and_then(|col| tab.filter_value_suggestions.get(col))
+                                                                    .map(|v| !v.is_empty())
+                                                                    .unwrap_or(false);
+                                                                let popup_id = egui::Id::new(format!("filter-val-popup-{}-{}", tab.title, index));
+                                                                let resp = ui.add_sized(
                                                                     [240.0, 22.0],
                                                                     TextEdit::singleline(&mut clause.value)
                                                                         .hint_text(RichText::new(clause.operator.value_hint()).color(ui.visuals().weak_text_color())),
                                                                 );
+                                                                if has_suggestions {
+                                                                    // 点击输入框切换下拉
+                                                                    if resp.clicked() {
+                                                                        if ui.memory(|m| m.is_popup_open(popup_id)) {
+                                                                            ui.memory_mut(|m| m.close_popup(popup_id));
+                                                                        } else {
+                                                                            ui.memory_mut(|m| m.open_popup(popup_id));
+                                                                        }
+                                                                    }
+                                                                    // 输入时自动打开下拉
+                                                                    if resp.changed() && !ui.memory(|m| m.is_popup_open(popup_id)) {
+                                                                        ui.memory_mut(|m| m.open_popup(popup_id));
+                                                                    }
+                                                                    let filter_text = clause.value.to_ascii_uppercase();
+                                                                    if let Some(vals) = clause.column.as_ref().and_then(|col| tab.filter_value_suggestions.get(col)) {
+                                                                        let has_matches = filter_text.is_empty()
+                                                                            || vals.iter().any(|(v, _)| v.to_ascii_uppercase().contains(&filter_text));
+                                                                        if !has_matches && ui.memory(|m| m.is_popup_open(popup_id)) {
+                                                                            ui.memory_mut(|m| m.close_popup(popup_id));
+                                                                        }
+                                                                        egui::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                                                                            ui.set_min_width(220.0);
+                                                                            for (val, count) in vals {
+                                                                                if !filter_text.is_empty() && !val.to_ascii_uppercase().contains(&filter_text) {
+                                                                                    continue;
+                                                                                }
+                                                                                let label = format!("{} ({})", val, count);
+                                                                                if ui.selectable_label(false, &label).clicked() {
+                                                                                    clause.value.clone_from(val);
+                                                                                    ui.memory_mut(|m| m.close_popup(popup_id));
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                    }
+                                                                }
                                                             } else {
                                                                 ui.small(
                                                                     RichText::new(tr!("当前条件无需输入值"))
@@ -25152,6 +25197,37 @@ fn toolbar_dropdown(
         ui.data_mut(|d| d.insert_temp(id, false));
     }
     result
+}
+
+/// 从当前页数据计算各列去重值及频次，仅保留去重数 ≤ 20 的列（排除 NULL）。
+fn update_filter_value_suggestions(tab: &mut TableTabState) {
+    if !tab.filter_value_suggestions.is_empty() {
+        return;
+    }
+    const MAX_DISTINCT: usize = 20;
+    let Some(ref preview) = tab.preview else { return };
+    if preview.rows.is_empty() {
+        return;
+    }
+    let mut map: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for row in &preview.rows {
+        for col in &preview.columns {
+            if let Some(QueryCellValue::Text(val)) = row.get(col) {
+                if !val.is_empty() {
+                    *map.entry(col.clone()).or_default().entry(val.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    tab.filter_value_suggestions = map
+        .into_iter()
+        .filter(|(_, vals)| vals.len() <= MAX_DISTINCT)
+        .map(|(col, vals)| {
+            let mut entries: Vec<(String, usize)> = vals.into_iter().collect();
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            (col, entries)
+        })
+        .collect();
 }
 
 fn mini_button(ui: &mut egui::Ui, label: &str, style: ButtonStyle) -> egui::Response {
