@@ -256,7 +256,7 @@ struct TableSummaryTabState {
 
 #[derive(Clone)]
 enum SummaryContextAction {
-    OpenTable { node: ExplorerNode, load_data: bool },
+    OpenTable { node: ExplorerNode, load_data: bool, force_new_tab: bool },
     NewQuery { connection_id: String, database: Option<String>, sql: String },
     TriggerSqlDump { connection_id: String, database: Option<String>, schema: Option<String>, table: String, is_view: bool, kind: DatabaseKind, include_data: bool },
     CopyTable { node: ExplorerNode, include_data: bool },
@@ -2561,7 +2561,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     fn open_selected_sidebar_item(&mut self) -> bool {
         if let Some(node) = self.selected_sidebar_node() {
             if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View) {
-                self.open_table_tab(&node, true);
+                self.open_table_tab(&node, true, false);
                 return true;
             }
         }
@@ -2769,7 +2769,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
     }
 
-    fn open_table_tab(&mut self, node: &ExplorerNode, load_data: bool) {
+    fn open_table_tab(&mut self, node: &ExplorerNode, load_data: bool, force_new_tab: bool) {
         let table = TableRef {
             connection_id: node.connection_id.clone(),
             database: node.database.clone(),
@@ -2777,6 +2777,22 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             table: node.name.clone(),
             is_view: matches!(node.node_type, ExplorerNodeType::View),
         };
+
+        // 非强制模式下，检查是否已有相同表的标签页，有则切换
+        if !force_new_tab {
+            if let Some(idx) = self.tabs.iter().position(|t| {
+                matches!(t, WorkspaceTab::Table(tab) if
+                    tab.table.connection_id == table.connection_id
+                    && tab.table.database == table.database
+                    && tab.table.schema == table.schema
+                    && tab.table.table == table.table
+                )
+            }) {
+                self.active_tab = idx;
+                return;
+            }
+        }
+
         let database_kind = self.database_kind_for_connection(&table.connection_id);
         let tab_id = format!("table-{}", uuid::Uuid::new_v4());
 
@@ -4586,7 +4602,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                     }
                 }
-                SidebarAction::OpenTable { node, load_data } => self.open_table_tab(&node, load_data),
+                SidebarAction::OpenTable { node, load_data, force_new_tab } => self.open_table_tab(&node, load_data, force_new_tab),
                 SidebarAction::OpenTableSummary { connection_id, database, schema, db_label } => {
                     let database_kind = self.database_kind_for_connection(&connection_id);
                     let tab_id = format!("table-summary-{}", uuid::Uuid::new_v4());
@@ -5120,7 +5136,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             tr!("查看表定义")
                         };
                         if ui.button(def_label).clicked() {
-                            actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: false });
+                            actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: false, force_new_tab: false });
+                            ui.close();
+                        }
+                        if ui.button(tr!("在新标签页中打开")).clicked() {
+                            actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: true, force_new_tab: true });
                             ui.close();
                         }
                         ui.separator();
@@ -5299,7 +5319,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             if response.double_clicked() && !is_node_loading {
                 if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View) {
-                    actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: true });
+                    actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: true, force_new_tab: false });
                 } else if node.expandable {
                     actions.push(SidebarAction::ToggleNode(
                         node.connection_id.clone(),
@@ -5774,7 +5794,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         tab.pending_open_table = None;
                     }
                     if let Some(node) = pending_open {
-                        self.open_table_tab(&node, true);
+                        self.open_table_tab(&node, true, false);
                     }
 
                     // 处理右键菜单动作
@@ -5785,8 +5805,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     };
                     for action in actions {
                         match action {
-                            SummaryContextAction::OpenTable { node, load_data } => {
-                                self.open_table_tab(&node, load_data);
+                            SummaryContextAction::OpenTable { node, load_data, force_new_tab } => {
+                                self.open_table_tab(&node, load_data, force_new_tab);
                             }
                             SummaryContextAction::NewQuery { connection_id, database, sql } => {
                                 self.create_query_tab(Some(connection_id), database, Some(sql));
@@ -9258,6 +9278,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             tab.pending_actions.push(SummaryContextAction::OpenTable {
                                                                                 node: summary_to_node(s, tab),
                                                                                 load_data: true,
+                                                                                force_new_tab: false,
                                                                             });
                                                                         }
                                                                     }
@@ -9278,6 +9299,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 tab.pending_actions.push(SummaryContextAction::OpenTable {
                                                                     node: node.clone(),
                                                                     load_data: false,
+                                                                    force_new_tab: false,
+                                                                });
+                                                                ui.close();
+                                                            }
+                                                            if ui.button(tr!("在新标签页中打开")).clicked() {
+                                                                tab.pending_actions.push(SummaryContextAction::OpenTable {
+                                                                    node: node.clone(),
+                                                                    load_data: true,
+                                                                    force_new_tab: true,
                                                                 });
                                                                 ui.close();
                                                             }
@@ -14695,7 +14725,7 @@ impl ConnectionFormState {
 enum SidebarAction {
     OpenConnection(String),
     ToggleNode(String, ExplorerNode),
-    OpenTable { node: ExplorerNode, load_data: bool },
+    OpenTable { node: ExplorerNode, load_data: bool, force_new_tab: bool },
     RefreshConnection(String),
     RefreshNode(String, ExplorerNode),
     DdlInput(DdlInputDialog),

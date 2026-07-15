@@ -154,6 +154,7 @@ fn en(key: &'static str) -> &'static str {
         "查看表定义" => "View Table Definition",
         "查看视图定义" => "View View Definition",
         "查看集合定义" => "View Collection Definition",
+        "在新标签页中打开" => "Open in New Tab",
         "仅查看定义，未加载数据。点击刷新可获取数据" => "Definition only, data not loaded. Click refresh to load data",
         "重命名视图" => "Rename View",
         "重命名表" => "Rename Table",
