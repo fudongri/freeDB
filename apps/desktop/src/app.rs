@@ -4482,7 +4482,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.close();
                                 }
                                 ui.separator();
-                                if ui.button(tr!("刷新")).clicked() {
+                                if menu_button_with_shortcut(ui, tr!("刷新"), &format!("{}+R", MOD_KEY)) {
                                     pending_actions.push(SidebarAction::RefreshConnection(
                                         connection.id.clone(),
                                     ));
@@ -5320,7 +5320,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     _ => {}
                 }
                 ui.separator();
-                if ui.button(tr!("刷新")).clicked() {
+                if menu_button_with_shortcut(ui, tr!("刷新"), &format!("{}+R", MOD_KEY)) {
                     actions.push(SidebarAction::RefreshNode(
                         node.connection_id.clone(),
                         node.clone(),
@@ -9382,7 +9382,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             } else {
                                                                 tr!("在表上新建查询")
                                                             };
-                                                            if ui.button(query_label).clicked() {
+                                                            if menu_button_with_shortcut(ui, query_label, &format!("{}+D", MOD_KEY)) {
                                                                 let sql = if kind == DatabaseKind::MongoDb {
                                                                     format!("db.{}.find({{}}).limit(100);\n", row_name)
                                                                 } else {
@@ -9596,7 +9596,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             }
                                                             ui.separator();
                                                             // 刷新
-                                                            if ui.button(tr!("刷新")).clicked() {
+                                                            if menu_button_with_shortcut(ui, tr!("刷新"), &format!("{}+R", MOD_KEY)) {
                                                                 tab.pending_actions.push(SummaryContextAction::Reload);
                                                                 ui.close();
                                                             }
