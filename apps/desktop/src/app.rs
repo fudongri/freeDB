@@ -27162,9 +27162,21 @@ fn render_query_editor(
 ) {
     let font_id = FontId::new(fonts.code, FontFamily::Monospace);
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
-    let frame_margin = 12.0_f32;
-    let gutter_width = 42.0_f32;
-    let wrap_width = (ui.available_width() - gutter_width - frame_margin * 2.0).max(0.0);
+    let logical_line_count = tab.sql.split('\n').count().max(1);
+    let gutter_digits = logical_line_count.to_string().len().max(2);
+    let gutter_sample = "9".repeat(gutter_digits);
+    let gutter_text_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout(
+                gutter_sample,
+                font_id.clone(),
+                palette.line_number,
+                f32::INFINITY,
+            )
+            .rect
+            .width()
+    });
+    let gutter_width = (gutter_text_width + 12.0).max(42.0);
     let gutter_row_height = row_height + 2.0;
 
     // ── 查找/替换栏 ──
@@ -27197,21 +27209,6 @@ fn render_query_editor(
         }
     }
 
-    // 预计算每行的视觉行数（考虑自动换行）
-    let gutter_row_counts: Vec<usize> = tab
-        .sql
-        .lines()
-        .map(|line| {
-            let mut job = sql_highlight_job_from_ui(ui, line);
-            job.wrap.max_width = wrap_width;
-            for section in &mut job.sections {
-                section.format.line_height = Some(gutter_row_height);
-            }
-            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-            galley.rows.len().max(1)
-        })
-        .collect();
-    let total_visual_rows: usize = gutter_row_counts.iter().sum();
     let current_line =
         current_line_number(&tab.sql, tab.cursor_range);
 
@@ -27232,7 +27229,6 @@ fn render_query_editor(
     };
 
     ui.set_min_height(remaining_editor_height);
-    let gutter_width = 42.0_f32;
     let gutter_rect = egui::Rect::from_min_size(
         ui.cursor().min,
         egui::vec2(gutter_width, remaining_editor_height),
@@ -27242,8 +27238,10 @@ fn render_query_editor(
         egui::vec2(ui.available_width(), remaining_editor_height),
     );
 
+    let mut gutter_rows: Vec<(f32, usize)> = Vec::new();
+
     // 编辑器（独立 ScrollArea，不与外层嵌套）
-    let scroll_output = ui.allocate_ui_at_rect(editor_rect, |ui| {
+    ui.allocate_ui_at_rect(editor_rect, |ui| {
         egui::Frame::new()
             .fill(palette.editor_bg)
             .inner_margin(egui::Margin::symmetric(12, 10))
@@ -27374,6 +27372,17 @@ fn render_query_editor(
                                 }
                             }
                         }
+
+                        gutter_rows.clear();
+                        let mut visual_line = 1usize;
+                        for row in &output.galley.rows {
+                            let center_y = output.galley_pos.y + row.pos.y + row.height() * 0.5;
+                            gutter_rows.push((center_y, visual_line));
+                            if row.ends_with_newline {
+                                visual_line += 1;
+                            }
+                        }
+
                         // 若当前匹配在可视区域外，触发滚动
                         if let Some(mr) = current_match_rect {
                             let visible = output.text_clip_rect;
@@ -27686,42 +27695,38 @@ fn render_query_editor(
             })  // Frame.show 结束，返回 InnerResponse<ScrollAreaOutput>
     }).inner.inner;  // allocate_ui_at_rect返回InnerResponse，提取最内层的ScrollAreaOutput
 
-    // 行号（使用ScrollArea的滚动偏移量同步滚动）
+    // 行号跟随 TextEdit 实际 galley 行位置绘制，避免长文本时自估算累计误差
     {
-        let scroll_offset = scroll_output.state.offset.y;
         let painter = ui.painter();
-        // 使用clip_rect限制行号只在gutter区域内绘制
         let clip_painter = painter.with_clip_rect(gutter_rect);
         clip_painter.rect_filled(gutter_rect, 0.0, palette.gutter_bg);
         let text_x = gutter_rect.right() - 6.0;
-        let gutter_top_padding = 10.0;
-        // 行号的起始Y坐标需要减去滚动偏移量
-        let mut y = gutter_rect.top() + gutter_top_padding + gutter_row_height * 0.5 - scroll_offset;
-        for (line_idx, &rows) in gutter_row_counts.iter().enumerate() {
-            let line = line_idx + 1;
-            let is_current = current_line == line;
-            for visual_row in 0..rows {
-                // 只绘制在可见区域内的行号
-                if y + gutter_row_height * 0.5 >= gutter_rect.top() && y - gutter_row_height * 0.5 <= gutter_rect.bottom() {
-                    if visual_row == 0 {
-                        if is_current {
-                            let highlight_rect = egui::Rect::from_min_max(
-                                egui::pos2(gutter_rect.left() + 2.0, y - gutter_row_height * 0.5),
-                                egui::pos2(gutter_rect.right() - 2.0, y + gutter_row_height * 0.5),
-                            );
-                            clip_painter.rect_filled(highlight_rect, colors.radius_md, palette.current_line_bg);
-                        }
-                        clip_painter.text(
-                            egui::pos2(text_x, y),
-                            Align2::RIGHT_CENTER,
-                            line.to_string(),
-                            FontId::new(fonts.code, FontFamily::Monospace),
-                            if is_current { palette.line_number_active } else { palette.line_number },
-                        );
-                    }
-                }
-                y += gutter_row_height;
+        let mut last_line: Option<usize> = None;
+        for (center_y, line) in gutter_rows {
+            if last_line == Some(line) {
+                continue;
             }
+            last_line = Some(line);
+            let is_current = current_line == line;
+            if center_y + gutter_row_height * 0.5 < gutter_rect.top()
+                || center_y - gutter_row_height * 0.5 > gutter_rect.bottom()
+            {
+                continue;
+            }
+            if is_current {
+                let highlight_rect = egui::Rect::from_min_max(
+                    egui::pos2(gutter_rect.left() + 2.0, center_y - gutter_row_height * 0.5),
+                    egui::pos2(gutter_rect.right() - 2.0, center_y + gutter_row_height * 0.5),
+                );
+                clip_painter.rect_filled(highlight_rect, colors.radius_md, palette.current_line_bg);
+            }
+            clip_painter.text(
+                egui::pos2(text_x, center_y),
+                Align2::RIGHT_CENTER,
+                line.to_string(),
+                FontId::new(fonts.code, FontFamily::Monospace),
+                if is_current { palette.line_number_active } else { palette.line_number },
+            );
         }
     }
     ui.allocate_rect(gutter_rect, egui::Sense::hover());
