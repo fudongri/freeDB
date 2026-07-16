@@ -11707,7 +11707,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         let palette = MacDialogPalette::from(&self.theme.colors);
-        let is_dark = ctx.style().visuals.dark_mode;
         let mut should_close = false;
         let mut should_confirm = false;
 
@@ -11755,13 +11754,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         let has_sql = delete_sql.is_some();
-        let sql_lines = delete_sql.as_ref().map(|s| s.lines().count()).unwrap_or(0) as f32;
-        let sql_h = if has_sql { (sql_lines * 18.0).min(300.0).max(70.0) } else { 0.0 };
         let card_w = if has_sql { 580.0 } else { 340.0 };
+        let header_h = if has_sql { 48.0 } else { 62.0 };
+        let footer_h = 40.0;
+        let sql_h = if has_sql { 112.0 } else { 0.0 };
+        let gap_header_to_sql = if has_sql { 4.0 } else { 0.0 };
+        let gap_sql_to_footer = if has_sql { 16.0 } else { 0.0 };
         let card_h = if has_sql {
-            130.0 + sql_h + 68.0
+            20.0 + header_h + gap_header_to_sql + sql_h + gap_sql_to_footer + footer_h + 20.0
         } else {
-            170.0
+            20.0 + header_h + 10.0 + footer_h + 20.0
         };
 
         egui::Area::new("delete-confirm".into())
@@ -11790,70 +11792,93 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         egui::StrokeKind::Outside,
                     );
 
-                    let inner = ui.max_rect().shrink(24.0);
+                    let inner = ui.max_rect().shrink2(egui::vec2(24.0, 20.0));
                     ui.allocate_ui_at_rect(inner, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 10.0);
-
-                        ui.label(
-                            RichText::new(tr!("删除确认"))
-                                .size(self.theme.fonts.xl).color(palette.title).strong(),
+                        let inner_rect = ui.max_rect();
+                        let header_rect = egui::Rect::from_min_size(
+                            inner_rect.min,
+                            egui::vec2(inner_rect.width(), header_h),
+                        );
+                        let footer_rect = egui::Rect::from_min_size(
+                            egui::pos2(inner_rect.min.x, inner_rect.max.y - footer_h),
+                            egui::vec2(inner_rect.width(), footer_h),
                         );
 
-                        ui.label(
-                            RichText::new(&message)
-                                .size(self.theme.fonts.md).color(palette.text),
-                        );
+                        ui.allocate_ui_at_rect(header_rect, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
+                            ui.label(
+                                RichText::new(tr!("删除确认"))
+                                    .size(self.theme.fonts.xl).color(palette.title).strong(),
+                            );
+                            ui.label(
+                                RichText::new(&message)
+                                    .size(self.theme.fonts.md).color(palette.text),
+                            );
+                        });
 
                         if let Some(ref sql) = delete_sql {
                             let mono_font = FontId::new(self.theme.fonts.mono, FontFamily::Monospace);
-                            let sql_bg = colors.dialog_sql_block_bg;
-                            egui::ScrollArea::vertical()
-                                .max_height(sql_h)
-                                .show(ui, |ui| {
-                                    egui::Frame::none()
-                                        .fill(sql_bg)
-                                        .rounding(self.theme.colors.radius_lg)
-                                        .inner_margin(egui::Margin::symmetric(10, 8))
-                                        .show(ui, |ui| {
-                                            ui.set_width(card_w - 68.0);
-                                            let job = egui::text::LayoutJob::simple(
-                                                sql.clone(),
-                                                mono_font.clone(),
-                                                palette.text,
-                                                ui.available_width(),
-                                            );
-                                            ui.add(egui::Label::new(job).wrap());
-                                        });
-                                });
+                            let sql_rect = egui::Rect::from_min_size(
+                                egui::pos2(inner_rect.min.x, header_rect.max.y + gap_header_to_sql),
+                                egui::vec2(inner_rect.width(), sql_h),
+                            );
+                            ui.allocate_ui_at_rect(sql_rect, |ui| {
+                                let sql_bg = colors.dialog_sql_block_bg;
+                                egui::ScrollArea::vertical()
+                                    .max_height(sql_rect.height())
+                                    .show(ui, |ui| {
+                                        egui::Frame::new()
+                                            .fill(sql_bg)
+                                            .corner_radius(egui::CornerRadius::same(self.theme.colors.radius_lg as u8))
+                                            .inner_margin(egui::Margin::symmetric(10, 8))
+                                            .show(ui, |ui| {
+                                                ui.set_width(card_w - 68.0);
+                                                let job = egui::text::LayoutJob::simple(
+                                                    sql.clone(),
+                                                    mono_font.clone(),
+                                                    palette.text,
+                                                    ui.available_width(),
+                                                );
+                                                ui.add(egui::Label::new(job).wrap());
+                                            });
+                                    });
+                            });
                         }
 
-                        ui.add_space(4.0);
+                        ui.allocate_ui_at_rect(footer_rect, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(
+                                    RichText::new(tr!("Enter 确认 · Esc 取消"))
+                                        .size(self.theme.fonts.sm)
+                                        .color(palette.weak_text),
+                                );
+                                ui.add_space(ui.available_width());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                    ui.spacing_mut().button_padding = egui::vec2(18.0, 7.0);
 
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                            ui.spacing_mut().button_padding = egui::vec2(16.0, 5.0);
+                                    if destructive_dialog_button(
+                                        ui,
+                                        tr!("删除"),
+                                        &self.theme.colors,
+                                        &self.theme.fonts,
+                                    ).clicked() {
+                                        should_confirm = true;
+                                        should_close = true;
+                                    }
 
-                            let delete_btn = egui::Button::new(
-                                RichText::new(tr!("删除 (Enter)"))
-                                    .size(self.theme.fonts.lg).color(self.theme.colors.confirm_button_text),
-                            )
-                            .fill(colors.delete_button_bg)
-                            .corner_radius(self.theme.colors.radius_lg);
-                            if ui.add(delete_btn).clicked() {
-                                should_confirm = true;
-                                should_close = true;
-                            }
-
-                            let cancel_btn = egui::Button::new(
-                                RichText::new(tr!("取消 (Esc)"))
-                                    .size(self.theme.fonts.lg).color(palette.title),
-                            )
-                            .fill(Color32::TRANSPARENT)
-                            .stroke(Stroke::new(1.0, palette.border))
-                            .corner_radius(self.theme.colors.radius_lg);
-                            if ui.add(cancel_btn).clicked() {
-                                should_close = true;
-                            }
+                                    if dialog_button(
+                                        ui,
+                                        tr!("取消"),
+                                        false,
+                                        &self.theme.colors,
+                                        &self.theme.fonts,
+                                    ).clicked() {
+                                        should_close = true;
+                                    }
+                                });
+                            });
                         });
                     });
                 });
@@ -12108,7 +12133,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         let palette = MacDialogPalette::from(&self.theme.colors);
-        let is_dark = ctx.style().visuals.dark_mode;
         let saving = self.batch_save_saving;
         let mut should_close = false;
         let mut should_confirm = false;
@@ -12154,11 +12178,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         let total_sql = sql_statements.len();
         let card_w = 680.0;
-        let sql_h = (total_sql as f32 * 56.0).min(440.0).max(80.0);
+        let header_h = 48.0;
+        let footer_h = 40.0;
+        let sql_h = 124.0;
+        let gap_header_to_sql = 2.0;
+        let gap_sql_to_footer = 18.0;
         let card_h = if saving {
-            120.0
+            132.0
         } else {
-            120.0 + sql_h + 68.0
+            20.0 + header_h + gap_header_to_sql + sql_h + gap_sql_to_footer + footer_h + 20.0
         };
 
         egui::Area::new("batch-save-confirm".into())
@@ -12187,7 +12215,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             egui::StrokeKind::Outside,
                         );
 
-                        let inner = ui.max_rect().shrink(24.0);
+                        let inner = ui.max_rect().shrink2(egui::vec2(24.0, 20.0));
                         ui.allocate_ui_at_rect(inner, |ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 10.0);
 
@@ -12202,71 +12230,97 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         );
                                     });
                                 } else {
-                                    ui.label(
-                                        RichText::new(tr!("确认保存"))
-                                            .size(self.theme.fonts.xl).color(palette.title).strong(),
-                                    );
-
-                                    ui.label(
-                                        RichText::new(tr!("即将执行 {} 条 SQL，修改 {} 个单元格：", total_sql, cell_count))
-                                            .size(self.theme.fonts.md).color(palette.text),
-                                    );
-
                                     let mono_font = FontId::new(self.theme.fonts.mono, FontFamily::Monospace);
-                                    let sql_bg = colors.dialog_sql_block_bg;
-                                    egui::ScrollArea::vertical()
-                                        .max_height(sql_h)
-                                        .show(ui, |ui| {
-                                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
-                                            for stmt in &sql_statements {
-                                                egui::Frame::none()
-                                                    .fill(sql_bg)
-                                                    .rounding(self.theme.colors.radius_lg)
-                                                    .inner_margin(egui::Margin::symmetric(10, 8))
-                                                    .show(ui, |ui| {
-                                                        ui.set_width(card_w - 68.0);
-                                                        let job = egui::text::LayoutJob::simple(
-                                                            stmt.clone(),
-                                                            mono_font.clone(),
-                                                            palette.text,
-                                                            ui.available_width(),
-                                                        );
-                                                        ui.add(egui::Label::new(job).wrap());
-                                                    });
-                                            }
-                                        });
-
-                                    ui.add_space(4.0);
-
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                            ui.spacing_mut().button_padding = egui::vec2(16.0, 5.0);
-
-                                            let confirm_btn = egui::Button::new(
-                                                RichText::new(tr!("确认 (Enter)"))
-                                                    .size(self.theme.fonts.lg).color(self.theme.colors.confirm_button_text),
-                                            )
-                                            .fill(colors.confirm_button_bg)
-                                            .corner_radius(self.theme.colors.radius_lg);
-                                            if ui.add(confirm_btn).clicked() {
-                                                should_confirm = true;
-                                                should_close = true;
-                                            }
-
-                                            let cancel_btn = egui::Button::new(
-                                                RichText::new(tr!("取消 (Esc)"))
-                                                    .size(self.theme.fonts.lg).color(palette.title),
-                                            )
-                                            .fill(Color32::TRANSPARENT)
-                                            .stroke(Stroke::new(1.0, palette.border))
-                                            .corner_radius(self.theme.colors.radius_lg);
-                                            if ui.add(cancel_btn).clicked() {
-                                                should_close = true;
-                                            }
-                                        },
+                                    let inner_rect = ui.max_rect();
+                                    let header_rect = egui::Rect::from_min_size(
+                                        inner_rect.min,
+                                        egui::vec2(inner_rect.width(), header_h),
                                     );
+                                    let sql_rect = egui::Rect::from_min_size(
+                                        egui::pos2(inner_rect.min.x, header_rect.max.y + gap_header_to_sql),
+                                        egui::vec2(inner_rect.width(), sql_h),
+                                    );
+                                    let footer_rect = egui::Rect::from_min_size(
+                                        egui::pos2(inner_rect.min.x, inner_rect.max.y - footer_h),
+                                        egui::vec2(inner_rect.width(), footer_h),
+                                    );
+
+                                    ui.allocate_ui_at_rect(header_rect, |ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
+                                        ui.label(
+                                            RichText::new(tr!("确认保存"))
+                                                .size(self.theme.fonts.xl).color(palette.title).strong(),
+                                        );
+                                        ui.label(
+                                            RichText::new(tr!("即将执行 {} 条 SQL，修改 {} 个单元格：", total_sql, cell_count))
+                                                .size(self.theme.fonts.md).color(palette.text),
+                                        );
+                                    });
+
+                                    ui.allocate_ui_at_rect(sql_rect, |ui| {
+                                        let sql_bg = colors.dialog_sql_block_bg;
+                                        egui::ScrollArea::vertical()
+                                            .max_height(sql_rect.height())
+                                            .show(ui, |ui| {
+                                                ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
+                                                for stmt in &sql_statements {
+                                                    egui::Frame::new()
+                                                        .fill(sql_bg)
+                                                        .corner_radius(egui::CornerRadius::same(self.theme.colors.radius_lg as u8))
+                                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                                        .show(ui, |ui| {
+                                                            ui.set_width(card_w - 68.0);
+                                                            let job = egui::text::LayoutJob::simple(
+                                                                stmt.clone(),
+                                                                mono_font.clone(),
+                                                                palette.text,
+                                                                ui.available_width(),
+                                                            );
+                                                            ui.add(egui::Label::new(job).wrap());
+                                                        });
+                                                }
+                                            });
+                                    });
+
+                                    ui.allocate_ui_at_rect(footer_rect, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.set_width(ui.available_width());
+                                        ui.label(
+                                            RichText::new(tr!("Enter 确认 · Esc 取消"))
+                                                .size(self.theme.fonts.sm)
+                                                .color(palette.weak_text),
+                                        );
+                                        ui.add_space(ui.available_width());
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                                ui.spacing_mut().button_padding = egui::vec2(18.0, 7.0);
+
+                                                if dialog_button(
+                                                    ui,
+                                                    tr!("确认"),
+                                                    true,
+                                                    &self.theme.colors,
+                                                    &self.theme.fonts,
+                                                ).clicked() {
+                                                        should_confirm = true;
+                                                        should_close = true;
+                                                    }
+
+                                                if dialog_button(
+                                                    ui,
+                                                    tr!("取消"),
+                                                    false,
+                                                    &self.theme.colors,
+                                                    &self.theme.fonts,
+                                                ).clicked() {
+                                                        should_close = true;
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    });
                                 }
                             },
                         );
@@ -12429,7 +12483,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
         let total_sql = sql_statements.len();
         let palette = MacDialogPalette::from(&self.theme.colors);
-        let is_dark = ctx.style().visuals.dark_mode;
         let mut should_close = false;
         let mut should_confirm = false;
 
@@ -12463,8 +12516,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         let card_w = 680.0;
-        let sql_h = (total_sql as f32 * 56.0).min(440.0).max(80.0);
-        let card_h = 120.0 + sql_h + 68.0;
+        let header_h = 48.0;
+        let footer_h = 40.0;
+        let sql_h = 124.0;
+        let gap_header_to_sql = 2.0;
+        let gap_sql_to_footer = 18.0;
+        let card_h = 20.0 + header_h + gap_header_to_sql + sql_h + gap_sql_to_footer + footer_h + 20.0;
 
         egui::Area::new("query-batch-save-confirm".into())
             .order(egui::Order::Foreground)
@@ -12488,75 +12545,99 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.painter().rect_filled(ui.max_rect(), r, bg);
                     ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
 
-                    let inner = ui.max_rect().shrink(20.0);
+                    let inner = ui.max_rect().shrink2(egui::vec2(24.0, 20.0));
                     ui.allocate_ui_at_rect(inner, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 10.0);
-
-                        ui.label(
-                            RichText::new(tr!("确认保存"))
-                                .size(self.theme.fonts.xl).color(palette.title).strong(),
-                        );
-
-                        ui.label(
-                            RichText::new(tr!("即将执行 {} 条 SQL，修改 {} 个单元格：", total_sql, cell_count))
-                                .size(self.theme.fonts.md).color(palette.text),
-                        );
-
                         let mono_font = FontId::new(self.theme.fonts.mono, FontFamily::Monospace);
-                        let sql_bg = self.theme.colors.dialog_sql_block_bg;
-                        egui::ScrollArea::vertical()
-                            .max_height(sql_h)
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
-                                for stmt in &sql_statements {
-                                    egui::Frame::none()
-                                        .fill(sql_bg)
-                                        .rounding(self.theme.colors.radius_lg)
-                                        .inner_margin(egui::Margin::symmetric(10, 8))
-                                        .show(ui, |ui| {
-                                            ui.set_width(card_w - 68.0);
-                                            let job = egui::text::LayoutJob::simple(
-                                                stmt.clone(),
-                                                mono_font.clone(),
-                                                palette.text,
-                                                ui.available_width(),
-                                            );
-                                            ui.add(egui::Label::new(job).wrap());
-                                        });
-                                }
-                            });
-
-                        ui.add_space(4.0);
-
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                ui.spacing_mut().button_padding = egui::vec2(16.0, 5.0);
-
-                                let confirm_btn = egui::Button::new(
-                                    RichText::new(tr!("执行 (Enter)"))
-                                        .size(self.theme.fonts.lg).color(self.theme.colors.confirm_button_text),
-                                )
-                                .fill(colors.confirm_button_bg)
-                                .corner_radius(self.theme.colors.radius_lg);
-                                if ui.add(confirm_btn).clicked() {
-                                    should_confirm = true;
-                                    should_close = true;
-                                }
-
-                                let cancel_btn = egui::Button::new(
-                                    RichText::new(tr!("取消 (Esc)"))
-                                        .size(self.theme.fonts.lg).color(palette.title),
-                                )
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(Stroke::new(1.0, palette.border))
-                                .corner_radius(self.theme.colors.radius_lg);
-                                if ui.add(cancel_btn).clicked() {
-                                    should_close = true;
-                                }
-                            },
+                        let inner_rect = ui.max_rect();
+                        let header_rect = egui::Rect::from_min_size(
+                            inner_rect.min,
+                            egui::vec2(inner_rect.width(), header_h),
                         );
+                        let sql_rect = egui::Rect::from_min_size(
+                            egui::pos2(inner_rect.min.x, header_rect.max.y + gap_header_to_sql),
+                            egui::vec2(inner_rect.width(), sql_h),
+                        );
+                        let footer_rect = egui::Rect::from_min_size(
+                            egui::pos2(inner_rect.min.x, inner_rect.max.y - footer_h),
+                            egui::vec2(inner_rect.width(), footer_h),
+                        );
+
+                        ui.allocate_ui_at_rect(header_rect, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
+                            ui.label(
+                                RichText::new(tr!("确认保存"))
+                                    .size(self.theme.fonts.xl).color(palette.title).strong(),
+                            );
+                            ui.label(
+                                RichText::new(tr!("即将执行 {} 条 SQL，修改 {} 个单元格：", total_sql, cell_count))
+                                    .size(self.theme.fonts.md).color(palette.text),
+                            );
+                        });
+
+                        ui.allocate_ui_at_rect(sql_rect, |ui| {
+                            let sql_bg = self.theme.colors.dialog_sql_block_bg;
+                            egui::ScrollArea::vertical()
+                                .max_height(sql_rect.height())
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
+                                    for stmt in &sql_statements {
+                                        egui::Frame::new()
+                                            .fill(sql_bg)
+                                            .corner_radius(egui::CornerRadius::same(self.theme.colors.radius_lg as u8))
+                                            .inner_margin(egui::Margin::symmetric(10, 8))
+                                            .show(ui, |ui| {
+                                                ui.set_width(card_w - 68.0);
+                                                let job = egui::text::LayoutJob::simple(
+                                                    stmt.clone(),
+                                                    mono_font.clone(),
+                                                    palette.text,
+                                                    ui.available_width(),
+                                                );
+                                                ui.add(egui::Label::new(job).wrap());
+                                            });
+                                    }
+                                });
+                        });
+
+                        ui.allocate_ui_at_rect(footer_rect, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(
+                                    RichText::new(tr!("Enter 执行 · Esc 取消"))
+                                        .size(self.theme.fonts.sm)
+                                        .color(palette.weak_text),
+                                );
+                                ui.add_space(ui.available_width());
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                        ui.spacing_mut().button_padding = egui::vec2(18.0, 7.0);
+
+                                        if dialog_button(
+                                            ui,
+                                            tr!("执行"),
+                                            true,
+                                            &self.theme.colors,
+                                            &self.theme.fonts,
+                                        ).clicked() {
+                                            should_confirm = true;
+                                            should_close = true;
+                                        }
+
+                                        if dialog_button(
+                                            ui,
+                                            tr!("取消"),
+                                            false,
+                                            &self.theme.colors,
+                                            &self.theme.fonts,
+                                        ).clicked() {
+                                            should_close = true;
+                                        }
+                                    },
+                                );
+                            });
+                        });
                     });
                 });
             });
@@ -24787,15 +24868,13 @@ fn apply_mac_dialog_style(ui: &mut egui::Ui, palette: MacDialogPalette) {
 
 fn dialog_button(ui: &mut egui::Ui, label: &str, primary: bool, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> egui::Response {
     let palette = mac_dialog_palette_from_ui(ui);
-    let (fill, stroke, text) = if primary {
+    let (stroke, text) = if primary {
         (
-            palette.primary_button_bg,
             Stroke::new(1.0, palette.primary_button_stroke),
             palette.primary_button_text,
         )
     } else {
         (
-            palette.secondary_button_bg,
             Stroke::new(1.0, palette.secondary_button_stroke),
             palette.secondary_button_text,
         )
@@ -24803,10 +24882,25 @@ fn dialog_button(ui: &mut egui::Ui, label: &str, primary: bool, colors: &ui_them
 
     ui.add(
         egui::Button::new(RichText::new(label).size(fonts.lg).strong().color(text))
-            .fill(fill)
+            .fill(Color32::TRANSPARENT)
             .stroke(stroke)
             .corner_radius(colors.radius_xl)
-            .min_size(Vec2::new(92.0, 32.0)),
+            .min_size(Vec2::new(108.0, 36.0)),
+    )
+}
+
+fn destructive_dialog_button(ui: &mut egui::Ui, label: &str, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            RichText::new(label)
+                .size(fonts.lg)
+                .strong()
+                .color(colors.delete_button_bg),
+        )
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, colors.delete_button_bg))
+        .corner_radius(colors.radius_xl)
+        .min_size(Vec2::new(108.0, 36.0)),
     )
 }
 
