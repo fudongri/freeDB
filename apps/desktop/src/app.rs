@@ -27212,10 +27212,11 @@ fn render_query_editor(
     let current_line =
         current_line_number(&tab.sql, tab.cursor_range);
 
-    // 半透明高亮色，在 TextEdit 之后绘制时不会完全遮挡文字
-    // 当前匹配使用更高饱和度和更高透明度，使其明显区别于其他匹配
+    // 查找高亮在 TextEdit 之后绘制，当前命中使用 IntelliJ 风格的蓝底浅描边
     let match_bg = colors.search_match_bg;
+    let match_stroke = colors.search_match_stroke;
     let current_match_bg = colors.search_current_match_bg;
+    let current_match_stroke = colors.search_current_match_stroke;
 
     let mut layouter = |ui: &egui::Ui,
                         buf: &dyn egui::TextBuffer,
@@ -27338,6 +27339,7 @@ fn render_query_editor(
                             let mut byte_offset = 0usize;
                             for placed_row in &galley.rows {
                                 let row_pos = placed_row.pos;
+                                let mut row_segments: Vec<(usize, egui::Rect)> = Vec::new();
                                 for glyph in &placed_row.glyphs {
                                     let char_start = byte_offset;
                                     let char_end = char_start + glyph.chr.len_utf8();
@@ -27351,20 +27353,43 @@ fn render_query_editor(
                                     while check_idx < matches.len() && matches[check_idx].0 < char_end {
                                         let (m_start, m_end) = matches[check_idx];
                                         if char_start < m_end && char_end > m_start {
-                                            let bg = if check_idx == current_idx { current_match_bg } else { match_bg };
                                             let lr = glyph.logical_rect();
-                                            let highlight_rect = egui::Rect::from_min_max(
+                                            let glyph_rect = egui::Rect::from_min_max(
                                                 egui::pos2(gp.x + row_pos.x + lr.min.x, gp.y + row_pos.y + lr.min.y),
                                                 egui::pos2(gp.x + row_pos.x + lr.max.x, gp.y + row_pos.y + lr.max.y),
                                             );
-                                            find_painter.rect_filled(highlight_rect, 0.0, bg);
-                                            if check_idx == current_idx {
-                                                current_match_rect = Some(
-                                                    current_match_rect.map_or(highlight_rect, |r| r.union(highlight_rect)),
-                                                );
+                                            if let Some((last_idx, last_rect)) = row_segments.last_mut() {
+                                                if *last_idx == check_idx && glyph_rect.min.x <= last_rect.max.x + 1.0 {
+                                                    *last_rect = last_rect.union(glyph_rect);
+                                                } else {
+                                                    row_segments.push((check_idx, glyph_rect));
+                                                }
+                                            } else {
+                                                row_segments.push((check_idx, glyph_rect));
                                             }
                                         }
                                         check_idx += 1;
+                                    }
+                                }
+                                for (segment_idx, segment_rect) in row_segments {
+                                    let is_current_match = segment_idx == current_idx;
+                                    let bg = if is_current_match { current_match_bg } else { match_bg };
+                                    find_painter.rect_filled(segment_rect, 2.0, bg);
+                                    let stroke = if is_current_match {
+                                        Stroke::new(1.0, current_match_stroke)
+                                    } else {
+                                        Stroke::new(1.0, match_stroke)
+                                    };
+                                    find_painter.rect_stroke(
+                                        segment_rect,
+                                        2.0,
+                                        stroke,
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    if is_current_match {
+                                        current_match_rect = Some(
+                                            current_match_rect.map_or(segment_rect, |r| r.union(segment_rect)),
+                                        );
                                     }
                                 }
                                 if placed_row.ends_with_newline {
