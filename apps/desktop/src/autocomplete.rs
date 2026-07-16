@@ -1,8 +1,8 @@
 use core_domain::{ColumnDefinition, DatabaseKind};
-use eframe::egui::{self, Align2, Area, Color32, FontFamily, FontId, Id, Order, RichText, ScrollArea, Sense, Stroke};
+use eframe::egui::{self, Align2, Area, Color32, FontFamily, FontId, Id, Order, ScrollArea, Sense, Stroke};
 use eframe::egui::text::{LayoutJob, TextFormat};
 use i18n::tr;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Snap a byte index to the nearest preceding UTF-8 character boundary.
 fn floor_char_boundary(s: &str, index: usize) -> usize {
@@ -12,6 +12,24 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
     }
     bound
 }
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn compact_object_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+const WHERE_OPERATOR_SNIPPETS: &[(&str, &str, usize)] = &[
+    ("IS NULL", "IS NULL", 7),
+    ("IS NOT NULL", "IS NOT NULL", 11),
+    ("IN", "IN ()", 4),
+    ("NOT IN", "NOT IN ()", 8),
+    ("LIKE", "LIKE ", 5),
+    ("NOT LIKE", "NOT LIKE ", 9),
+    ("BETWEEN", "BETWEEN  AND ", 8),
+];
 
 /// Check if `pattern` is a subsequence of `text` (case-insensitive).
 /// Returns the matched character indices in `text` if found.
@@ -57,13 +75,47 @@ impl AutocompleteSuggestion {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct AutocompleteUsageMemory {
+    order: VecDeque<String>,
+}
+
+impl AutocompleteUsageMemory {
+    const MAX_ENTRIES: usize = 64;
+
+    pub fn record(&mut self, label: &str) {
+        let key = label.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        if let Some(pos) = self.order.iter().position(|item| item == &key) {
+            self.order.remove(pos);
+        }
+        self.order.push_front(key);
+        while self.order.len() > Self::MAX_ENTRIES {
+            self.order.pop_back();
+        }
+    }
+
+    pub fn score(&self, label: &str) -> i32 {
+        let key = label.trim().to_ascii_lowercase();
+        self.order
+            .iter()
+            .position(|item| item == &key)
+            .map(|idx| (Self::MAX_ENTRIES.saturating_sub(idx)) as i32)
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SuggestionKind {
+    Loading,
     Database,
     Schema,
     Table,
     View,
     Column { parent_table: String },
+    Function,
     Keyword,
     MongoKeyword,
 }
@@ -247,8 +299,16 @@ pub(crate) enum SqlContext {
     OrderGroupClause,
     /// After INSERT INTO <table> ( <— suggests columns.
     InsertColumns,
+    /// After AS — usually expects an alias, not a generic keyword soup.
+    AliasName,
     /// Fallback — suggest everything.
     General,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TableReference {
+    table_name: String,
+    alias: Option<String>,
 }
 
 pub(crate) struct SqlContextParser;
@@ -271,17 +331,32 @@ impl SqlContextParser {
     pub fn parse(sql: &str, cursor_char_index: usize) -> SqlContext {
         // Clamp cursor to valid range, then align to UTF-8 boundary
         let cursor = floor_char_boundary(sql, cursor_char_index.min(sql.len()));
+        let prefix = &sql[..cursor];
+        let current_prefix = Self::current_token_prefix(sql, cursor_char_index);
 
         // --- 1) Check for `alias.` or `table.` pattern immediately before cursor ---
         if let Some(ctx) = Self::after_dot_context(sql, cursor) {
             return ctx;
         }
 
-        // --- 2) Walk backward from cursor to find the preceding keyword ---
-        let prefix = &sql[..cursor];
-        let tokens = Self::tokenize_backwards(prefix);
+        // --- 2) INSERT INTO table (...) 整个列列表期间都保持列补全上下文 ---
+        if Self::is_insert_columns_context(prefix) {
+            return SqlContext::InsertColumns;
+        }
 
-        for token in &tokens {
+        // --- 2) Walk backward from cursor to find the preceding keyword ---
+        let tokens = Self::tokenize_backwards(prefix);
+        let scan_tokens: &[String] = if !current_prefix.is_empty()
+            && tokens
+                .first()
+                .is_some_and(|token| token.eq_ignore_ascii_case(&current_prefix))
+        {
+            &tokens[1..]
+        } else {
+            &tokens
+        };
+
+        for token in scan_tokens {
             let upper = token.to_ascii_uppercase();
 
             // Skip comma — keep looking
@@ -289,12 +364,12 @@ impl SqlContextParser {
                 continue;
             }
 
-            // After ( — in INSERT INTO ... VALUES( — suggest columns if in insert context
             if upper == "(" {
-                if Self::check_insert_columns(&tokens) {
-                    return SqlContext::InsertColumns;
-                }
                 continue;
+            }
+
+            if upper == "AS" {
+                return SqlContext::AliasName;
             }
 
             if Self::TABLE_KEYWORDS.contains(&upper.as_str()) {
@@ -317,9 +392,9 @@ impl SqlContextParser {
             }
 
             // A non-keyword token — if preceded by a comma, we're in a column list
-            if Self::preceded_by_comma_in_scan(&tokens, &upper) {
+            if Self::preceded_by_comma_in_scan(scan_tokens, &upper) {
                 // Check what bigger clause we're in
-                if let Some(clause_ctx) = Self::enclosing_clause(&tokens) {
+                if let Some(clause_ctx) = Self::enclosing_clause(scan_tokens) {
                     return clause_ctx;
                 }
                 // Default: treat comma-separated list as columns
@@ -335,22 +410,28 @@ impl SqlContextParser {
     /// Extract the partial token the user is currently typing, just before the cursor.
     /// Returns the token text from after the last whitespace/comma/dot to the cursor.
     pub fn current_token_prefix(sql: &str, cursor_char_index: usize) -> String {
-        let cursor = cursor_char_index.min(sql.len());
-        // Clamp to a valid UTF-8 char boundary (egui may return byte indices)
-        let cursor = floor_char_boundary(sql, cursor);
-        let prefix = &sql[..cursor];
-        let mut chars: Vec<char> = prefix.chars().collect();
-        let mut result = String::new();
-        // Walk backwards collecting identifier characters
-        while let Some(&ch) = chars.last() {
-            if ch.is_alphanumeric() || ch == '_' {
-                result.push(ch);
-                chars.pop();
-            } else {
-                break;
-            }
+        let chars: Vec<char> = sql.chars().collect();
+        let cursor = cursor_char_index.min(chars.len());
+        let mut start = cursor;
+        while start > 0 && is_identifier_char(chars[start - 1]) {
+            start -= 1;
         }
-        result.chars().rev().collect()
+        chars[start..cursor].iter().collect()
+    }
+
+    /// Return the identifier token bounds around the cursor as char offsets.
+    pub fn current_token_bounds(sql: &str, cursor_char_index: usize) -> (usize, usize) {
+        let chars: Vec<char> = sql.chars().collect();
+        let cursor = cursor_char_index.min(chars.len());
+        let mut start = cursor;
+        while start > 0 && is_identifier_char(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = cursor;
+        while end < chars.len() && is_identifier_char(chars[end]) {
+            end += 1;
+        }
+        (start, end)
     }
 
     /// Check if the cursor is right after `<identifier>.` — if so return AfterColumnDot.
@@ -383,6 +464,56 @@ impl SqlContextParser {
             return None;
         }
         Some(SqlContext::AfterColumnDot { parent })
+    }
+
+    fn table_references_before_cursor(sql: &str, cursor_char_index: usize) -> Vec<TableReference> {
+        let cursor = floor_char_boundary(sql, cursor_char_index.min(sql.len()));
+        let tokens = Self::tokenize_forwards(&sql[..cursor]);
+        let mut refs = Vec::new();
+        let mut i = 0usize;
+        while i < tokens.len() {
+            let upper = tokens[i].to_ascii_uppercase();
+            if matches!(upper.as_str(), "FROM" | "JOIN" | "UPDATE" | "INTO") {
+                if let Some((table_name, next_idx)) = Self::next_identifier_token(&tokens, i + 1) {
+                    let mut alias = None;
+                    let mut j = next_idx;
+                    if j < tokens.len() {
+                        let next_upper = tokens[j].to_ascii_uppercase();
+                        if next_upper == "AS" {
+                            if let Some((alias_name, alias_idx)) =
+                                Self::next_identifier_token(&tokens, j + 1)
+                            {
+                                alias = Some(alias_name);
+                                j = alias_idx;
+                            }
+                        } else if Self::is_identifier_token(&tokens[j])
+                            && !Self::is_clause_boundary(&next_upper)
+                        {
+                            alias = Some(tokens[j].clone());
+                            j += 1;
+                        }
+                    }
+                    refs.push(TableReference { table_name, alias });
+                    i = j;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        refs
+    }
+
+    fn insert_target_table(sql: &str, cursor_char_index: usize) -> Option<String> {
+        let cursor = floor_char_boundary(sql, cursor_char_index.min(sql.len()));
+        let tokens = Self::tokenize_forwards(&sql[..cursor]);
+        for idx in 0..tokens.len() {
+            if tokens[idx].eq_ignore_ascii_case("INTO") {
+                if let Some((table_name, _)) = Self::next_identifier_token(&tokens, idx + 1) {
+                    return Some(table_name);
+                }
+            }
+        }
+        None
     }
 
     /// Backwards tokenizer: returns tokens from right-to-left, uppercased.
@@ -430,19 +561,114 @@ impl SqlContextParser {
         tokens
     }
 
+    fn tokenize_forwards(sql: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let bytes = sql.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                break;
+            }
+            let start = i;
+            let b = bytes[i];
+            if matches!(b, b',' | b'(' | b')' | b';') {
+                tokens.push(String::from_utf8_lossy(&bytes[i..=i]).to_string());
+                i += 1;
+                continue;
+            }
+            if b == b'\'' {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\'' && (i == 0 || bytes[i - 1] != b'\\') {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if b == b'`' || b == b'"' {
+                let quote = b;
+                i += 1;
+                let ident_start = i;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                if i > ident_start {
+                    tokens.push(String::from_utf8_lossy(&bytes[ident_start..i]).to_string());
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+                continue;
+            }
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'.'))
+            {
+                i += 1;
+            }
+            if i > start {
+                tokens.push(String::from_utf8_lossy(&bytes[start..i]).to_string());
+            } else {
+                i += 1;
+            }
+        }
+        tokens
+    }
+
     fn is_sql_keyword(token: &str) -> bool {
         SQL_KEYWORDS.contains(&token)
     }
 
-    fn check_insert_columns(tokens: &[String]) -> bool {
-        // If we see a pattern suggesting INSERT INTO ... VALUES ( context
-        for t in tokens {
-            let u = t.to_ascii_uppercase();
-            if u == "INTO" || u == "VALUES" {
+    fn is_insert_columns_context(prefix: &str) -> bool {
+        let tokens = Self::tokenize_forwards(prefix);
+        let mut saw_insert = false;
+        let mut saw_into = false;
+        let mut saw_target = false;
+        for token in tokens {
+            let upper = token.to_ascii_uppercase();
+            if !saw_insert {
+                if upper == "INSERT" {
+                    saw_insert = true;
+                }
+                continue;
+            }
+            if !saw_into {
+                if upper == "INTO" {
+                    saw_into = true;
+                }
+                continue;
+            }
+            if !saw_target {
+                if Self::is_identifier_token(&token) {
+                    saw_target = true;
+                }
+                continue;
+            }
+            if upper == "VALUES" || upper == "SELECT" {
+                return false;
+            }
+            if token == "(" {
                 return true;
             }
         }
         false
+    }
+
+    fn alias_source_token(sql: &str, cursor_char_index: usize) -> Option<String> {
+        let cursor = floor_char_boundary(sql, cursor_char_index.min(sql.len()));
+        let tokens = Self::tokenize_forwards(&sql[..cursor]);
+        let as_index = tokens
+            .iter()
+            .rposition(|token| token.eq_ignore_ascii_case("AS"))?;
+        tokens[..as_index]
+            .iter()
+            .rev()
+            .find(|token| Self::is_identifier_token(token))
+            .cloned()
     }
 
     fn preceded_by_comma_in_scan(tokens: &[String], _current: &str) -> bool {
@@ -463,6 +689,51 @@ impl SqlContextParser {
             }
         }
         None
+    }
+
+    fn next_identifier_token(tokens: &[String], start: usize) -> Option<(String, usize)> {
+        let mut idx = start;
+        while idx < tokens.len() {
+            if Self::is_identifier_token(&tokens[idx]) {
+                return Some((tokens[idx].clone(), idx + 1));
+            }
+            if matches!(tokens[idx].as_str(), "(" | ")" | "," | ";") {
+                return None;
+            }
+            idx += 1;
+        }
+        None
+    }
+
+    fn is_identifier_token(token: &str) -> bool {
+        !token.is_empty()
+            && !matches!(token, "(" | ")" | "," | ";")
+            && !Self::is_sql_keyword(&token.to_ascii_uppercase())
+    }
+
+    fn is_clause_boundary(token_upper: &str) -> bool {
+        matches!(
+            token_upper,
+            "WHERE"
+                | "ON"
+                | "GROUP"
+                | "ORDER"
+                | "HAVING"
+                | "LIMIT"
+                | "OFFSET"
+                | "JOIN"
+                | "LEFT"
+                | "RIGHT"
+                | "INNER"
+                | "OUTER"
+                | "FULL"
+                | "CROSS"
+                | "NATURAL"
+                | "SET"
+                | "VALUES"
+                | "SELECT"
+                | "UNION"
+        )
     }
 }
 
@@ -680,18 +951,20 @@ impl AutocompleteEngine {
         cache: &SchemaCache,
         connection_id: Option<&str>,
         db_kind: Option<DatabaseKind>,
+        usage_memory: Option<&AutocompleteUsageMemory>,
     ) -> Vec<AutocompleteSuggestion> {
         // MongoDB 模式下优先检测 MongoDB 查询
         if db_kind == Some(DatabaseKind::MongoDb) {
             let mongo_ctx = detect_mongo_context(sql, cursor_char_index);
             if !matches!(mongo_ctx, MongoContext::NotMongo) {
                 let prefix = SqlContextParser::current_token_prefix(sql, cursor_char_index);
-                return Self::suggest_mongo(mongo_ctx, &prefix, cache);
+                return Self::suggest_mongo(mongo_ctx, &prefix, cache, usage_memory);
             }
         }
 
         let prefix = SqlContextParser::current_token_prefix(sql, cursor_char_index);
         let context = SqlContextParser::parse(sql, cursor_char_index);
+        let table_refs = SqlContextParser::table_references_before_cursor(sql, cursor_char_index);
 
         let mut suggestions = Vec::new();
 
@@ -714,7 +987,7 @@ impl AutocompleteEngine {
                         });
                     }
                     let filtered = Self::filter_by_prefix(suggestions, &prefix);
-                    return Self::rank(filtered, &prefix);
+                    return Self::rank(filtered, &prefix, &context, usage_memory);
                 }
 
                 // 2. Check if `parent` is a schema name → suggest tables in that schema
@@ -734,16 +1007,21 @@ impl AutocompleteEngine {
                         });
                     }
                     let filtered = Self::filter_by_prefix(suggestions, &prefix);
-                    return Self::rank(filtered, &prefix);
+                    return Self::rank(filtered, &prefix, &context, usage_memory);
                 }
 
-                // 3. Fallback: treat `parent` as a table name → suggest columns
-                if let Some(cols) = cache.columns_for_table(parent) {
+                // 3. Resolve alias/table name from the current query scope → suggest columns
+                let resolved_parent = table_refs
+                    .iter()
+                    .find(|r| r.alias.as_deref() == Some(parent.as_str()))
+                    .map(|r| r.table_name.as_str())
+                    .unwrap_or(parent.as_str());
+                if let Some(cols) = lookup_columns_for_table(cache, resolved_parent) {
                     for col in cols {
                         suggestions.push(AutocompleteSuggestion {
                             label: col.name.clone(),
                             kind: SuggestionKind::Column {
-                                parent_table: parent.clone(),
+                                parent_table: resolved_parent.to_string(),
                             },
                             matched_indices: vec![],
                             insertion_text: None,
@@ -752,10 +1030,10 @@ impl AutocompleteEngine {
                     }
                 }
                 let filtered = Self::filter_by_prefix(suggestions, &prefix);
-                return Self::rank(filtered, &prefix);
+                return Self::rank(filtered, &prefix, &context, usage_memory);
             }
-            SqlContext::AfterKeyword { .. } | SqlContext::InsertColumns => {
-                // Suggest table names + views
+            SqlContext::AfterKeyword { .. } => {
+                // Keep object-entry contexts focused on tables/views.
                 for name in cache.table_names() {
                     let is_view = cache.is_view(name);
                     suggestions.push(AutocompleteSuggestion {
@@ -770,58 +1048,56 @@ impl AutocompleteEngine {
                         cursor_offset: None,
                     });
                 }
-                // Also suggest database and schema names (filtered by connection)
-                let db_names = match connection_id {
-                    Some(cid) => cache.database_names_for(cid),
-                    None => cache.database_names(),
-                };
-                for name in db_names {
-                    suggestions.push(AutocompleteSuggestion {
-                        label: name.to_string(),
-                        kind: SuggestionKind::Database,
-                        matched_indices: vec![],
-                        insertion_text: None,
-                        cursor_offset: None,
-                    });
-                }
-                let schema_names = match connection_id {
-                    Some(cid) => cache.schema_names_for(cid),
-                    None => cache.schema_names(),
-                };
-                for name in schema_names {
-                    suggestions.push(AutocompleteSuggestion {
-                        label: name.to_string(),
-                        kind: SuggestionKind::Schema,
-                        matched_indices: vec![],
-                        insertion_text: None,
-                        cursor_offset: None,
-                    });
-                }
-            }
-            SqlContext::SelectClause
-            | SqlContext::WhereClause
-            | SqlContext::OrderGroupClause => {
-                // Suggest columns (from all cached tables) + keywords
-                for (table_name, (_is_view, cols)) in &cache.tables {
-                    for col in cols {
+                if !prefix.is_empty() {
+                    let db_names = match connection_id {
+                        Some(cid) => cache.database_names_for(cid),
+                        None => cache.database_names(),
+                    };
+                    for name in db_names {
                         suggestions.push(AutocompleteSuggestion {
-                            label: col.name.clone(),
-                            kind: SuggestionKind::Column {
-                                parent_table: table_name.clone(),
-                            },
+                            label: name.to_string(),
+                            kind: SuggestionKind::Database,
+                            matched_indices: vec![],
+                            insertion_text: None,
+                            cursor_offset: None,
+                        });
+                    }
+                    let schema_names = match connection_id {
+                        Some(cid) => cache.schema_names_for(cid),
+                        None => cache.schema_names(),
+                    };
+                    for name in schema_names {
+                        suggestions.push(AutocompleteSuggestion {
+                            label: name.to_string(),
+                            kind: SuggestionKind::Schema,
                             matched_indices: vec![],
                             insertion_text: None,
                             cursor_offset: None,
                         });
                     }
                 }
-                // Also add table-qualified form: table.column
-                for (table_name, (_is_view, cols)) in &cache.tables {
-                    for col in cols {
-                        let qualified = format!("{}.{}", table_name, col.name);
-                        if !suggestions.iter().any(|s| s.label == qualified) {
+            }
+            SqlContext::InsertColumns => {
+                if let Some(target_table) = SqlContextParser::insert_target_table(sql, cursor_char_index) {
+                    if let Some(cols) = lookup_columns_for_table(cache, &target_table) {
+                        for col in cols {
                             suggestions.push(AutocompleteSuggestion {
-                                label: qualified,
+                                label: col.name.clone(),
+                                kind: SuggestionKind::Column {
+                                    parent_table: target_table.clone(),
+                                },
+                                matched_indices: vec![],
+                                insertion_text: None,
+                                cursor_offset: None,
+                            });
+                        }
+                    }
+                }
+                if suggestions.is_empty() {
+                    for (table_name, (_is_view, cols)) in &cache.tables {
+                        for col in cols {
+                            suggestions.push(AutocompleteSuggestion {
+                                label: col.name.clone(),
                                 kind: SuggestionKind::Column {
                                     parent_table: table_name.clone(),
                                 },
@@ -832,15 +1108,59 @@ impl AutocompleteEngine {
                         }
                     }
                 }
-                // Add keyword suggestions for column contexts
-                for kw in SQL_KEYWORDS {
-                    suggestions.push(AutocompleteSuggestion {
-                        label: kw.to_string(),
-                        kind: SuggestionKind::Keyword,
-                        matched_indices: vec![],
-                        insertion_text: None,
-                        cursor_offset: None,
-                    });
+            }
+            SqlContext::AliasName => {
+                suggestions.extend(Self::alias_suggestions(sql, cursor_char_index, &table_refs));
+            }
+            SqlContext::SelectClause
+            | SqlContext::WhereClause
+            | SqlContext::OrderGroupClause => {
+                // Prefer columns from tables already referenced in the current query.
+                if !table_refs.is_empty() {
+                    for table_ref in &table_refs {
+                        if let Some(cols) = lookup_columns_for_table(cache, &table_ref.table_name) {
+                            for col in cols {
+                                suggestions.push(AutocompleteSuggestion {
+                                    label: col.name.clone(),
+                                    kind: SuggestionKind::Column {
+                                        parent_table: table_ref.table_name.clone(),
+                                    },
+                                    matched_indices: vec![],
+                                    insertion_text: None,
+                                    cursor_offset: None,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    for (table_name, (_is_view, cols)) in &cache.tables {
+                        for col in cols {
+                            suggestions.push(AutocompleteSuggestion {
+                                label: col.name.clone(),
+                                kind: SuggestionKind::Column {
+                                    parent_table: table_name.clone(),
+                                },
+                                matched_indices: vec![],
+                                insertion_text: None,
+                                cursor_offset: None,
+                            });
+                        }
+                    }
+                }
+                if !prefix.is_empty() {
+                    // Add keyword suggestions once the user starts narrowing.
+                    for kw in SQL_KEYWORDS {
+                        suggestions.push(AutocompleteSuggestion {
+                            label: kw.to_string(),
+                            kind: SuggestionKind::Keyword,
+                            matched_indices: vec![],
+                            insertion_text: None,
+                            cursor_offset: None,
+                        });
+                    }
+                    Self::push_function_snippets(&mut suggestions, &context, db_kind);
+                } else if matches!(context, SqlContext::WhereClause) {
+                    Self::push_where_operator_snippets(&mut suggestions);
                 }
             }
             SqlContext::General => {
@@ -907,17 +1227,19 @@ impl AutocompleteEngine {
                         });
                     }
                 }
+                Self::push_function_snippets(&mut suggestions, &context, db_kind);
             }
         }
 
         let filtered = Self::filter_by_prefix(suggestions, &prefix);
-        Self::rank(filtered, &prefix)
+        Self::rank(filtered, &prefix, &context, usage_memory)
     }
 
     fn suggest_mongo(
         ctx: MongoContext,
         prefix: &str,
         cache: &SchemaCache,
+        usage_memory: Option<&AutocompleteUsageMemory>,
     ) -> Vec<AutocompleteSuggestion> {
         let mut suggestions = Vec::new();
         match ctx {
@@ -962,7 +1284,7 @@ impl AutocompleteEngine {
             MongoContext::NotMongo => {}
         }
         let filtered = Self::filter_by_prefix(suggestions, prefix);
-        Self::rank(filtered, prefix)
+        Self::rank(filtered, prefix, &SqlContext::General, usage_memory)
     }
 
     fn filter_by_prefix(
@@ -989,6 +1311,8 @@ impl AutocompleteEngine {
     fn rank(
         mut suggestions: Vec<AutocompleteSuggestion>,
         prefix: &str,
+        context: &SqlContext,
+        usage_memory: Option<&AutocompleteUsageMemory>,
     ) -> Vec<AutocompleteSuggestion> {
         let prefix_lower = prefix.to_lowercase();
         // Sort: exact match → starts-with prefix → shorter label → kind
@@ -1004,19 +1328,54 @@ impl AutocompleteEngine {
             if a_starts != b_starts {
                 return b_starts.cmp(&a_starts);
             }
+            let context_priority = |s: &AutocompleteSuggestion| -> i32 {
+                match context {
+                    SqlContext::AliasName => match s.kind {
+                        SuggestionKind::Loading => 4,
+                        SuggestionKind::Column { .. } => 0,
+                        SuggestionKind::Function => 1,
+                        SuggestionKind::Keyword => 2,
+                        _ => 3,
+                    },
+                    SqlContext::WhereClause | SqlContext::OrderGroupClause | SqlContext::SelectClause => {
+                        match s.kind {
+                            SuggestionKind::Loading => 5,
+                            SuggestionKind::Column { .. } => {
+                                if s.label.contains('.') { 3 } else { 4 }
+                            }
+                            SuggestionKind::Function => 1,
+                            SuggestionKind::Keyword => 0,
+                            _ => 0,
+                        }
+                    }
+                    _ => 0,
+                }
+            };
+            let a_priority = context_priority(a);
+            let b_priority = context_priority(b);
+            if a_priority != b_priority {
+                return b_priority.cmp(&a_priority);
+            }
+            let a_recent = usage_memory.map(|m| m.score(&a.label)).unwrap_or(0);
+            let b_recent = usage_memory.map(|m| m.score(&b.label)).unwrap_or(0);
+            if a_recent != b_recent {
+                return b_recent.cmp(&a_recent);
+            }
             // Shorter labels rank higher (closer match)
             if a.label.len() != b.label.len() {
                 return a.label.len().cmp(&b.label.len());
             }
             // Then by kind: databases first, then schemas, tables, columns, keywords
             let kind_order = |k: &SuggestionKind| match k {
-                SuggestionKind::Database => 0,
-                SuggestionKind::Schema => 1,
-                SuggestionKind::Table => 2,
-                SuggestionKind::View => 3,
-                SuggestionKind::Column { .. } => 4,
-                SuggestionKind::Keyword => 5,
-                SuggestionKind::MongoKeyword => 5,
+                SuggestionKind::Loading => 0,
+                SuggestionKind::Database => 1,
+                SuggestionKind::Schema => 2,
+                SuggestionKind::Table => 3,
+                SuggestionKind::View => 4,
+                SuggestionKind::Column { .. } => 5,
+                SuggestionKind::Function => 6,
+                SuggestionKind::Keyword => 7,
+                SuggestionKind::MongoKeyword => 7,
             };
             let a_kind = kind_order(&a.kind);
             let b_kind = kind_order(&b.kind);
@@ -1029,6 +1388,175 @@ impl AutocompleteEngine {
         suggestions.truncate(50);
         suggestions
     }
+
+    fn alias_suggestions(
+        sql: &str,
+        cursor_char_index: usize,
+        table_refs: &[TableReference],
+    ) -> Vec<AutocompleteSuggestion> {
+        let mut suggestions = Vec::new();
+        let Some(base_token) = SqlContextParser::alias_source_token(sql, cursor_char_index) else {
+            return suggestions;
+        };
+        let alias_source = table_refs
+            .iter()
+            .rev()
+            .find(|r| r.table_name.eq_ignore_ascii_case(&base_token))
+            .map(|r| r.table_name.as_str())
+            .unwrap_or(base_token.as_str());
+        for alias in alias_candidates(alias_source) {
+            suggestions.push(AutocompleteSuggestion::new(alias, SuggestionKind::Keyword));
+        }
+        suggestions
+    }
+
+    fn push_function_snippets(
+        suggestions: &mut Vec<AutocompleteSuggestion>,
+        context: &SqlContext,
+        db_kind: Option<DatabaseKind>,
+    ) {
+        if matches!(context, SqlContext::InsertColumns | SqlContext::AfterKeyword { .. } | SqlContext::AfterColumnDot { .. } | SqlContext::AliasName) {
+            return;
+        }
+        for (label, insertion, cursor_offset) in COMMON_SQL_FUNCTION_SNIPPETS {
+            suggestions.push(AutocompleteSuggestion {
+                label: (*label).to_string(),
+                kind: SuggestionKind::Function,
+                matched_indices: vec![],
+                insertion_text: Some((*insertion).to_string()),
+                cursor_offset: Some(*cursor_offset),
+            });
+        }
+        for (label, insertion, cursor_offset) in dialect_function_snippets_for(db_kind) {
+            suggestions.push(AutocompleteSuggestion {
+                label: (*label).to_string(),
+                kind: SuggestionKind::Function,
+                matched_indices: vec![],
+                insertion_text: Some((*insertion).to_string()),
+                cursor_offset: Some(*cursor_offset),
+            });
+        }
+    }
+
+    fn push_where_operator_snippets(suggestions: &mut Vec<AutocompleteSuggestion>) {
+        for (label, insertion, cursor_offset) in WHERE_OPERATOR_SNIPPETS {
+            suggestions.push(AutocompleteSuggestion {
+                label: (*label).to_string(),
+                kind: SuggestionKind::Keyword,
+                matched_indices: vec![],
+                insertion_text: Some((*insertion).to_string()),
+                cursor_offset: Some(*cursor_offset),
+            });
+        }
+    }
+}
+
+fn lookup_columns_for_table<'a>(
+    cache: &'a SchemaCache,
+    table: &str,
+) -> Option<&'a [ColumnDefinition]> {
+    cache
+        .columns_for_table(table)
+        .or_else(|| table.rsplit('.').next().and_then(|short| cache.columns_for_table(short)))
+}
+
+const COMMON_SQL_FUNCTION_SNIPPETS: &[(&str, &str, usize)] = &[
+    ("COUNT", "COUNT(*)", 6),
+    ("SUM", "SUM()", 4),
+    ("AVG", "AVG()", 4),
+    ("MIN", "MIN()", 4),
+    ("MAX", "MAX()", 4),
+    ("COALESCE", "COALESCE()", 9),
+    ("NULLIF", "NULLIF()", 7),
+    ("CAST", "CAST(expr AS type)", 5),
+];
+
+const MYSQL_FUNCTION_SNIPPETS: &[(&str, &str, usize)] = &[
+    ("IFNULL", "IFNULL(expr, fallback)", 7),
+    ("DATE_FORMAT", "DATE_FORMAT(date, '%Y-%m-%d')", 12),
+    ("JSON_EXTRACT", "JSON_EXTRACT(json_doc, '$.path')", 13),
+];
+
+const POSTGRES_FUNCTION_SNIPPETS: &[(&str, &str, usize)] = &[
+    ("DATE_TRUNC", "DATE_TRUNC('day', ts)", 12),
+    ("TO_CHAR", "TO_CHAR(value, 'YYYY-MM-DD')", 8),
+    ("JSONB_BUILD_OBJECT", "JSONB_BUILD_OBJECT('key', value)", 20),
+];
+
+fn dialect_function_snippets_for(db_kind: Option<DatabaseKind>) -> &'static [(&'static str, &'static str, usize)] {
+    match db_kind {
+        Some(DatabaseKind::MySql) => MYSQL_FUNCTION_SNIPPETS,
+        Some(DatabaseKind::Postgres) => POSTGRES_FUNCTION_SNIPPETS,
+        _ => &[],
+    }
+}
+
+fn alias_candidates(source: &str) -> Vec<String> {
+    let base = source
+        .rsplit('.')
+        .next()
+        .unwrap_or(source)
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim()
+        .to_string();
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    let lowered = base.to_ascii_lowercase();
+    let parts: Vec<&str> = lowered
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if let Some(first) = parts.first() {
+        candidates.push((*first).to_string());
+        candidates.push(first.chars().take(1).collect());
+    }
+    if parts.len() > 1 {
+        let initials: String = parts.iter().filter_map(|p| p.chars().next()).collect();
+        if !initials.is_empty() {
+            candidates.push(initials);
+        }
+        if let Some(last) = parts.last() {
+            candidates.push((*last).to_string());
+        }
+    }
+    candidates.push(lowered);
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        if !candidate.is_empty() && !deduped.contains(&candidate) {
+            deduped.push(candidate);
+        }
+    }
+    deduped
+}
+
+fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(pos, _)| pos)
+        .unwrap_or(s.len())
+}
+
+/// Apply a suggestion by replacing the full identifier token around the cursor.
+/// This removes redundant suffixes when completing in the middle of an existing token.
+pub(crate) fn apply_autocomplete_suggestion(
+    sql: &str,
+    cursor_char_index: usize,
+    prefix_start_index: usize,
+    replacement: &str,
+    cursor_offset: Option<usize>,
+) -> (String, usize) {
+    let (token_start, token_end) = SqlContextParser::current_token_bounds(sql, cursor_char_index);
+    let replace_start = prefix_start_index.min(token_start);
+    let replace_end = token_end.max(cursor_char_index);
+
+    let before = &sql[..char_to_byte_index(sql, replace_start)];
+    let after = &sql[char_to_byte_index(sql, replace_end)..];
+    let new_cursor = replace_start + cursor_offset.unwrap_or(replacement.chars().count());
+
+    (format!("{}{}{}", before, replacement, after), new_cursor)
 }
 
 /// Tracks the autocomplete popup's state across frames.
@@ -1071,11 +1599,13 @@ impl AutocompleteState {
 /// Icon character for each suggestion kind.
 pub(crate) fn suggestion_kind_icon(kind: SuggestionKind) -> &'static str {
     match kind {
+        SuggestionKind::Loading => "...",
         SuggestionKind::Database => "\u{1F4BE}",
         SuggestionKind::Schema => "\u{1F4C1}",
         SuggestionKind::Table => "\u{1F4E6}",
         SuggestionKind::View => "\u{1F441}",
         SuggestionKind::Column { .. } => "\u{1F4CB}",
+        SuggestionKind::Function => "\u{0192}",
         SuggestionKind::Keyword => "\u{1F511}",
         SuggestionKind::MongoKeyword => "\u{26AB}",
     }
@@ -1084,23 +1614,27 @@ pub(crate) fn suggestion_kind_icon(kind: SuggestionKind) -> &'static str {
 /// Secondary label text for display (e.g., "(column)" or table name for columns).
 pub(crate) fn suggestion_kind_label(kind: SuggestionKind) -> String {
     match kind {
+        SuggestionKind::Loading => tr!("加载中").to_string(),
         SuggestionKind::Database => tr!("数据库").to_string(),
         SuggestionKind::Schema => "Schema".to_string(),
         SuggestionKind::Table => tr!("表").to_string(),
         SuggestionKind::View => tr!("视图").to_string(),
-        SuggestionKind::Column { parent_table } => tr!("列 · {}", parent_table),
+        SuggestionKind::Column { parent_table } => {
+            tr!("列 · {}", compact_object_name(&parent_table))
+        }
+        SuggestionKind::Function => tr!("函数").to_string(),
         SuggestionKind::Keyword => tr!("关键字").to_string(),
         SuggestionKind::MongoKeyword => "Mongo".to_string(),
     }
 }
 
-/// Render the autocomplete popup. Returns (insertion_text, cursor_offset) if committed.
+/// Render the autocomplete popup. Returns (display_label, insertion_text, cursor_offset) if committed.
 pub(crate) fn render_autocomplete_popup(
     ctx: &egui::Context,
     state: &mut AutocompleteState,
     suggestions: &[AutocompleteSuggestion],
     palette: &AutocompletePalette,
-) -> Option<(String, Option<usize>)> {
+) -> Option<(String, String, Option<usize>)> {
     if !state.visible || suggestions.is_empty() {
         state.dismiss();
         return None;
@@ -1152,7 +1686,7 @@ pub(crate) fn render_autocomplete_popup(
 
     let popup_id = Id::from("autocomplete-popup");
 
-    let mut committed: Option<(String, Option<usize>)> = None;
+    let mut committed: Option<(String, String, Option<usize>)> = None;
 
     let area_response = Area::new(popup_id)
         .order(Order::Foreground)
@@ -1203,7 +1737,12 @@ pub(crate) fn render_autocomplete_popup(
                             let (row_id, row_rect) =
                                 ui.allocate_space(row_size);
 
-                            let row_response = ui.interact(row_rect, row_id, Sense::click());
+                            let is_loading_row = matches!(suggestion.kind, SuggestionKind::Loading);
+                            let row_response = ui.interact(
+                                row_rect,
+                                row_id,
+                                if is_loading_row { Sense::hover() } else { Sense::click() },
+                            );
 
                             // Keep selected row visible when navigating with keyboard
                             if is_selected && state.need_scroll_to_selected {
@@ -1281,13 +1820,13 @@ pub(crate) fn render_autocomplete_popup(
 
                             // Single click: first click selects, second click commits
                             // Double click: commits directly
-                            if row_response.double_clicked() {
+                            if !is_loading_row && row_response.double_clicked() {
                                 let text = suggestion.insertion_text.clone().unwrap_or_else(|| suggestion.label.clone());
-                                committed = Some((text, suggestion.cursor_offset));
-                            } else if row_response.clicked() {
+                                committed = Some((suggestion.label.clone(), text, suggestion.cursor_offset));
+                            } else if !is_loading_row && row_response.clicked() {
                                 if state.clicked_index == Some(i) {
                                     let text = suggestion.insertion_text.clone().unwrap_or_else(|| suggestion.label.clone());
-                                    committed = Some((text, suggestion.cursor_offset));
+                                    committed = Some((suggestion.label.clone(), text, suggestion.cursor_offset));
                                 } else {
                                     state.clicked_index = Some(i);
                                     state.selected_index = i;
@@ -1366,6 +1905,8 @@ mod tests {
                             nullable: true,
                             primary_key: false,
                             unique: false,
+                            auto_increment: false,
+                            on_update_current_timestamp: false,
                             default_value: None,
                             comment: None,
                         })
@@ -1416,9 +1957,33 @@ mod tests {
     }
 
     #[test]
+    fn context_parser_where_with_partial_identifier_stays_in_where_clause() {
+        let c = SqlContextParser::parse("SELECT * FROM x WHERE pro", 25);
+        assert_eq!(c, SqlContext::WhereClause);
+    }
+
+    #[test]
+    fn context_parser_insert_column_list_stays_in_insert_context_after_comma() {
+        let c = SqlContextParser::parse("INSERT INTO users (id, ", 23);
+        assert_eq!(c, SqlContext::InsertColumns);
+    }
+
+    #[test]
+    fn context_parser_insert_values_is_not_column_context() {
+        let c = SqlContextParser::parse("INSERT INTO users VALUES (", 26);
+        assert_eq!(c, SqlContext::General);
+    }
+
+    #[test]
     fn context_parser_join_suggests_tables() {
         let c = SqlContextParser::parse("SELECT * FROM t JOIN ", 22);
         assert_eq!(c, SqlContext::AfterKeyword { keyword: "JOIN".into() });
+    }
+
+    #[test]
+    fn context_parser_as_uses_alias_context() {
+        let c = SqlContextParser::parse("SELECT total_price AS ", 22);
+        assert_eq!(c, SqlContext::AliasName);
     }
 
     #[test]
@@ -1434,12 +1999,41 @@ mod tests {
     }
 
     #[test]
+    fn current_token_bounds_cover_suffix_after_cursor() {
+        let bounds = SqlContextParser::current_token_bounds("SELECT name FROM users", 10);
+        assert_eq!(bounds, (7, 11));
+    }
+
+    #[test]
     fn engine_suggests_columns_in_select_context() {
         let cache = make_cache(&[("users", false, &["id", "name", "email"])]);
         // Cursor after comma+space in select list: "SELECT id, "
-        let suggestions = AutocompleteEngine::suggest("SELECT id, ", 12, &cache);
+        let suggestions = AutocompleteEngine::suggest("SELECT id, ", 12, &cache, None, None, None);
         assert!(suggestions.iter().any(|s| s.label == "id"));
         assert!(suggestions.iter().any(|s| s.label == "name"));
+    }
+
+    #[test]
+    fn engine_suggests_columns_in_where_with_partial_prefix() {
+        let cache = make_cache(&[(
+            "aep.aep_abtest_config_deploy_log_2",
+            false,
+            &["project_id", "process_id", "status"],
+        )]);
+        let suggestions = AutocompleteEngine::suggest(
+            "SELECT * FROM aep.aep_abtest_config_deploy_log_2 WHERE pro",
+            58,
+            &cache,
+            None,
+            None,
+            None,
+        );
+        assert!(suggestions.iter().any(|s| s.label == "project_id"));
+        assert!(suggestions.iter().any(|s| s.label == "process_id"));
+        assert!(!suggestions.iter().any(|s| s.label == "projects"));
+        assert!(!suggestions
+            .iter()
+            .any(|s| s.label == "aep.aep_abtest_config_deploy_log_2.project_id"));
     }
 
     #[test]
@@ -1448,26 +2042,189 @@ mod tests {
             ("users", false, &["id"]),
             ("orders", false, &["id"]),
         ]);
-        let suggestions = AutocompleteEngine::suggest("SELECT * FROM ", 14, &cache);
+        let suggestions = AutocompleteEngine::suggest("SELECT * FROM ", 14, &cache, None, None, None);
         assert!(suggestions.iter().any(|s| s.label == "users"));
         assert!(suggestions.iter().any(|s| s.label == "orders"));
+        assert!(!suggestions.iter().any(|s| matches!(s.kind, SuggestionKind::Database)));
+        assert!(!suggestions.iter().any(|s| matches!(s.kind, SuggestionKind::Schema)));
     }
 
     #[test]
     fn engine_suggests_columns_after_dot() {
         let cache = make_cache(&[("users", false, &["id", "name", "email"])]);
-        let suggestions = AutocompleteEngine::suggest("SELECT users.nam", 15, &cache);
+        let suggestions = AutocompleteEngine::suggest("SELECT users.nam", 15, &cache, None, None, None);
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].label, "name");
     }
 
     #[test]
+    fn engine_resolves_alias_after_dot() {
+        let cache = make_cache(&[
+            ("users", false, &["id", "name"]),
+            ("orders", false, &["id", "total"]),
+        ]);
+        let suggestions =
+            AutocompleteEngine::suggest("SELECT u. FROM users u JOIN orders o ON u.id = o.id", 9, &cache, None, None, None);
+        assert!(suggestions.iter().any(|s| s.label == "id"));
+        assert!(suggestions.iter().any(|s| s.label == "name"));
+        assert!(!suggestions.iter().any(|s| s.label == "total"));
+    }
+
+    #[test]
+    fn engine_limits_column_suggestions_to_referenced_tables() {
+        let cache = make_cache(&[
+            ("users", false, &["id", "name"]),
+            ("orders", false, &["id", "total"]),
+            ("products", false, &["sku"]),
+        ]);
+        let sql = "SELECT  FROM users u JOIN orders o ON u.id = o.id";
+        let suggestions = AutocompleteEngine::suggest(sql, 7, &cache, None, None, None);
+        assert!(suggestions.iter().any(|s| s.label == "id"));
+        assert!(suggestions.iter().any(|s| s.label == "total"));
+        assert!(!suggestions.iter().any(|s| s.label == "products.sku"));
+        assert!(!suggestions.iter().any(|s| s.label == "sku"));
+    }
+
+    #[test]
+    fn engine_manual_trigger_without_prefix_in_where_prefers_columns_only() {
+        let cache = make_cache(&[("users", false, &["id", "name"])]);
+        let suggestions =
+            AutocompleteEngine::suggest("SELECT * FROM users WHERE ", 26, &cache, None, None, None);
+        assert!(suggestions.iter().any(|s| s.label == "id"));
+        assert!(suggestions.iter().any(|s| s.label == "name"));
+        assert!(suggestions.iter().any(|s| s.label == "IS NULL"));
+        assert!(suggestions.iter().any(|s| s.label == "IN"));
+        assert!(suggestions.iter().any(|s| s.label == "LIKE"));
+        assert!(!suggestions.iter().any(|s| s.label == "WHERE"));
+        assert!(!suggestions.iter().any(|s| matches!(s.kind, SuggestionKind::Function)));
+    }
+
+    #[test]
+    fn engine_insert_columns_uses_target_table_columns() {
+        let cache = make_cache(&[
+            ("users", false, &["id", "name"]),
+            ("orders", false, &["order_id"]),
+        ]);
+        let suggestions = AutocompleteEngine::suggest("INSERT INTO users (", 19, &cache, None, None, None);
+        assert!(suggestions.iter().any(|s| s.label == "id"));
+        assert!(suggestions.iter().any(|s| s.label == "name"));
+        assert!(!suggestions.iter().any(|s| s.label == "order_id"));
+    }
+
+    #[test]
+    fn engine_suggests_alias_candidates_after_as() {
+        let cache = make_cache(&[("order_items", false, &["id"])]);
+        let suggestions =
+            AutocompleteEngine::suggest("SELECT * FROM order_items AS ", 29, &cache, None, None, None);
+        assert!(suggestions.iter().any(|s| s.label == "oi"));
+        assert!(suggestions.iter().any(|s| s.label == "order_items"));
+        assert!(!suggestions.iter().any(|s| matches!(s.kind, SuggestionKind::Function)));
+    }
+
+    #[test]
+    fn engine_suggests_function_snippets_in_select_context() {
+        let cache = make_cache(&[("users", false, &["id"])]);
+        let suggestions = AutocompleteEngine::suggest("SELECT CO", 9, &cache, None, None, None);
+        let count = suggestions.iter().find(|s| s.label == "COUNT").unwrap();
+        assert_eq!(count.insertion_text.as_deref(), Some("COUNT(*)"));
+        assert_eq!(count.cursor_offset, Some(6));
+        let coalesce = suggestions.iter().find(|s| s.label == "COALESCE").unwrap();
+        assert!(matches!(coalesce.kind, SuggestionKind::Function));
+        let cast = suggestions.iter().find(|s| s.label == "CAST").unwrap();
+        assert_eq!(cast.insertion_text.as_deref(), Some("CAST(expr AS type)"));
+        assert_eq!(cast.cursor_offset, Some(5));
+    }
+
+    #[test]
+    fn engine_adds_mysql_specific_function_snippets() {
+        let cache = make_cache(&[("users", false, &["id"])]);
+        let suggestions = AutocompleteEngine::suggest(
+            "SELECT DA",
+            9,
+            &cache,
+            None,
+            Some(DatabaseKind::MySql),
+            None,
+        );
+        let date_format = suggestions
+            .iter()
+            .find(|s| s.label == "DATE_FORMAT")
+            .unwrap();
+        assert_eq!(
+            date_format.insertion_text.as_deref(),
+            Some("DATE_FORMAT(date, '%Y-%m-%d')")
+        );
+        assert_eq!(date_format.cursor_offset, Some(12));
+        let ifnull = suggestions.iter().find(|s| s.label == "IFNULL").unwrap();
+        assert_eq!(ifnull.insertion_text.as_deref(), Some("IFNULL(expr, fallback)"));
+        assert!(!suggestions.iter().any(|s| s.label == "DATE_TRUNC"));
+    }
+
+    #[test]
+    fn engine_adds_postgres_specific_function_snippets() {
+        let cache = make_cache(&[("users", false, &["id"])]);
+        let suggestions = AutocompleteEngine::suggest(
+            "SELECT DA",
+            9,
+            &cache,
+            None,
+            Some(DatabaseKind::Postgres),
+            None,
+        );
+        let date_trunc = suggestions
+            .iter()
+            .find(|s| s.label == "DATE_TRUNC")
+            .unwrap();
+        assert_eq!(date_trunc.insertion_text.as_deref(), Some("DATE_TRUNC('day', ts)"));
+        assert_eq!(date_trunc.cursor_offset, Some(12));
+        let to_char = suggestions.iter().find(|s| s.label == "TO_CHAR").unwrap();
+        assert_eq!(to_char.insertion_text.as_deref(), Some("TO_CHAR(value, 'YYYY-MM-DD')"));
+        assert!(!suggestions.iter().any(|s| s.label == "DATE_FORMAT"));
+    }
+
+    #[test]
+    fn usage_memory_promotes_recent_suggestions() {
+        let cache = make_cache(&[("users", false, &["name", "nickname"])]);
+        let mut usage = AutocompleteUsageMemory::default();
+        usage.record("nickname");
+        let suggestions = AutocompleteEngine::suggest(
+            "SELECT ni",
+            9,
+            &cache,
+            None,
+            None,
+            Some(&usage),
+        );
+        assert_eq!(suggestions.first().map(|s| s.label.as_str()), Some("nickname"));
+    }
+
+    #[test]
+    fn loading_suggestion_has_dedicated_label_and_icon() {
+        assert_eq!(suggestion_kind_label(SuggestionKind::Loading), "加载中");
+        assert_eq!(suggestion_kind_icon(SuggestionKind::Loading), "...");
+    }
+
+    #[test]
     fn engine_prefix_filter_ranks_exact_first() {
         let cache = make_cache(&[("t", false, &["id", "idea", "aid"])]);
-        let suggestions = AutocompleteEngine::suggest("SELECT id", 9, &cache);
+        let suggestions = AutocompleteEngine::suggest("SELECT id", 9, &cache, None, None, None);
         assert_eq!(suggestions.first().unwrap().label, "id");
         assert_eq!(suggestions[1].label, "idea"); // starts-with id
         assert_eq!(suggestions[2].label, "aid");  // contains id
+    }
+
+    #[test]
+    fn apply_autocomplete_replaces_middle_of_identifier() {
+        let (sql, cursor) = apply_autocomplete_suggestion("SELECT na|me FROM users".replace('|', "").as_str(), 9, 7, "name", None);
+        assert_eq!(sql, "SELECT name FROM users");
+        assert_eq!(cursor, 11);
+    }
+
+    #[test]
+    fn apply_autocomplete_keeps_templates_cursor_offset() {
+        let (sql, cursor) = apply_autocomplete_suggestion("db.users.fi|nd".replace('|', "").as_str(), 11, 9, "find({})", Some(5));
+        assert_eq!(sql, "db.users.find({})");
+        assert_eq!(cursor, 14);
     }
 
     #[test]
@@ -1475,7 +2232,17 @@ mod tests {
         let mut cache = SchemaCache::new();
         cache.add_table("users".into(), false);
         cache.add_columns("users".into(), vec![
-            ColumnDefinition { name: "id".into(), data_type: "int".into(), nullable: false, primary_key: true, unique: true, default_value: None, comment: None },
+            ColumnDefinition {
+                name: "id".into(),
+                data_type: "int".into(),
+                nullable: false,
+                primary_key: true,
+                unique: true,
+                auto_increment: false,
+                on_update_current_timestamp: false,
+                default_value: None,
+                comment: None,
+            },
         ]);
         assert!(cache.table_names().contains(&"users"));
         assert_eq!(cache.columns_for_table("users").unwrap().len(), 1);
@@ -1492,7 +2259,13 @@ mod tests {
 
     #[test]
     fn autocomplete_suggestion_clone_and_eq() {
-        let a = AutocompleteSuggestion { label: "x".into(), kind: SuggestionKind::Table, matched_indices: vec![], insertion_text: None, cursor_offset: None };
+        let a = AutocompleteSuggestion {
+            label: "x".into(),
+            kind: SuggestionKind::Table,
+            matched_indices: vec![],
+            insertion_text: None,
+            cursor_offset: None,
+        };
         let b = a.clone();
         assert_eq!(a, b);
     }

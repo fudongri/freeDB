@@ -22,8 +22,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use crate::autocomplete::{
-    autocomplete_palette, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
-    AutocompleteState, SchemaCache, SqlContextParser,
+    apply_autocomplete_suggestion, autocomplete_palette, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
+    AutocompleteState, AutocompleteSuggestion, AutocompleteUsageMemory, SchemaCache, SqlContext, SqlContextParser,
+    SuggestionKind,
 };
 
 struct ReleaseAsset {
@@ -117,9 +118,12 @@ pub struct DesktopApp {
     generate_data_cancel: Option<Arc<AtomicBool>>,
     pending_query_definition: Option<Receiver<QueryDefinitionLoadResult>>,
     pending_query_edit_context: Option<QueryEditContextTrigger>,
+    pending_autocomplete_columns: Vec<Receiver<AutocompleteColumnsLoadResult>>,
     pending_schema_load: Option<Receiver<SchemaLoadResult>>,
     schema_cache: SchemaCache,
+    autocomplete_usage: AutocompleteUsageMemory,
     cache_loaded_connections: HashSet<String>,
+    loading_autocomplete_columns: HashSet<String>,
     connection_test_result: Option<(bool, String)>,
     pending_test_connection: Option<Receiver<(bool, String)>>,
     loading_connections: HashSet<String>,
@@ -168,6 +172,12 @@ pub struct DesktopApp {
 struct SchemaLoadResult {
     connection_id: String,
     tables: Result<Vec<ExplorerNode>, String>,
+}
+
+struct AutocompleteColumnsLoadResult {
+    load_key: String,
+    table_ref: TableRef,
+    definition: Result<TableDefinition, String>,
 }
 
 struct ConnectionTreeLoadResult {
@@ -747,6 +757,7 @@ struct EditorFindState {
     current_index: usize,
     error_message: String,
     request_focus: bool,
+    request_scroll_to_current: bool,
     last_sql: String,                 // 用于检测 SQL 变化，避免匹配偏移过期
     regex_pending: bool,
     regex_debounce_frame: u32,
@@ -792,6 +803,7 @@ impl EditorFindState {
                 start = abs_end;
             }
         }
+        self.request_scroll_to_current = !self.matches.is_empty();
         self.matches.len()
     }
 
@@ -805,6 +817,7 @@ impl EditorFindState {
         } else {
             self.current_index = 0;
         }
+        self.request_scroll_to_current = true;
         true
     }
 
@@ -818,6 +831,7 @@ impl EditorFindState {
         } else {
             self.current_index = self.matches.len().saturating_sub(1);
         }
+        self.request_scroll_to_current = true;
         true
     }
 
@@ -1317,9 +1331,12 @@ impl DesktopApp {
             generate_data_cancel: None,
             pending_query_definition: None,
             pending_query_edit_context: None,
+            pending_autocomplete_columns: Vec::new(),
             pending_schema_load: None,
             schema_cache: SchemaCache::new(),
+            autocomplete_usage: AutocompleteUsageMemory::default(),
             cache_loaded_connections: HashSet::new(),
+            loading_autocomplete_columns: HashSet::new(),
             connection_test_result: None,
             pending_test_connection: None,
             pending_database_list: None,
@@ -1556,7 +1573,157 @@ impl DesktopApp {
                 self.schema_cache.add_table_to_schema(schema, entry.table.clone(), entry.is_view);
                 self.schema_cache.add_schema(connection_id, schema.clone());
             }
+            if !entry.columns.is_empty() {
+                self.schema_cache.add_columns(entry.table.clone(), entry.columns.clone());
+                if let Some(ref db) = entry.database {
+                    self.schema_cache
+                        .add_columns(format!("{}.{}", db, entry.table), entry.columns.clone());
+                }
+                if let Some(ref schema) = entry.schema {
+                    self.schema_cache
+                        .add_columns(format!("{}.{}", schema, entry.table), entry.columns.clone());
+                }
+            }
         }
+    }
+
+    fn autocomplete_table_load_key(table_ref: &TableRef) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            table_ref.connection_id,
+            table_ref.database.as_deref().unwrap_or(""),
+            table_ref.schema.as_deref().unwrap_or(""),
+            table_ref.table
+        )
+    }
+
+    fn cache_table_definition(
+        &mut self,
+        table_ref: &TableRef,
+        is_view: bool,
+        definition: &TableDefinition,
+    ) {
+        self.schema_cache.add_table(table_ref.table.clone(), is_view);
+        self.schema_cache
+            .add_columns(table_ref.table.clone(), definition.columns.clone());
+        if let Some(ref db) = table_ref.database {
+            self.schema_cache
+                .add_database(&table_ref.connection_id, db.clone());
+            self.schema_cache
+                .add_table_to_database(db, table_ref.table.clone(), is_view);
+            self.schema_cache
+                .add_columns(format!("{}.{}", db, table_ref.table), definition.columns.clone());
+        }
+        if let Some(ref schema) = table_ref.schema {
+            self.schema_cache
+                .add_schema(&table_ref.connection_id, schema.clone());
+            self.schema_cache
+                .add_table_to_schema(schema, table_ref.table.clone(), is_view);
+            self.schema_cache.add_columns(
+                format!("{}.{}", schema, table_ref.table),
+                definition.columns.clone(),
+            );
+        }
+        self.services.merge_metadata_cache(
+            &table_ref.connection_id,
+            &[CachedEntry {
+                database: table_ref.database.clone(),
+                schema: table_ref.schema.clone(),
+                table: table_ref.table.clone(),
+                is_view,
+                columns: definition.columns.clone(),
+            }],
+        );
+    }
+
+    fn maybe_request_autocomplete_columns_for_active_query(&mut self) {
+        let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        if !tab.autocomplete.visible {
+            return;
+        }
+        let Some(connection_id) = tab.connection_id.clone() else {
+            return;
+        };
+        let cursor = tab
+            .cursor_range
+            .map(|r| r.primary.index)
+            .unwrap_or(tab.sql.chars().count());
+        let context = SqlContextParser::parse(&tab.sql, cursor);
+        if !matches!(
+            context,
+            crate::autocomplete::SqlContext::AfterColumnDot { .. }
+                | crate::autocomplete::SqlContext::SelectClause
+                | crate::autocomplete::SqlContext::WhereClause
+                | crate::autocomplete::SqlContext::OrderGroupClause
+                | crate::autocomplete::SqlContext::InsertColumns
+        ) {
+            return;
+        }
+        let db_kind = self.database_kind_for_connection(&connection_id);
+        let Some(table_ref) = parse_simple_select_table(
+            &tab.sql,
+            &connection_id,
+            tab.database.as_deref(),
+            db_kind,
+        ) else {
+            return;
+        };
+        if self.schema_cache.columns_for_table(&table_ref.table).is_some() {
+            return;
+        }
+        let load_key = Self::autocomplete_table_load_key(&table_ref);
+        if self.loading_autocomplete_columns.contains(&load_key) {
+            return;
+        }
+        self.loading_autocomplete_columns.insert(load_key.clone());
+        let services = self.services.clone();
+        let handle = self.runtime.handle().clone();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_autocomplete_columns.push(receiver);
+        handle.spawn(async move {
+            let definition = services
+                .load_table_definition(&table_ref)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = sender.send(AutocompleteColumnsLoadResult {
+                load_key,
+                table_ref,
+                definition,
+            });
+        });
+    }
+
+    fn poll_autocomplete_columns(&mut self) {
+        let active_query_id = self.tabs.get(self.active_tab).and_then(|tab| match tab {
+            WorkspaceTab::Query(q) => Some(q.id.clone()),
+            _ => None,
+        });
+        let mut pending = std::mem::take(&mut self.pending_autocomplete_columns);
+        pending.retain(|receiver| match receiver.try_recv() {
+            Ok(message) => {
+                self.loading_autocomplete_columns.remove(&message.load_key);
+                if let Ok(definition) = message.definition {
+                    self.cache_table_definition(&message.table_ref, message.table_ref.is_view, &definition);
+                    if let Some(active_query_id) = active_query_id.as_deref() {
+                        if let Some(WorkspaceTab::Query(tab)) = self
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| matches!(tab, WorkspaceTab::Query(q) if q.id == active_query_id))
+                        {
+                            if tab.autocomplete.visible {
+                                tab.autocomplete.trigger_requested = true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => false,
+        });
+        self.pending_autocomplete_columns = pending;
     }
 
     fn spawn_schema_load(&mut self, connection_id: String) {
@@ -2085,6 +2252,7 @@ impl DesktopApp {
 
         // Poll query table definition (async: try_init_query_edit_context)
         self.poll_query_definition();
+        self.poll_autocomplete_columns();
 
         // 处理结果切换后的编辑上下文重新分析
         let pending_analysis: Vec<QueryEditContextTrigger> = self
@@ -2122,6 +2290,7 @@ impl DesktopApp {
         if let Some(receiver) = self.pending_table_preview.take() {
             match receiver.try_recv() {
                 Ok(message) => {
+                    let mut cache_update: Option<(TableRef, bool, TableDefinition)> = None;
                     if let Some(WorkspaceTab::Table(tab)) = self.tabs.iter_mut().find(|tab| {
                         matches!(tab, WorkspaceTab::Table(t) if t.id == message.tab_id)
                     }) {
@@ -2138,8 +2307,11 @@ impl DesktopApp {
                                 if tab.error.is_some() {
                                     tab.error = None;
                                 }
-                                self.schema_cache
-                                    .add_columns(message.table_name.clone(), def.columns.clone());
+                                cache_update = Some((
+                                    tab.table.clone(),
+                                    tab.table.is_view,
+                                    def.clone(),
+                                ));
                             }
                             Some(Err(error)) => {
                                 tab.error = Some(error);
@@ -2225,6 +2397,9 @@ impl DesktopApp {
                                 self.status_level = StatusLevel::Error;
                             }
                         }
+                    }
+                    if let Some((table_ref, is_view, definition)) = cache_update {
+                        self.cache_table_definition(&table_ref, is_view, &definition);
                     }
                 }
                 Err(TryRecvError::Empty) => {
@@ -5989,6 +6164,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             &self.database_cache,
                             &self.services,
                             &self.schema_cache,
+                            &mut self.autocomplete_usage,
+                            &self.loading_autocomplete_columns,
                             pending_query_batch_save,
                             &self.theme.colors,
                             &self.theme.fonts,
@@ -7337,6 +7514,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         };
         match receiver.try_recv() {
             Ok(message) => {
+                let mut cache_update: Option<(TableRef, bool, TableDefinition)> = None;
                 if let Some(WorkspaceTab::Query(tab)) =
                     self.tabs.iter_mut().find(|t| {
                         matches!(t, WorkspaceTab::Query(q) if q.id == message.tab_id)
@@ -7344,9 +7522,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 {
                     match message.definition {
                         Ok(def) => {
+                            let table_ref = message.table_ref.clone();
+                            cache_update = Some((table_ref.clone(), table_ref.is_view, def.clone()));
                             // 定义加载成功，创建/替换 edit_context
                             tab.edit_context = Some(QueryEditContext {
-                                table_ref: message.table_ref,
+                                table_ref,
                                 database_kind: message.db_kind,
                                 definition: Some(def),
                                 source_sql: message.source_sql,
@@ -7367,6 +7547,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             sel.cell_selection_is_null = false;
                         }
                     }
+                }
+                if let Some((table_ref, is_view, definition)) = cache_update {
+                    self.cache_table_definition(&table_ref, is_view, &definition);
                 }
             }
             Err(TryRecvError::Empty) => {
@@ -7910,6 +8093,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         database_cache: &HashMap<String, Vec<String>>,
         services: &AppServices,
         schema_cache: &SchemaCache,
+        autocomplete_usage: &mut AutocompleteUsageMemory,
+        loading_autocomplete_columns: &HashSet<String>,
         pending_query_batch_save: bool,
         colors: &ui_theme::ThemeColors,
         fonts: &ui_theme::FontSizes,
@@ -8185,6 +8370,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         &mut action,
                                                         schema_cache,
                                                         tab_db_kind,
+                                                        autocomplete_usage,
+                                                        loading_autocomplete_columns,
                                                     );
                                                 });
                                             });
@@ -8228,6 +8415,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         &mut action,
                                                         schema_cache,
                                                         tab_db_kind,
+                                                        autocomplete_usage,
+                                                        loading_autocomplete_columns,
                                                     );
                                                 });
                                             });
@@ -14206,6 +14395,7 @@ impl eframe::App for DesktopApp {
         self.poll_tree_rename();
         self.poll_create_table();
         self.poll_generate_data();
+        self.maybe_request_autocomplete_columns_for_active_query();
 
         // Two-phase refresh: first frame shows "正在刷新", next frame does the work
         if let Some(reload_definition) = self.pending_refresh_active_table.take() {
@@ -14220,6 +14410,7 @@ impl eframe::App for DesktopApp {
             || self.pending_update_check.is_some()
             || self.update_download_rx.is_some()
             || self.pending_table_summary.is_some()
+            || !self.pending_autocomplete_columns.is_empty()
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Table(t) if t.generate_data_running))
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::TableSummary(ts) if ts.stats_loading))
         {
@@ -14597,12 +14788,12 @@ impl eframe::App for DesktopApp {
                 };
                 let db_kind = tab_conn_id.as_deref().map(|cid| self.database_kind_for_connection(cid));
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-                    let suggestion_count = AutocompleteEngine::suggest(
-                        &tab.sql,
-                        tab.cursor_range.map(|r| r.primary.index).unwrap_or(tab.sql.chars().count()),
+                    let suggestion_count = build_query_autocomplete_suggestions(
+                        tab,
                         &self.schema_cache,
-                        tab_conn_id.as_deref(),
                         db_kind,
+                        &self.autocomplete_usage,
+                        &self.loading_autocomplete_columns,
                     )
                     .len();
                     if arrow_up {
@@ -14647,23 +14838,27 @@ impl eframe::App for DesktopApp {
                 let db_kind = tab_conn_id.as_deref().map(|cid| self.database_kind_for_connection(cid));
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
                     let cursor = tab.cursor_range.map(|r| r.primary.index).unwrap_or(tab.sql.chars().count());
-                    let suggestions = AutocompleteEngine::suggest(
-                        &tab.sql,
-                        cursor,
+                    let suggestions = build_query_autocomplete_suggestions(
+                        tab,
                         &self.schema_cache,
-                        tab_conn_id.as_deref(),
                         db_kind,
+                        &self.autocomplete_usage,
+                        &self.loading_autocomplete_columns,
                     );
-                    if let Some(s) = suggestions.get(tab.autocomplete.selected_index) {
-                        let prefix_start = tab.autocomplete.prefix_start_index;
-                        let char_to_byte = |char_idx: usize| -> usize {
-                            tab.sql.char_indices().nth(char_idx).map(|(pos, _)| pos).unwrap_or(tab.sql.len())
-                        };
-                        let before = tab.sql[..char_to_byte(prefix_start)].to_string();
-                        let after = tab.sql[char_to_byte(cursor)..].to_string();
+                    if let Some(s) = suggestions.get(tab.autocomplete.selected_index)
+                        && !matches!(s.kind, SuggestionKind::Loading)
+                    {
                         let text = s.insertion_text.as_deref().unwrap_or(&s.label);
-                        let new_cursor = before.chars().count() + s.cursor_offset.unwrap_or(text.chars().count());
-                        tab.sql = format!("{}{}{}", before, text, after);
+                        let selected_label = s.label.clone();
+                        let (new_sql, new_cursor) = apply_autocomplete_suggestion(
+                            &tab.sql,
+                            cursor,
+                            tab.autocomplete.prefix_start_index,
+                            text,
+                            s.cursor_offset,
+                        );
+                        tab.sql = new_sql;
+                        self.autocomplete_usage.record(&selected_label);
                         // +1 frame defer needed: TextEdit state not yet available
                         tab.autocomplete_cursor_target = Some(new_cursor);
                     }
@@ -27058,14 +27253,14 @@ fn check_autocomplete_triggers(
 
     let ctx = ui.ctx();
 
-    // Cmd+, shortcut
-    let cmd_comma = ctx.input_mut(|input| {
+    // Cmd+J shortcut
+    let cmd_j = ctx.input_mut(|input| {
         input.consume_shortcut(&egui::KeyboardShortcut::new(
             egui::Modifiers::COMMAND,
-            egui::Key::Comma,
-        )) || (input.modifiers.command && input.key_pressed(egui::Key::Comma))
+            egui::Key::J,
+        )) || (input.modifiers.command && input.key_pressed(egui::Key::J))
     });
-    if cmd_comma {
+    if cmd_j {
         tab.autocomplete.trigger_requested = true;
     }
 
@@ -27102,7 +27297,20 @@ fn check_autocomplete_triggers(
             let just_typed_dot = cursor > 0
                 && tab.sql.as_bytes().get(cursor.saturating_sub(1)) == Some(&b'.');
             let prefix = SqlContextParser::current_token_prefix(&tab.sql, cursor);
-            if prefix.len() >= 2 {
+            let context = SqlContextParser::parse(&tab.sql, cursor);
+            let min_prefix_len = if matches!(
+                context,
+                crate::autocomplete::SqlContext::SelectClause
+                    | crate::autocomplete::SqlContext::WhereClause
+                    | crate::autocomplete::SqlContext::OrderGroupClause
+                    | crate::autocomplete::SqlContext::InsertColumns
+                    | crate::autocomplete::SqlContext::AfterColumnDot { .. }
+            ) {
+                1
+            } else {
+                2
+            };
+            if prefix.len() >= min_prefix_len {
                 tab.autocomplete.trigger_requested = true;
                 tab.autocomplete.last_keystroke = None; // reset
             } else if !just_typed_dot {
@@ -27113,7 +27321,8 @@ fn check_autocomplete_triggers(
 
     // Execute trigger if requested
     if tab.autocomplete.trigger_requested {
-        let cursor = tab.cursor_range.map(|r| r.primary.index).unwrap_or(0);
+        tab.cursor_range = editor_output.cursor_range;
+        let cursor = editor_output.cursor_range.map(|r| r.primary.index).unwrap_or(0);
         let prefix =
             SqlContextParser::current_token_prefix(&tab.sql, cursor);
         let prefix_start = cursor.saturating_sub(prefix.chars().count());
@@ -27148,6 +27357,64 @@ fn check_autocomplete_triggers(
     }
 }
 
+fn is_column_autocomplete_context(context: &SqlContext) -> bool {
+    matches!(
+        context,
+        SqlContext::AfterColumnDot { .. }
+            | SqlContext::SelectClause
+            | SqlContext::WhereClause
+            | SqlContext::OrderGroupClause
+    )
+}
+
+fn build_query_autocomplete_suggestions(
+    tab: &QueryTabState,
+    schema_cache: &SchemaCache,
+    db_kind: Option<DatabaseKind>,
+    autocomplete_usage: &AutocompleteUsageMemory,
+    loading_autocomplete_columns: &HashSet<String>,
+) -> Vec<AutocompleteSuggestion> {
+    let cursor = tab
+        .cursor_range
+        .map(|r| r.primary.index)
+        .unwrap_or(tab.sql.chars().count());
+    let mut suggestions = AutocompleteEngine::suggest(
+        &tab.sql,
+        cursor,
+        schema_cache,
+        tab.connection_id.as_deref(),
+        db_kind,
+        Some(autocomplete_usage),
+    );
+
+    let context = SqlContextParser::parse(&tab.sql, cursor);
+    if !is_column_autocomplete_context(&context) {
+        return suggestions;
+    }
+    let Some(connection_id) = tab.connection_id.as_deref() else {
+        return suggestions;
+    };
+    let Some(kind) = db_kind else {
+        return suggestions;
+    };
+    let Some(table_ref) =
+        parse_simple_select_table(&tab.sql, connection_id, tab.database.as_deref(), kind)
+    else {
+        return suggestions;
+    };
+    if schema_cache.columns_for_table(&table_ref.table).is_some() {
+        return suggestions;
+    }
+    let load_key = DesktopApp::autocomplete_table_load_key(&table_ref);
+    if loading_autocomplete_columns.contains(&load_key) {
+        suggestions.push(AutocompleteSuggestion::new(
+            tr!("正在加载字段...").to_string(),
+            SuggestionKind::Loading,
+        ));
+    }
+    suggestions
+}
+
 /// 提取编辑器渲染为独立函数，支持带/不带左侧面板的两种布局
 fn render_query_editor(
     ui: &mut egui::Ui,
@@ -27159,6 +27426,8 @@ fn render_query_editor(
     action: &mut TabUiAction,
     schema_cache: &SchemaCache,
     db_kind: Option<DatabaseKind>,
+    autocomplete_usage: &mut AutocompleteUsageMemory,
+    loading_autocomplete_columns: &HashSet<String>,
 ) {
     let font_id = FontId::new(fonts.code, FontFamily::Monospace);
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
@@ -27411,10 +27680,13 @@ fn render_query_editor(
                         // 若当前匹配在可视区域外，触发滚动
                         if let Some(mr) = current_match_rect {
                             let visible = output.text_clip_rect;
-                            if mr.min.y < visible.min.y || mr.max.y > visible.max.y
+                            let should_scroll_to_match = tab.find.request_scroll_to_current
+                                || mr.min.y < visible.min.y || mr.max.y > visible.max.y
                                 || mr.min.x < visible.min.x || mr.max.x > visible.max.x
-                            {
+                            ;
+                            if should_scroll_to_match {
                                 ui.scroll_to_rect(mr, Some(egui::Align::Center));
+                                tab.find.request_scroll_to_current = false;
                             }
                         }
 
@@ -27672,15 +27944,12 @@ fn render_query_editor(
                     
                     // --- Autocomplete popup rendering (inside Frame, outside ScrollArea) ---
                     if tab.autocomplete.visible {
-                        let conn_id = tab.connection_id.as_deref();
-                        let suggestions = AutocompleteEngine::suggest(
-                            &tab.sql,
-                            tab.cursor_range
-                                .map(|r| r.primary.index)
-                                .unwrap_or(0),
+                        let suggestions = build_query_autocomplete_suggestions(
+                            tab,
                             schema_cache,
-                            conn_id,
                             db_kind,
+                            autocomplete_usage,
+                            loading_autocomplete_columns,
                         );
 
                         if suggestions.is_empty() {
@@ -27688,7 +27957,7 @@ fn render_query_editor(
                         } else {
                             let pal = autocomplete_palette_from_ui(ui);
 
-                            if let Some((selected, cursor_offset)) = render_autocomplete_popup(
+                            if let Some((selected_label, selected, cursor_offset)) = render_autocomplete_popup(
                                 ui.ctx(),
                                 &mut tab.autocomplete,
                                 &suggestions,
@@ -27698,14 +27967,15 @@ fn render_query_editor(
                                     .cursor_range
                                     .map(|r| r.primary.index)
                                     .unwrap_or(tab.sql.chars().count());
-                                let prefix_start = tab.autocomplete.prefix_start_index;
-                                let char_to_byte = |char_idx: usize| -> usize {
-                                    tab.sql.char_indices().nth(char_idx).map(|(pos, _)| pos).unwrap_or(tab.sql.len())
-                                };
-                                let before = &tab.sql[..char_to_byte(prefix_start)];
-                                let after = &tab.sql[char_to_byte(cursor)..];
-                                let new_cursor = before.chars().count() + cursor_offset.unwrap_or(selected.chars().count());
-                                tab.sql = format!("{}{}{}", before, selected, after);
+                                let (new_sql, new_cursor) = apply_autocomplete_suggestion(
+                                    &tab.sql,
+                                    cursor,
+                                    tab.autocomplete.prefix_start_index,
+                                    &selected,
+                                    cursor_offset,
+                                );
+                                tab.sql = new_sql;
+                                autocomplete_usage.record(&selected_label);
                                 tab.autocomplete.dismiss();
                                 let eid = egui::Id::from(format!("query-editor-{}", tab.id));
                                 if let Some(mut state) = TextEdit::load_state(ui.ctx(), eid) {
