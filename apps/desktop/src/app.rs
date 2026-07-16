@@ -16517,23 +16517,19 @@ fn render_result_table(
                             .at_least(42.0)
                             .clip(true),
                     );
-                    let data_col_count = column_widths.len();
-                    for (i, width) in column_widths.iter().enumerate() {
-                        let is_last = i + 1 == data_col_count;
-                        if is_last {
-                            table = table.column(
-                                egui_extras::Column::remainder()
-                                    .at_least(width.max(72.0))
-                                    .clip(true),
-                            );
-                        } else {
-                            table = table.column(
-                                egui_extras::Column::initial(*width)
-                                    .at_least(72.0)
-                                    .clip(true),
-                            );
-                        }
+                    for width in column_widths.iter() {
+                        table = table.column(
+                            egui_extras::Column::initial(*width)
+                                .at_least(72.0)
+                                .clip(true),
+                        );
                     }
+                    // 用纯展示空列补齐剩余宽度，避免最后一个真实数据列被强制拉伸。
+                    table = table.column(
+                        egui_extras::Column::remainder()
+                            .at_least(0.0)
+                            .clip(true),
+                    );
                     let table = table
                         .header(30.0, |mut header| {
                             // Row number header
@@ -16649,6 +16645,9 @@ fn render_result_table(
                                     header_cell_rects.push(cell_rect);
                                 });
                             }
+                            header.col(|ui| {
+                                table_filler_header_cell(ui, &palette);
+                            });
                         });
                         // 在表头悬停时绘制悬浮列的左右边界线
                         if is_hovering_header && !column_right_edges.is_empty() {
@@ -16744,6 +16743,9 @@ fn render_result_table(
                                         );
                                     });
                                 }
+                                row_ui.col(|ui| {
+                                    table_filler_body_cell(ui, &palette, fill, row_selected);
+                                });
                             });
                             let _body_elapsed_1 = _body_start_1.elapsed();
                             if _body_elapsed_1.as_millis() > 5 {
@@ -17167,19 +17169,14 @@ fn render_editable_result_table(
                     table = table.column(
                         egui_extras::Column::initial(*row_number_width).at_least(42.0).clip(true),
                     );
-                    let data_col_count = column_widths.len();
-                    for (i, width) in column_widths.iter().enumerate() {
-                        let is_last = i + 1 == data_col_count;
-                        if is_last {
-                            table = table.column(
-                                egui_extras::Column::remainder().at_least(width.max(72.0)).clip(true),
-                            );
-                        } else {
-                            table = table.column(
-                                egui_extras::Column::initial(*width).at_least(72.0).clip(true),
-                            );
-                        }
+                    for width in column_widths.iter() {
+                        table = table.column(
+                            egui_extras::Column::initial(*width).at_least(72.0).clip(true),
+                        );
                     }
+                    table = table.column(
+                        egui_extras::Column::remainder().at_least(0.0).clip(true),
+                    );
                     let table = table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
@@ -17298,6 +17295,9 @@ fn render_editable_result_table(
                                     header_cell_rects.push(cell_rect);
                                 });
                             }
+                            header.col(|ui| {
+                                table_filler_header_cell(ui, &palette);
+                            });
                         });
                         let mut body_output_e = table
                         .body(|body| {
@@ -17789,6 +17789,9 @@ fn render_editable_result_table(
                                         });
                                     });
                                 }
+                                row_ui.col(|ui| {
+                                    table_filler_body_cell(ui, &palette, fill, row_selected);
+                                });
                             });
                             let _body_elapsed = _body_start.elapsed();
                             if _body_elapsed.as_millis() > 5 {
@@ -18186,22 +18189,18 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                 .clip(true),
                         );
                     }
-                    for (col_idx, &width) in column_widths.iter().enumerate() {
-                        let is_last = col_idx + 1 == column_widths.len();
-                        if is_last {
-                            table = table.column(
-                                egui_extras::Column::remainder()
-                                    .at_least(width.max(72.0))
-                                    .clip(true),
-                            );
-                        } else {
-                            table = table.column(
-                                egui_extras::Column::initial(width)
-                                    .at_least(72.0)
-                                    .clip(true),
-                            );
-                        }
+                    for &width in column_widths.iter() {
+                        table = table.column(
+                            egui_extras::Column::initial(width)
+                                .at_least(72.0)
+                                .clip(true),
+                        );
                     }
+                    table = table.column(
+                        egui_extras::Column::remainder()
+                            .at_least(0.0)
+                            .clip(true),
+                    );
                     let table_header = table
                         .header(30.0, |mut header| {
                             // Row number header
@@ -18325,6 +18324,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     header_cell_rects.push(cell_rect);
                                 });
                             }
+                            header.col(|ui| {
+                                table_filler_header_cell(ui, &palette);
+                            });
                         });
                     // 指针释放时清除列宽调整状态
                     if tab.column_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
@@ -19046,12 +19048,15 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             });
                                         });
                                     }
+                                    row_ui.col(|ui| {
+                                        table_filler_body_cell(ui, &palette, fill, row_selected);
+                                    });
                                 } else {
                                     if let Some(pending_row) = tab.pending_insert_row.as_mut() {
+                                        let fill =
+                                            table_row_fill(&palette, row_count, false, true);
                                         for (col_idx, column) in columns.iter().enumerate() {
                                             row_ui.col(|ui| {
-                                                let fill =
-                                                    table_row_fill(&palette, row_count, false, true);
                                                 let is_editing = matches!(
                                                     tab.editing_cell.as_ref(),
                                                     Some(edit)
@@ -19210,6 +19215,9 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 });
                                             });
                                         }
+                                        row_ui.col(|ui| {
+                                            table_filler_body_cell(ui, &palette, fill, false);
+                                        });
                                     }
                                 }
                             });
@@ -22391,6 +22399,32 @@ fn table_header_cell(
         subtle_grid_color(palette.table_grid, 30),
     );
     (sort_choice, column_clicked, cell_response.dragged(), copy_action)
+}
+
+fn table_filler_header_cell(ui: &mut egui::Ui, palette: &MacUiPalette) {
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0.0, palette.card_bg);
+    paint_table_grid_lines(
+        ui,
+        rect,
+        Color32::TRANSPARENT,
+        subtle_grid_color(palette.table_grid, 30),
+    );
+    let _ = ui.allocate_rect(rect, egui::Sense::hover());
+}
+
+fn table_filler_body_cell(
+    ui: &mut egui::Ui,
+    palette: &MacUiPalette,
+    fill: Color32,
+    selected: bool,
+) {
+    let rect = ui.max_rect();
+    ui.painter()
+        .rect_filled(table_cell_fill_rect(rect, selected), 0.0, fill);
+    let (vertical_grid, horizontal_grid) = table_grid_colors(palette, fill, selected);
+    paint_table_grid_lines(ui, rect, vertical_grid, horizontal_grid);
+    let _ = ui.allocate_rect(rect, egui::Sense::hover());
 }
 
 fn table_body_cell(
