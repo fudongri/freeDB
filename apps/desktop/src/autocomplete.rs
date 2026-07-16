@@ -1082,26 +1082,67 @@ fn mongo_field_insertion_text(label: &str, path_prefix: Option<&str>) -> Option<
     if prefix.is_empty() {
         return Some(label.to_string());
     }
-    if label == prefix {
-        return Some(label.to_string());
-    }
-    if let Some(remainder) = label.strip_prefix(prefix) {
-        if remainder.is_empty() {
+
+    if let Some((parent_path, _)) = prefix.rsplit_once('.') {
+        let parent_path = parent_path.trim_matches(|c| c == '"' || c == '\'');
+        if parent_path.is_empty() {
             return Some(label.to_string());
         }
-        return Some(remainder.to_string());
+        let parent_prefix = format!("{parent_path}.");
+        if let Some(remainder) = label.strip_prefix(&parent_prefix) {
+            return Some(remainder.to_string());
+        }
+        if label == parent_path {
+            return Some(label.to_string());
+        }
+        return None;
     }
-    if label.starts_with(prefix)
-        || prefix.starts_with(label)
-        || label
-            .split('.')
-            .next()
-            .map(|head| prefix.starts_with(head))
-            .unwrap_or(false)
-    {
+
+    if label.starts_with(prefix) || prefix.starts_with(label) {
         return Some(label.to_string());
     }
     None
+}
+
+pub(crate) fn autocomplete_min_prefix_len(
+    sql: &str,
+    cursor_char_index: usize,
+    db_kind: Option<DatabaseKind>,
+) -> usize {
+    if db_kind == Some(DatabaseKind::MongoDb) {
+        match detect_mongo_context(sql, cursor_char_index) {
+            MongoContext::AfterMethod {
+                method,
+                field_context,
+                active_object_key,
+                ..
+            } if field_context
+                || matches!(method.as_str(), "sort" | "project" | "hint")
+                || matches!(
+                    active_object_key.as_deref(),
+                    Some("$set" | "$project" | "$sort")
+                ) =>
+            {
+                return 1;
+            }
+            MongoContext::NotMongo => {}
+            _ => return 2,
+        }
+    }
+
+    let context = SqlContextParser::parse(sql, cursor_char_index);
+    if matches!(
+        context,
+        SqlContext::SelectClause
+            | SqlContext::WhereClause
+            | SqlContext::OrderGroupClause
+            | SqlContext::InsertColumns
+            | SqlContext::AfterColumnDot { .. }
+    ) {
+        1
+    } else {
+        2
+    }
 }
 
 /// Extract captures from a regex-like pattern (simplified helper).
@@ -2554,6 +2595,8 @@ mod tests {
         );
         assert!(suggestions.iter().any(|s| s.label == "name"));
         assert!(!suggestions.iter().any(|s| s.label == "$set"));
+        let name = suggestions.iter().find(|s| s.label == "name").unwrap();
+        assert_eq!(name.insertion_text.as_deref(), Some("name"));
     }
 
     #[test]
@@ -2659,6 +2702,26 @@ mod tests {
             "updateOne({ _id: value }, { $set: { field: value } })"
         );
         assert_eq!(project_template, "project({ field: 1, _id: 0 })");
+    }
+
+    #[test]
+    fn mongo_field_context_uses_single_char_trigger_threshold() {
+        assert_eq!(
+            autocomplete_min_prefix_len(
+                "db.users.find({ n",
+                "db.users.find({ n".chars().count(),
+                Some(DatabaseKind::MongoDb),
+            ),
+            1
+        );
+        assert_eq!(
+            autocomplete_min_prefix_len(
+                "db.users.up",
+                "db.users.up".chars().count(),
+                Some(DatabaseKind::MongoDb),
+            ),
+            2
+        );
     }
 
     #[test]

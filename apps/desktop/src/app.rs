@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use crate::autocomplete::{
-    apply_autocomplete_suggestion, autocomplete_palette, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
+    apply_autocomplete_suggestion, autocomplete_min_prefix_len, autocomplete_palette, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
     AutocompleteState, AutocompleteSuggestion, AutocompleteUsageMemory, SchemaCache, SqlContext, SqlContextParser,
     SuggestionKind,
 };
@@ -6367,7 +6367,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             (format!("{} + [", MOD_KEY), tr!("标签页后退")),
             (format!("{} + ]", MOD_KEY), tr!("标签页前进")),
             (format!("{} + /", MOD_KEY), tr!("切换注释")),
-            (format!("{} + ,", MOD_KEY), tr!("自动补全")),
+            (format!("{} + J", MOD_KEY), tr!("自动补全")),
+            (format!("{} + E", MOD_KEY), tr!("最近打开的标签页")),
         ];
 
         let title_height = 48.0;
@@ -13687,7 +13688,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             (format!("{}+=", MOD_KEY), tr!("放大")),
                             (format!("{}+-", MOD_KEY), tr!("缩小")),
                             (format!("{}+0", MOD_KEY), tr!("重置缩放")),
-                            (format!("{}+,", MOD_KEY).into(), tr!("触发自动补全")),
+                            (format!("{}+J", MOD_KEY).into(), tr!("触发自动补全")),
                             ("Escape".into(), tr!("关闭搜索/取消选择")),
                         ];
                         for (key, desc) in &shortcuts {
@@ -27237,6 +27238,7 @@ fn check_autocomplete_triggers(
     ui: &egui::Ui,
     editor_output: &egui::text_edit::TextEditOutput,
     tab: &mut QueryTabState,
+    db_kind: Option<DatabaseKind>,
     fonts: &ui_theme::FontSizes,
 ) {
     // 多光标模式下禁用智能提示
@@ -27297,19 +27299,8 @@ fn check_autocomplete_triggers(
             let just_typed_dot = cursor > 0
                 && tab.sql.as_bytes().get(cursor.saturating_sub(1)) == Some(&b'.');
             let prefix = SqlContextParser::current_token_prefix(&tab.sql, cursor);
-            let context = SqlContextParser::parse(&tab.sql, cursor);
-            let min_prefix_len = if matches!(
-                context,
-                crate::autocomplete::SqlContext::SelectClause
-                    | crate::autocomplete::SqlContext::WhereClause
-                    | crate::autocomplete::SqlContext::OrderGroupClause
-                    | crate::autocomplete::SqlContext::InsertColumns
-                    | crate::autocomplete::SqlContext::AfterColumnDot { .. }
-            ) {
-                1
-            } else {
-                2
-            };
+            let min_prefix_len =
+                autocomplete_min_prefix_len(&tab.sql, cursor, db_kind);
             if prefix.len() >= min_prefix_len {
                 tab.autocomplete.trigger_requested = true;
                 tab.autocomplete.last_keystroke = None; // reset
@@ -27938,7 +27929,7 @@ fn render_query_editor(
 
                                 // --- Autocomplete trigger detection ---
                                 if output.response.has_focus() {
-                                    check_autocomplete_triggers(ui, &output, tab, fonts);
+                                    check_autocomplete_triggers(ui, &output, tab, db_kind, fonts);
                                 }
                             });  // ScrollArea.show 结束，返回 ScrollAreaOutput
                     
