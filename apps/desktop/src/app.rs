@@ -641,7 +641,8 @@ struct TableTabState {
     row_num_resize_drag: Option<f32>,
     show_column_filter: bool,
     search: TableSearchState,
-    // 筛选值智能提示缓存：列名 → [(值, 出现次数)]，仅缓存去重数 ≤ 20 的列
+    // 筛选值智能提示稳定缓存：列名 → [(值, 出现次数)]。
+    // 同一表页签内持续累积，不随当前筛选结果缩小；出现次数仅用于排序，不对外显示。
     filter_value_suggestions: HashMap<String, Vec<(String, usize)>>,
     // MongoDB 游标分页：每页最后一条的 _id
     mongo_page_cursors: Vec<String>,
@@ -2185,7 +2186,7 @@ impl DesktopApp {
                                     }
                                 }
                                 tab.preview = Some(preview);
-                                tab.filter_value_suggestions.clear();
+                                update_filter_value_suggestions(tab);
                                 tab.selected_preview_rows
                                     .retain(|index| *index < row_count);
                                 if tab
@@ -10846,12 +10847,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                         }
                                                                         egui::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
                                                                             ui.set_min_width(220.0);
-                                                                            for (val, count) in vals {
+                                                                            for (val, _) in vals {
                                                                                 if !filter_text.is_empty() && !val.to_ascii_uppercase().contains(&filter_text) {
                                                                                     continue;
                                                                                 }
-                                                                                let label = format!("{} ({})", val, count);
-                                                                                if ui.selectable_label(false, &label).clicked() {
+                                                                                if ui.selectable_label(false, val).clicked() {
                                                                                     clause.value.clone_from(val);
                                                                                     ui.memory_mut(|m| m.close_popup(popup_id));
                                                                                 }
@@ -25784,17 +25784,24 @@ fn toolbar_dropdown(
     result
 }
 
-/// 从当前页数据计算各列去重值及频次，仅保留去重数 ≤ 20 的列（排除 NULL）。
+/// 从当前预览页数据增量更新各列提示值缓存，仅保留去重数 ≤ 20 的列（排除 NULL）。
+/// 缓存在同一表页签内保持稳定，不会因筛选后结果变少而被缩小。
 fn update_filter_value_suggestions(tab: &mut TableTabState) {
-    if !tab.filter_value_suggestions.is_empty() {
-        return;
-    }
     const MAX_DISTINCT: usize = 20;
     let Some(ref preview) = tab.preview else { return };
     if preview.rows.is_empty() {
         return;
     }
-    let mut map: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut map: HashMap<String, HashMap<String, usize>> = tab
+        .filter_value_suggestions
+        .iter()
+        .map(|(col, entries)| {
+            (
+                col.clone(),
+                entries.iter().cloned().collect::<HashMap<String, usize>>(),
+            )
+        })
+        .collect();
     for row in &preview.rows {
         for col in &preview.columns {
             if let Some(QueryCellValue::Text(val)) = row.get(col) {
@@ -25809,7 +25816,9 @@ fn update_filter_value_suggestions(tab: &mut TableTabState) {
         .filter(|(_, vals)| vals.len() <= MAX_DISTINCT)
         .map(|(col, vals)| {
             let mut entries: Vec<(String, usize)> = vals.into_iter().collect();
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.sort_by(|a, b| {
+                b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+            });
             (col, entries)
         })
         .collect();
