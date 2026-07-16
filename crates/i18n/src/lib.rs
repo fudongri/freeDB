@@ -257,6 +257,8 @@ fn en(key: &'static str) -> &'static str {
         "\u{1F4BE} 保存" => "\u{1F4BE} Save",
         "语句预览" => "Statement Preview",
         "\u{FF0B} 添加字段" => "+ Add Column",
+        "\u{FF0B} 插入字段" => "+ Insert Column",
+        "\u{2190} 插入字段" => "\u{2190} Insert Column",
         "\u{FF0B} 添加索引" => "+ Add Index",
         "字段名" => "Column Name",
         "类型" => "Type",

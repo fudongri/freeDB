@@ -226,6 +226,16 @@ impl DatabaseDriver for PostgresDriver {
     ) -> AppResult<TableDefinition> {
         let schema = table.schema.clone().unwrap_or_else(|| "public".into());
         let client = pg_client(handle)?;
+        // 加载表注释
+        let table_comment = client
+            .query_one(
+                "SELECT obj_description(('\"' || $1 || '\".\"' || $2 || '\"')::regclass, 'pg_class')",
+                &[&schema, &table.table],
+            )
+            .await
+            .ok()
+            .and_then(|row| row.get::<_, Option<String>>(0))
+            .filter(|s| !s.is_empty());
         let rows = client
             .query(
                 "SELECT c.column_name, c.data_type, c.is_nullable,
@@ -322,7 +332,7 @@ impl DatabaseDriver for PostgresDriver {
             }
             Some(ddl)
         };
-        Ok(TableDefinition { columns, create_sql })
+        Ok(TableDefinition { columns, create_sql, table_comment, engine: None, charset: None })
     }
 
     async fn preview_table(

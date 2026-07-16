@@ -277,6 +277,7 @@ enum SummaryContextAction {
     CopyTable { node: ExplorerNode, include_data: bool },
     DdlDelete(DdlPendingDelete),
     RenameTable { connection_id: String, database: String, schema: Option<String>, old_name: String, new_name: String, is_view: bool, kind: DatabaseKind },
+    NewTable { connection_id: String, database: String, schema: Option<String> },
     Reload,
     LoadCollectionStats { connection_id: String, database: String, collections: Vec<String> },
 }
@@ -352,7 +353,6 @@ fn recent_tab_matches(a: &RecentTabEntry, b: &RecentTabEntry) -> bool {
 enum CreateTableView {
     Columns,
     Indexes,
-    Sql,
 }
 
 #[derive(Clone)]
@@ -365,7 +365,9 @@ struct CreateTableState {
     table_name: String,
     engine: String,
     charset: String,
+    table_comment: String,
     columns: Vec<EditableColumn>,
+    selected_column_index: Option<usize>,
     pending_indexes: Vec<PendingIndex>,
     add_index_dialog_open: bool,
     add_index_needs_focus: bool,
@@ -376,6 +378,7 @@ struct CreateTableState {
     error: Option<String>,
     needs_focus: bool,
     loading: bool,
+    show_sql_preview: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -635,6 +638,10 @@ struct TableTabState {
     show_structure_sql_preview: bool,
     show_index_sql_preview: bool,
     edited_columns: Vec<EditableColumn>,
+    edited_table_comment: String,
+    edited_engine: String,
+    edited_charset: String,
+    selected_structure_row: Option<usize>,
     pending_indexes: Vec<PendingIndex>,
     deleted_indexes: BTreeSet<usize>,
     add_index_dialog_open: bool,
@@ -2466,7 +2473,12 @@ impl DesktopApp {
                                 tracing::warn!(collection = %coll_name, error = %e, "集合统计信息加载失败");
                                 ts.pending_stats.remove(&coll_name);
                             }
-                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Empty) => {
+                                if ts.pending_stats.is_empty() {
+                                    ts.stats_loading = false;
+                                }
+                                break;
+                            }
                             Err(TryRecvError::Disconnected) => {
                                 ts.stats_receiver = None;
                                 ts.stats_loading = false;
@@ -3095,6 +3107,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             show_structure_sql_preview: false,
             show_index_sql_preview: false,
             edited_columns: Vec::new(),
+            edited_table_comment: String::new(),
+            edited_engine: String::new(),
+            edited_charset: String::new(),
+            selected_structure_row: None,
             pending_indexes: Vec::new(),
             deleted_indexes: BTreeSet::new(),
             add_index_dialog_open: false,
@@ -3862,6 +3878,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     table_name: String::new(),
                     engine: "InnoDB".into(),
                     charset: "utf8mb4".into(),
+                    table_comment: String::new(),
                     columns: vec![
                         EditableColumn {
                             name: "id".into(),
@@ -3888,6 +3905,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     error: None,
                     needs_focus: true,
                     loading: false,
+                    show_sql_preview: false,
+                    selected_column_index: None,
                 };
                 self.tabs.push(WorkspaceTab::CreateTable(state));
                 self.active_tab = self.tabs.len().saturating_sub(1);
@@ -5110,6 +5129,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         table_name: String::new(),
                         engine: "InnoDB".into(),
                         charset: "utf8mb4".into(),
+                        table_comment: String::new(),
                         columns: vec![
                             EditableColumn {
                                 name: "id".into(),
@@ -5140,6 +5160,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         error: None,
                         needs_focus: true,
                         loading: false,
+                        show_sql_preview: false,
+                        selected_column_index: None,
                     };
                     self.tabs.push(WorkspaceTab::CreateTable(state));
                     self.active_tab = self.tabs.len().saturating_sub(1);
@@ -6287,6 +6309,56 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     DdlAction::RenameTable { connection_id, database, schema, old_name, is_view, kind },
                                     receiver,
                                 ));
+                            }
+                            SummaryContextAction::NewTable { connection_id, database, schema } => {
+                                let kind = self.database_kind_for_connection(&connection_id);
+                                let state = CreateTableState {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    connection_id,
+                                    database,
+                                    schema,
+                                    database_kind: kind,
+                                    table_name: String::new(),
+                                    engine: "InnoDB".into(),
+                                    charset: "utf8mb4".into(),
+                                    table_comment: String::new(),
+                                    columns: vec![
+                                        EditableColumn {
+                                            name: "id".into(),
+                                            original_name: String::new(),
+                                            data_type: if kind == DatabaseKind::Postgres {
+                                                "SERIAL".into()
+                                            } else {
+                                                "INT".into()
+                                            },
+                                            nullable: false,
+                                            primary_key: true,
+                                            auto_increment: true,
+                                            on_update_current_timestamp: false,
+                                            default_value: String::new(),
+                                            comment: tr!("主键").into(),
+                                            is_new: true,
+                                            is_dropped: false,
+                                            needs_focus: false,
+                                        },
+                                    ],
+                                    pending_indexes: Vec::new(),
+                                    add_index_dialog_open: false,
+                                    add_index_needs_focus: false,
+                                    new_index_name: String::new(),
+                                    new_index_columns: Vec::new(),
+                                    new_index_unique: false,
+                                    active_view: CreateTableView::Columns,
+                                    error: None,
+                                    needs_focus: true,
+                                    loading: false,
+                                    show_sql_preview: false,
+                                    selected_column_index: None,
+                                };
+                                self.tabs.push(WorkspaceTab::CreateTable(state));
+                                self.active_tab = self.tabs.len().saturating_sub(1);
+                                self.scroll_tabs_to_end = true;
+                                self.record_recent_tab();
                             }
                             SummaryContextAction::Reload => {
                                 if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
@@ -8900,15 +8972,129 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             ui.spacing_mut().item_spacing.x = 6.0;
             let seg_cols = tab.active_view == CreateTableView::Columns;
             let seg_idxs = tab.active_view == CreateTableView::Indexes;
-            let seg_sql = tab.active_view == CreateTableView::Sql;
             // 字段
             if segment_button_color(ui, tr!("字段"), seg_cols, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Columns; }
             // 索引
             if segment_button_color(ui, tr!("索引"), seg_idxs, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Indexes; }
-            // SQL预览 / 脚本预览
-            let sql_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("语句预览") } else { tr!("语句预览") };
-            if segment_button_color(ui, sql_label, seg_sql, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Sql; }
-            ui.add_space(12.0);
+        });
+        ui.add_space(4.0);
+
+        // ── error banner ──
+        if let Some(err) = &tab.error {
+            ui.horizontal(|ui| { ui.colored_label(palette.danger, format!("⚠ {}", err)); });
+            ui.add_space(2.0);
+        }
+
+        // ── content ──
+        match tab.active_view {
+            CreateTableView::Columns => {
+                let act = Self::render_create_table_columns_view(ui, tab, colors, fonts);
+                if !matches!(act, TabUiAction::None) { action = act; }
+            }
+            CreateTableView::Indexes => {
+                let act = Self::render_create_table_indexes_view(ui, tab, colors, fonts);
+                if !matches!(act, TabUiAction::None) { action = act; }
+            }
+        }
+
+        action
+    }
+
+    fn render_create_table_columns_view(ui: &mut egui::Ui, tab: &mut CreateTableState, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> TabUiAction {
+        let mut action = TabUiAction::None;
+        let palette = mac_ui_palette_from_ui(ui);
+
+        // 工具栏
+        ui.horizontal(|ui| {
+            if toolbar_button(ui, tr!("＋ 添加字段"), subtle_button_style(colors, fonts.md)).clicked() {
+                tab.columns.push(EditableColumn {
+                    name: String::new(),
+                    original_name: String::new(),
+                    data_type: String::new(),
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    on_update_current_timestamp: false,
+                    default_value: String::new(),
+                    comment: String::new(),
+                    is_new: true,
+                    is_dropped: false,
+                    needs_focus: true,
+                });
+            }
+            ui.add_space(4.0);
+            if toolbar_button(ui, tr!("← 插入字段"), subtle_button_style(colors, fonts.md)).clicked() {
+                let insert_idx = tab.selected_column_index.unwrap_or(0);
+                tab.columns.insert(insert_idx, EditableColumn {
+                    name: String::new(),
+                    original_name: String::new(),
+                    data_type: String::new(),
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    on_update_current_timestamp: false,
+                    default_value: String::new(),
+                    comment: String::new(),
+                    is_new: true,
+                    is_dropped: false,
+                    needs_focus: true,
+                });
+            }
+            ui.add_space(8.0);
+            let can_execute = !tab.loading && !tab.table_name.trim().is_empty() && tab.columns.iter().any(|c| !c.is_dropped && !c.name.trim().is_empty());
+            if toolbar_button(ui, tr!("◉ 语句预览"), accent_muted_button_style(colors, fonts.md)).clicked() {
+                tab.show_sql_preview = !tab.show_sql_preview;
+            }
+            if can_execute {
+                ui.add_space(8.0);
+                if toolbar_button(ui, tr!("💾 保存"), accent_button_style(colors, fonts.md)).clicked() {
+                    action = TabUiAction::CreateTableExecute;
+                }
+            } else if tab.loading {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new(tr!("创建中...")).color(palette.weak_text));
+                });
+            }
+        });
+        ui.add_space(6.0);
+
+        let show_auto_increment = tab.database_kind == DatabaseKind::MySql;
+        let show_on_update = tab.database_kind == DatabaseKind::MySql;
+
+        // SQL 预览
+        if tab.show_sql_preview {
+            let sql = generate_create_table_sql(tab);
+            if !sql.is_empty() {
+                let available_width = ui.available_width();
+                egui::Frame::new()
+                    .fill(palette.card_bg)
+                    .stroke(Stroke::NONE)
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(tr!("语句预览"))
+                                .size(palette.fonts.xs)
+                                .strong()
+                                .color(palette.weak_text),
+                        );
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .max_height(200.0)
+                            .show(ui, |ui| {
+                                ui.set_width(available_width - 24.0);
+                                let job = sql_highlight_job_with_word_wrap_from_ui(ui, &sql, available_width - 28.0);
+                                ui.add(egui::Label::new(job));
+                            });
+                    });
+                ui.add_space(6.0);
+            }
+        }
+
+        // 表名、引擎、字符集、注释
+        ui.horizontal(|ui| {
             let name_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("集合名:") } else { tr!("表名:") };
             ui.label(RichText::new(name_label).color(palette.weak_text));
             let visuals = ui.visuals_mut();
@@ -8949,94 +9135,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     tab.charset = ["utf8mb4", "utf8", "latin1", "ascii"][sel].to_string();
                 }
             }
-        });
-        ui.add_space(4.0);
-
-        // ── error banner ──
-        if let Some(err) = &tab.error {
-            ui.horizontal(|ui| { ui.colored_label(palette.danger, format!("⚠ {}", err)); });
-            ui.add_space(2.0);
-        }
-
-        // ── content ──
-        match tab.active_view {
-            CreateTableView::Columns => {
-                let act = Self::render_create_table_columns_view(ui, tab, colors, fonts);
-                if !matches!(act, TabUiAction::None) { action = act; }
-            }
-            CreateTableView::Indexes => {
-                let act = Self::render_create_table_indexes_view(ui, tab, colors, fonts);
-                if !matches!(act, TabUiAction::None) { action = act; }
-            }
-            CreateTableView::Sql => {
-                let sql = generate_create_table_sql(tab);
-                // 保存按钮
-                ui.horizontal(|ui| {
-                    let can_execute = !tab.loading && !tab.table_name.trim().is_empty() && tab.columns.iter().any(|c| !c.is_dropped && !c.name.trim().is_empty());
-                    if tab.loading {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(RichText::new(tr!("创建中...")).color(palette.weak_text));
-                        });
-                    } else if toolbar_button(ui, tr!("💾 保存"), if can_execute { accent_button_style(colors, fonts.md) } else { subtle_button_style(colors, fonts.md) }).clicked() && can_execute {
-                        action = TabUiAction::CreateTableExecute;
-                    }
-                });
-                ui.add_space(4.0);
-                egui::Frame::new()
-                    .fill(palette.card_bg)
-                    .stroke(Stroke::NONE)
-                    .inner_margin(egui::Margin::symmetric(12, 10))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(tr!("语句预览")).strong().color(palette.weak_text));
-                        });
-                        ui.add_space(4.0);
-                        ui.add(
-                            egui::TextEdit::multiline(&mut sql.as_str())
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_rows(10),
-                        );
-                    });
-            }
-        }
-
-        action
-    }
-
-    fn render_create_table_columns_view(ui: &mut egui::Ui, tab: &mut CreateTableState, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> TabUiAction {
-        let mut action = TabUiAction::None;
-        let palette = mac_ui_palette_from_ui(ui);
-
-        // 工具栏
-        ui.horizontal(|ui| {
-            if toolbar_button(ui, tr!("＋ 添加字段"), subtle_button_style(colors, fonts.md)).clicked() {
-                tab.columns.push(EditableColumn {
-                    name: String::new(),
-                    original_name: String::new(),
-                    data_type: String::new(),
-                    nullable: true,
-                    primary_key: false,
-                    auto_increment: false,
-                    on_update_current_timestamp: false,
-                    default_value: String::new(),
-                    comment: String::new(),
-                    is_new: true,
-                    is_dropped: false,
-                    needs_focus: true,
-                });
-            }
+            // 表注释
             ui.add_space(8.0);
-            let can_execute = !tab.loading && !tab.table_name.trim().is_empty() && tab.columns.iter().any(|c| !c.is_dropped && !c.name.trim().is_empty());
-            if tab.loading {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new(tr!("创建中...")).color(palette.weak_text));
-                });
-            } else if toolbar_button(ui, tr!("💾 保存"), if can_execute { accent_button_style(colors, fonts.md) } else { subtle_button_style(colors, fonts.md) }).clicked() && can_execute {
-                action = TabUiAction::CreateTableExecute;
-            }
+            ui.label(RichText::new(tr!("注释:")).color(palette.weak_text));
+            let comment_edit = egui::TextEdit::singleline(&mut tab.table_comment)
+                .desired_width(200.0)
+                .hint_text(RichText::new(tr!("表注释")).color(ui.visuals().weak_text_color()));
+            ui.add(comment_edit);
         });
         ui.add_space(6.0);
 
@@ -9049,41 +9154,82 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                        TableBuilder::new(ui)
+                        let mut table = TableBuilder::new(ui)
                             .vscroll(false)
-                            .striped(true)
+                            .striped(false)
                             .resizable(false)
-                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
-                            .column(egui_extras::Column::initial(160.0).at_least(100.0))
-                            .column(egui_extras::Column::initial(140.0).at_least(80.0))
+                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
+                            .column(egui_extras::Column::initial(42.0).at_least(42.0))
+                            .column(egui_extras::Column::initial(200.0).at_least(120.0))
+                            .column(egui_extras::Column::initial(130.0).at_least(80.0))
                             .column(egui_extras::Column::initial(60.0).at_least(50.0))
-                            .column(egui_extras::Column::initial(50.0).at_least(40.0))
-                            .column(egui_extras::Column::initial(50.0).at_least(40.0))
-                            .column(egui_extras::Column::initial(120.0).at_least(70.0))
-                            .column(egui_extras::Column::initial(120.0).at_least(70.0))
-                            .column(egui_extras::Column::initial(40.0).at_least(40.0))
+                            .column(egui_extras::Column::initial(140.0).at_least(70.0))
+                            .column(egui_extras::Column::remainder().at_least(80.0))
+                            .column(egui_extras::Column::initial(100.0).at_least(80.0));
+                        if show_auto_increment {
+                            table = table.column(egui_extras::Column::initial(110.0).at_least(80.0));
+                        }
+                        if show_on_update {
+                            table = table.column(egui_extras::Column::initial(120.0).at_least(80.0));
+                        }
+                        table = table.column(egui_extras::Column::initial(60.0).at_least(50.0));
+                        table
                             .header(30.0, |mut header| {
-                                for title in [tr!("字段名"), tr!("类型"), tr!("非空"), "PK", tr!("自增"), tr!("默认值"), tr!("注释"), ""] {
+                                header.col(|ui| {
+                                    let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                });
+                                for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键")] {
                                     header.col(|ui| {
-                                        table_header_cell(ui, &palette, title, false, None, false, false, None, false);
+                                        let (_, _, _, _) =
+                                            table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
                                     });
                                 }
+                                if show_auto_increment {
+                                    header.col(|ui| {
+                                        let (_, _, _, _) =
+                                            table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false, false);
+                                    });
+                                }
+                                if show_on_update {
+                                    header.col(|ui| {
+                                        let (_, _, _, _) =
+                                            table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false, false);
+                                    });
+                                }
+                                header.col(|ui| {
+                                    let (_, _, _, _) =
+                                        table_header_cell(ui, &palette, tr!("删除"), false, None, false, false, None, false, false);
+                                });
                             })
                             .body(|mut body| {
                                 let mut delete_idx: Option<usize> = None;
                                 let visible: Vec<usize> = tab.columns.iter().enumerate().filter(|(_, c)| !c.is_dropped).map(|(i, _)| i).collect();
 
-                                for &ci in &visible {
+                                for (visible_idx, &ci) in visible.iter().enumerate() {
                                     let col = &tab.columns[ci];
-                                    let _fill = if col.is_new {
+                                    let is_selected = tab.selected_column_index == Some(ci);
+                                    let fill = if col.is_new {
                                         palette.new_row_bg
-                                    } else if ci % 2 == 0 {
-                                        palette.card_bg
+                                    } else if is_selected {
+                                        palette.selection_bg
                                     } else {
-                                        palette.table_alt_bg
+                                        palette.card_bg
                                     };
+                                    let name = col.name.clone();
+                                    let data_type = col.data_type.clone();
+                                    let default_value = col.default_value.clone();
+                                    let comment = col.comment.clone();
+                                    let nullable = col.nullable;
+                                    let pk = col.primary_key;
 
                                     body.row(28.0, |mut row| {
+                                        // 序号（点击选中行）
+                                        row.col(|ui| {
+                                            let resp = table_text_cell(ui, &palette, fill, &format!("{}", visible_idx + 1), false);
+                                            if resp.clicked() {
+                                                tab.selected_column_index = Some(ci);
+                                            }
+                                        });
                                         // 字段名
                                         row.col(|ui| {
                                             apply_cell_input_style(ui);
@@ -9121,22 +9267,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 col.nullable = !not_null;
                                             }
                                         });
-                                        // PK
-                                        row.col(|ui| {
-                                            let col = &mut tab.columns[ci];
-                                            let rect = ui.max_rect();
-                                            let center = rect.center();
-                                            let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
-                                            ui.put(cb_rect, egui::Checkbox::new(&mut col.primary_key, ""));
-                                        });
-                                        // 自增
-                                        row.col(|ui| {
-                                            let col = &mut tab.columns[ci];
-                                            let rect = ui.max_rect();
-                                            let center = rect.center();
-                                            let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
-                                            ui.put(cb_rect, egui::Checkbox::new(&mut col.auto_increment, ""));
-                                        });
                                         // 默认值
                                         row.col(|ui| {
                                             apply_cell_input_style(ui);
@@ -9160,12 +9290,55 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     .desired_width(f32::INFINITY),
                                             );
                                         });
+                                        // 主键
+                                        row.col(|ui| {
+                                            let col = &mut tab.columns[ci];
+                                            let rect = ui.max_rect();
+                                            let center = rect.center();
+                                            let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
+                                            ui.put(cb_rect, egui::Checkbox::new(&mut col.primary_key, ""));
+                                        });
+                                        // 自增
+                                        if show_auto_increment {
+                                            row.col(|ui| {
+                                                let col = &mut tab.columns[ci];
+                                                let rect = ui.max_rect();
+                                                let center = rect.center();
+                                                let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
+                                                ui.put(cb_rect, egui::Checkbox::new(&mut col.auto_increment, ""));
+                                            });
+                                        }
+                                        // 更新时刷新
+                                        if show_on_update {
+                                            row.col(|ui| {
+                                                let col = &mut tab.columns[ci];
+                                                let is_time_type = {
+                                                    let dt = col.data_type.to_lowercase();
+                                                    dt.contains("timestamp") || dt.contains("datetime")
+                                                };
+                                                let rect = ui.max_rect();
+                                                let center = rect.center();
+                                                let cb_rect = egui::Rect::from_center_size(center, egui::vec2(20.0, 20.0));
+                                                ui.add_enabled_ui(is_time_type, |ui| {
+                                                    ui.put(cb_rect, egui::Checkbox::new(&mut col.on_update_current_timestamp, ""));
+                                                });
+                                            });
+                                        }
                                         // 删除
                                         row.col(|ui| {
                                             let rect = ui.max_rect();
                                             let center = rect.center();
-                                            let btn_rect = egui::Rect::from_center_size(center, egui::vec2(24.0, 24.0));
-                                            if ui.put(btn_rect, egui::Button::new("🗑").small().fill(Color32::TRANSPARENT)).clicked() {
+                                            let btn_rect = egui::Rect::from_center_size(center, egui::vec2(28.0, 24.0));
+                                            if ui
+                                                .put(btn_rect,
+                                                    egui::Button::new(
+                                                        RichText::new("🗑").size(palette.fonts.lg),
+                                                    )
+                                                    .fill(Color32::TRANSPARENT)
+                                                    .stroke(Stroke::NONE),
+                                                )
+                                                .clicked()
+                                            {
                                                 delete_idx = Some(ci);
                                             }
                                         });
@@ -9233,7 +9406,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             .header(30.0, |mut header| {
                                 for title in [tr!("索引名"), tr!("唯一"), tr!("包含列"), ""] {
                                     header.col(|ui| {
-                                        table_header_cell(ui, &palette, title, false, None, false, false, None, false);
+                                        table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
                                     });
                                 }
                             })
@@ -9388,11 +9561,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         // 排序：默认按表名升序
         let mut sorted_indices = filtered_indices;
         if let Some(sort_col) = tab.sort_column {
+            let cols = summary_table_columns(tab.database_kind);
+            let col_name = cols.get(sort_col).map(|c| c.0).unwrap_or_default();
             sorted_indices.sort_by(|&a, &b| {
                 let sa = &tab.table_summaries[a];
                 let sb = &tab.table_summaries[b];
-                let cols = summary_table_columns(tab.database_kind);
-                let col_name = cols.get(sort_col).map(|c| c.0).unwrap_or_default();
                 // 优先用原始数值排序
                 let (na, nb) = match col_name {
                     "行数" | "文档数" => (sa.row_count.map(|v| v as f64), sb.row_count.map(|v| v as f64)),
@@ -9555,7 +9728,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 None
                                             };
                                             let (sort_choice, _, _, _) = table_header_cell(
-                                                ui, &palette, title, true, sort_state, false, false, None, false,
+                                                ui, &palette, title, true, sort_state, false, false, None, false, false,
                                             );
                                             match sort_choice {
                                                 Some(TableHeaderSortChoice::Ascending) => {
@@ -10011,6 +10184,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 }
                                                             }
                                                             ui.separator();
+                                                            // 新建表
+                                                            let new_table_label = if kind == DatabaseKind::MongoDb {
+                                                                tr!("新建集合")
+                                                            } else {
+                                                                tr!("新建表")
+                                                            };
+                                                            if ui.button(new_table_label).clicked() {
+                                                                tab.pending_actions.push(SummaryContextAction::NewTable {
+                                                                    connection_id: tab.connection_id.clone(),
+                                                                    database: tab.database.clone(),
+                                                                    schema: tab.schema.clone(),
+                                                                });
+                                                                ui.close();
+                                                            }
                                                             // 刷新
                                                             if menu_button_with_shortcut(ui, tr!("刷新"), &format!("{}+R", MOD_KEY)) {
                                                                 tab.pending_actions.push(SummaryContextAction::Reload);
@@ -16730,7 +16917,7 @@ fn render_result_table(
                         .header(30.0, |mut header| {
                             // Row number header
                             header.col(|ui| {
-                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
+                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
                                 let cell_rect = ui.max_rect();
                                 column_right_edges.push(cell_rect.right() - 1.0);
                                 if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) { is_hovering_header = true; hovered_header_col_idx = Some(0); }
@@ -16778,6 +16965,7 @@ fn render_result_table(
                                         is_dragged,
                                         None,
                                         has_column_values,
+                                        false,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
@@ -17376,7 +17564,7 @@ fn render_editable_result_table(
                     let table = table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
+                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
                                 let cell_rect = ui.max_rect();
                                 let resize_handle_x = cell_rect.right() - 3.0;
                                 let resize_handle_rect = egui::Rect::from_min_max(
@@ -17423,6 +17611,7 @@ fn render_editable_result_table(
                                         is_dragged,
                                         col_data_type.as_deref(),
                                         has_column_values,
+                                        false,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort.set(Some((column.clone(), matches!(choice, TableHeaderSortChoice::Descending))));
@@ -18402,7 +18591,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             // Row number header
                             if show_row_number {
                                 header.col(|ui| {
-                                    let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
+                                    let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
                                     let cell_rect = ui.max_rect();
                                     column_right_edges.push(cell_rect.right() - 1.0);
                                     let resize_handle_x = cell_rect.right() - 3.0;
@@ -18442,6 +18631,10 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     let col_data_type = tab.definition.as_ref()
                                         .and_then(|d| d.columns.iter().find(|c| c.name == *column))
                                         .map(|c| c.data_type.clone());
+                                    let col_on_update = tab.definition.as_ref()
+                                        .and_then(|d| d.columns.iter().find(|c| c.name == *column))
+                                        .map(|c| c.on_update_current_timestamp)
+                                        .unwrap_or(false);
                                     let has_column_values = tab.preview.as_ref()
                                         .map_or(false, |p| !p.rows.is_empty());
                                     let (sort_choice, clicked, cell_dragged, copy_action) = table_header_cell(
@@ -18454,6 +18647,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         is_dragged,
                                         col_data_type.as_deref(),
                                         has_column_values,
+                                        col_on_update,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
@@ -20889,21 +21083,21 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition, 
                     table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
+                                let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
                             });
                             for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键")] {
                                 header.col(|ui| {
-                                    let (_, _, _, _) = table_header_cell(ui, &palette, title, false, None, false, false, None, false);
+                                    let (_, _, _, _) = table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
                                 });
                             }
                             if show_auto_increment {
                                 header.col(|ui| {
-                                    let (_, _, _, _) = table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false);
+                                    let (_, _, _, _) = table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false, false);
                                 });
                             }
                             if show_on_update {
                                 header.col(|ui| {
-                                    let (_, _, _, _) = table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false);
+                                    let (_, _, _, _) = table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false, false);
                                 });
                             }
                         })
@@ -21034,6 +21228,12 @@ fn generate_alter_table_sql(
     deleted_existing: &BTreeSet<usize>,
     existing: &[ExistingIndex],
     db_kind: DatabaseKind,
+    original_table_comment: Option<&str>,
+    edited_table_comment: &str,
+    edited_engine: &str,
+    edited_charset: &str,
+    original_engine: Option<&str>,
+    original_charset: Option<&str>,
 ) -> String {
     let q = |id: &str| quote_identifier(db_kind, id);
     let schema_prefix = match &table.schema {
@@ -21048,7 +21248,10 @@ fn generate_alter_table_sql(
         original.iter().map(|c| c.name.as_str()).collect();
 
     // 新增字段
-    for col in edited.iter().filter(|c| c.is_new && !c.is_dropped) {
+    for (idx, col) in edited.iter().enumerate() {
+        if !col.is_new || col.is_dropped {
+            continue;
+        }
         let mut clause = format!("ALTER TABLE {full_table} ADD COLUMN {} {}", q(&col.name), col.data_type);
         if !col.nullable {
             clause.push_str(" NOT NULL");
@@ -21058,6 +21261,14 @@ fn generate_alter_table_sql(
         }
         if col.on_update_current_timestamp {
             clause.push_str(" ON UPDATE CURRENT_TIMESTAMP");
+        }
+        // MySQL: 添加 AFTER 子句指定位置
+        if db_kind == DatabaseKind::MySql {
+            // 找到该列前面的第一个非删除列
+            let prev_col = edited[..idx].iter().rev().find(|c| !c.is_dropped);
+            if let Some(prev) = prev_col {
+                clause.push_str(&format!(" AFTER {}", q(&prev.name)));
+            }
         }
         stmts.push(clause);
     }
@@ -21220,6 +21431,46 @@ fn generate_alter_table_sql(
         }
     }
 
+    // 表注释变更
+    let orig_comment = original_table_comment.unwrap_or("");
+    let new_comment = edited_table_comment.trim();
+    if orig_comment != new_comment {
+        match db_kind {
+            DatabaseKind::MySql => {
+                if new_comment.is_empty() {
+                    stmts.push(format!("ALTER TABLE {full_table} COMMENT=''"));
+                } else {
+                    stmts.push(format!("ALTER TABLE {full_table} COMMENT='{}'", new_comment.replace('\'', "''")));
+                }
+            }
+            DatabaseKind::Postgres => {
+                let schema_prefix = table.schema.as_deref().unwrap_or("public");
+                if new_comment.is_empty() {
+                    stmts.push(format!("COMMENT ON TABLE {}.{} IS NULL", quote_identifier(db_kind, schema_prefix), q(&table.table)));
+                } else {
+                    stmts.push(format!("COMMENT ON TABLE {}.{} IS '{}'", quote_identifier(db_kind, schema_prefix), q(&table.table), new_comment.replace('\'', "''")));
+                }
+            }
+            DatabaseKind::MongoDb => {}
+        }
+    }
+
+    // 引擎变更（仅 MySQL）
+    if db_kind == DatabaseKind::MySql {
+        let orig_engine = original_engine.unwrap_or("");
+        if !edited_engine.is_empty() && edited_engine != orig_engine {
+            stmts.push(format!("ALTER TABLE {full_table} ENGINE={}", edited_engine));
+        }
+    }
+
+    // 字符集变更（仅 MySQL）
+    if db_kind == DatabaseKind::MySql {
+        let orig_charset = original_charset.unwrap_or("");
+        if !edited_charset.is_empty() && edited_charset != orig_charset {
+            stmts.push(format!("ALTER TABLE {full_table} CONVERT TO CHARACTER SET {}", edited_charset));
+        }
+    }
+
     if stmts.is_empty() {
         String::new()
     } else {
@@ -21289,15 +21540,27 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
 
     let mut sql = format!("CREATE TABLE {} (\n{}\n)", full_name, lines.join(",\n"));
 
-    // MySQL: ENGINE + CHARSET (放在分号之前)
+    // MySQL: ENGINE + CHARSET + TABLE COMMENT (放在分号之前)
     if db_kind == DatabaseKind::MySql {
         if !state.engine.is_empty() { sql.push_str(&format!(" ENGINE={}", state.engine)); }
         if !state.charset.is_empty() { sql.push_str(&format!(" DEFAULT CHARSET={}", state.charset)); }
+        if !state.table_comment.trim().is_empty() {
+            sql.push_str(&format!(" COMMENT='{}'", state.table_comment.replace('\'', "''")));
+        }
     }
     sql.push(';');
 
     // PG: COMMENT ON
     if db_kind == DatabaseKind::Postgres {
+        // 表注释
+        if !state.table_comment.trim().is_empty() {
+            let schema_prefix = state.schema.as_deref().unwrap_or("public");
+            sql.push_str(&format!(
+                "\nCOMMENT ON TABLE {}.{} IS '{}';",
+                q(schema_prefix), q(name), state.table_comment.replace('\'', "''")
+            ));
+        }
+        // 列注释
         for col in &active {
             if !col.comment.trim().is_empty() {
                 let schema_prefix = state.schema.as_deref().unwrap_or("public");
@@ -21357,7 +21620,10 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
                     }
                     None => false,
                 }
-            }));
+            })
+            || tab.edited_table_comment != definition.table_comment.as_deref().unwrap_or("")
+            || tab.edited_engine != definition.engine.as_deref().unwrap_or("")
+            || tab.edited_charset != definition.charset.as_deref().unwrap_or(""));
     let has_changes = has_structure_changes;
 
     ui.horizontal(|ui| {
@@ -21388,6 +21654,23 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
                         needs_focus: false,
                     })
                     .collect();
+                tab.edited_table_comment = definition.table_comment.clone().unwrap_or_default();
+                // 从 create_sql 解析引擎和字符集
+                tab.edited_engine = String::new();
+                tab.edited_charset = String::new();
+                if let Some(sql) = &definition.create_sql {
+                    let upper = sql.to_uppercase();
+                    if let Some(pos) = upper.find("ENGINE=") {
+                        let rest = &sql[pos + 7..];
+                        let end = rest.find(|c: char| c.is_whitespace() || c == ';').unwrap_or(rest.len());
+                        tab.edited_engine = rest[..end].to_string();
+                    }
+                    if let Some(pos) = upper.find("DEFAULT CHARSET=") {
+                        let rest = &sql[pos + 16..];
+                        let end = rest.find(|c: char| c.is_whitespace() || c == ';').unwrap_or(rest.len());
+                        tab.edited_charset = rest[..end].to_string();
+                    }
+                }
                 tab.editing_structure = true;
             }
         }
@@ -21410,11 +21693,31 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
                     needs_focus: true,
                 });
             }
+            ui.add_space(4.0);
+            // 插入字段（在选中行前面插入）
+            if toolbar_button(ui, tr!("← 插入字段"), subtle_button_style(colors, fonts.md)).clicked() {
+                let insert_idx = tab.selected_structure_row.unwrap_or(0);
+                tab.edited_columns.insert(insert_idx, EditableColumn {
+                    name: String::new(),
+                    original_name: String::new(),
+                    data_type: String::new(),
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    on_update_current_timestamp: false,
+                    default_value: String::new(),
+                    comment: String::new(),
+                    is_new: true,
+                    is_dropped: false,
+                    needs_focus: true,
+                });
+            }
 
             // 取消编辑
             if toolbar_button(ui, tr!("✕ 取消编辑"), danger_button_style(colors, fonts.md)).clicked() {
                 tab.editing_structure = false;
                 tab.edited_columns.clear();
+                tab.edited_table_comment.clear();
             }
         }
 
@@ -21436,11 +21739,18 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
                     &BTreeSet::new(),
                     &[],
                     tab.database_kind,
+                    definition.table_comment.as_deref(),
+                    &tab.edited_table_comment,
+                    &tab.edited_engine,
+                    &tab.edited_charset,
+                    definition.engine.as_deref(),
+                    definition.charset.as_deref(),
                 );
                 if !sql.is_empty() {
                     action = TabUiAction::ExecuteStructureSql(sql);
                     tab.editing_structure = false;
                     tab.edited_columns.clear();
+                    tab.edited_table_comment.clear();
                 }
             }
         }
@@ -21456,7 +21766,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
 
     ui.add_space(6.0);
 
-    // 主体：先显示 SQL 预览（上方），再显示全宽表格（下方）
+    // 主体：先显示 SQL 预览（上方），再显示表属性和全宽表格（下方）
     if tab.editing_structure {
         // 始终生成 SQL（用于切换按钮判断是否有内容）
         let sql = generate_alter_table_sql(
@@ -21467,6 +21777,12 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
             &BTreeSet::new(),
             &[],
             tab.database_kind,
+            definition.table_comment.as_deref(),
+            &tab.edited_table_comment,
+            &tab.edited_engine,
+            &tab.edited_charset,
+            definition.engine.as_deref(),
+            definition.charset.as_deref(),
         );
         if tab.show_structure_sql_preview && !sql.is_empty() {
             let available_width = ui.available_width();
@@ -21493,8 +21809,49 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
                 });
             ui.add_space(6.0);
         }
+
+        // 表属性编辑区域
+        ui.horizontal(|ui| {
+            if tab.database_kind == DatabaseKind::MySql {
+                ui.label(RichText::new(tr!("引擎:")).color(palette.weak_text));
+                let engine_items: Vec<(&str, bool)> = vec![
+                    ("InnoDB", tab.edited_engine == "InnoDB"),
+                    ("MyISAM", tab.edited_engine == "MyISAM"),
+                    ("Memory", tab.edited_engine == "Memory"),
+                ];
+                if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("edit-engine-dropdown").with(&tab.id), &tab.edited_engine, 100.0, &engine_items) {
+                    tab.edited_engine = ["InnoDB", "MyISAM", "Memory"][sel].to_string();
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(tr!("字符集:")).color(palette.weak_text));
+                let charset_items: Vec<(&str, bool)> = vec![
+                    ("utf8mb4", tab.edited_charset == "utf8mb4"),
+                    ("utf8", tab.edited_charset == "utf8"),
+                    ("latin1", tab.edited_charset == "latin1"),
+                    ("ascii", tab.edited_charset == "ascii"),
+                ];
+                if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("edit-charset-dropdown").with(&tab.id), &tab.edited_charset, 100.0, &charset_items) {
+                    tab.edited_charset = ["utf8mb4", "utf8", "latin1", "ascii"][sel].to_string();
+                }
+                ui.add_space(8.0);
+            }
+            ui.label(RichText::new(tr!("注释:")).color(palette.weak_text));
+            ui.add(egui::TextEdit::singleline(&mut tab.edited_table_comment).desired_width(300.0));
+        });
+        ui.add_space(6.0);
+
         render_editable_structure_grid(ui, tab);
     } else {
+        // 只读模式：显示表注释
+        if let Some(comment) = &definition.table_comment {
+            if !comment.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tr!("表注释:")).color(palette.weak_text));
+                    ui.label(RichText::new(comment).color(palette.text));
+                });
+                ui.add_space(6.0);
+            }
+        }
         render_table_structure_grid(ui, &definition, tab.database_kind);
     }
 
@@ -21907,11 +22264,11 @@ fn render_index_table(
                 .column(egui_extras::Column::initial(80.0).at_least(60.0))
                 .header(30.0, |mut header| {
                     header.col(|ui| {
-                        let (_, _, _, _) = table_header_cell(ui, palette, "#", false, None, false, false, None, false);
+                        let (_, _, _, _) = table_header_cell(ui, palette, "#", false, None, false, false, None, false, false);
                     });
                     for title in [tr!("索引名"), tr!("唯一性"), tr!("类型"), tr!("包含列"), tr!("来源"), tr!("删除")] {
                         header.col(|ui| {
-                            let (_, _, _, _) = table_header_cell(ui, palette, title, false, None, false, false, None, false);
+                            let (_, _, _, _) = table_header_cell(ui, palette, title, false, None, false, false, None, false, false);
                         });
                     }
                 })
@@ -22291,29 +22648,29 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                     table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false);
+                                let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
                             });
                             for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键")] {
                                 header.col(|ui| {
                                     let (_, _, _, _) =
-                                        table_header_cell(ui, &palette, title, false, None, false, false, None, false);
+                                        table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
                                 });
                             }
                             if show_auto_increment {
                                 header.col(|ui| {
                                     let (_, _, _, _) =
-                                        table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false);
+                                        table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false, false);
                                 });
                             }
                             if show_on_update {
                                 header.col(|ui| {
                                     let (_, _, _, _) =
-                                        table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false);
+                                        table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false, false);
                                 });
                             }
                             header.col(|ui| {
                                 let (_, _, _, _) =
-                                    table_header_cell(ui, &palette, tr!("删除"), false, None, false, false, None, false);
+                                    table_header_cell(ui, &palette, tr!("删除"), false, None, false, false, None, false, false);
                             });
                         })
                         .body(|mut body| {
@@ -22332,8 +22689,11 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
 
                             for (visible_idx, &col_idx) in visible.iter().enumerate() {
                                 let col = &tab.edited_columns[col_idx];
+                                let is_selected = tab.selected_structure_row == Some(col_idx);
                                 let fill = if col.is_new {
                                     palette.new_row_bg
+                                } else if is_selected {
+                                    palette.selection_bg
                                 } else {
                                     palette.card_bg
                                 };
@@ -22345,8 +22705,12 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                 let pk = col.primary_key;
 
                                 body.row(28.0, |mut row| {
+                                    // 序号（可点击选中行）
                                     row.col(|ui| {
-                                        table_text_cell(ui, &palette, fill, &format!("{}", visible_idx + 1), false);
+                                        let resp = table_text_cell(ui, &palette, fill, &format!("{}", visible_idx + 1), false);
+                                        if resp.clicked() {
+                                            tab.selected_structure_row = Some(col_idx);
+                                        }
                                     });
                                     // 字段名
                                     row.col(|ui| {
@@ -22487,6 +22851,7 @@ fn table_header_cell(
     dragged: bool,
     column_data_type: Option<&str>,
     has_column_values: bool,
+    on_update_current_timestamp: bool,
 ) -> (Option<TableHeaderSortChoice>, bool, bool, Option<TableHeaderCopyAction>) {
     let mut sort_choice = None;
     let mut copy_action = None;
@@ -22530,7 +22895,18 @@ fn table_header_cell(
                 ui.add(
                     egui::Label::new(label_text)
                         .selectable(false),
-                )
+                );
+                // 更新时刷新标记
+                if on_update_current_timestamp {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(tr!("ON UPDATE"))
+                                .size(palette.fonts.xs)
+                                .color(palette.weak_text),
+                        )
+                        .selectable(false),
+                    );
+                }
             },
         );
     });
@@ -22719,7 +23095,7 @@ fn table_text_cell(
     fill: Color32,
     text: &str,
     weak: bool,
-) {
+) -> egui::Response {
     let display = table_display_text(text, weak, Some("text"));
     let display_color = display.color(palette);
     let rect = ui.max_rect();
@@ -22758,7 +23134,8 @@ fn table_text_cell(
         ui.ctx().copy_text(text.to_string());
         show_copied_tooltip(ui, rect.center());
     }
-    let _ = response.on_hover_text(if text.is_empty() { tr!("无") } else { text });
+    let response = response.on_hover_text(if text.is_empty() { tr!("无") } else { text });
+    response
 }
 
 fn table_status_badge_cell(

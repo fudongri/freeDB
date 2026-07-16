@@ -240,6 +240,9 @@ pub struct ColumnDefinition {
 pub struct TableDefinition {
     pub columns: Vec<ColumnDefinition>,
     pub create_sql: Option<String>,
+    pub table_comment: Option<String>,
+    pub engine: Option<String>,
+    pub charset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

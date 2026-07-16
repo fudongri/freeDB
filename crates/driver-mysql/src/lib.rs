@@ -130,6 +130,23 @@ impl DatabaseDriver for MySqlDriver {
         conn.query_drop(format!("USE {}", quote_mysql(db)))
             .await
             .map_err(map_mysql_error)?;
+        // 加载表注释、引擎、字符集
+        let table_info_sql = format!(
+            "SELECT t.TABLE_COMMENT, t.ENGINE, c.CHARACTER_SET_NAME FROM INFORMATION_SCHEMA.TABLES t LEFT JOIN INFORMATION_SCHEMA.COLLATIONS c ON t.TABLE_COLLATION = c.COLLATION_NAME WHERE t.TABLE_SCHEMA = '{}' AND t.TABLE_NAME = '{}'",
+            escape_mysql_literal(db),
+            escape_mysql_literal(&table.table),
+        );
+        let (table_comment, engine, charset) = conn.query(table_info_sql)
+            .await
+            .ok()
+            .and_then(|rows: Vec<Row>| rows.into_iter().next())
+            .map(|row| {
+                let comment: Option<String> = row.get::<String, _>(0).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                let engine: Option<String> = row.get::<String, _>(1).filter(|s| !s.is_empty());
+                let charset: Option<String> = row.get::<String, _>(2).filter(|s| !s.is_empty());
+                (comment, engine, charset)
+            })
+            .unwrap_or((None, None, None));
         let sql = format!(
             "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, COLUMN_COMMENT, EXTRA FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
             escape_mysql_literal(db),
@@ -195,7 +212,7 @@ impl DatabaseDriver for MySqlDriver {
                 .and_then(|rows: Vec<Row>| rows.into_iter().next())
                 .and_then(|row| row.get::<String, _>(1).or_else(|| row.get::<String, _>(0)))
         };
-        Ok(TableDefinition { columns, create_sql })
+        Ok(TableDefinition { columns, create_sql, table_comment, engine, charset })
     }
 
     async fn preview_table(

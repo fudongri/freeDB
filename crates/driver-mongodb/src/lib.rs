@@ -240,6 +240,9 @@ impl DatabaseDriver for MongoDbDriver {
         Ok(TableDefinition {
             columns: fields,
             create_sql: Some(all_lines.join(";\n")),
+            table_comment: None,
+            engine: None,
+            charset: None,
         })
     }
 
