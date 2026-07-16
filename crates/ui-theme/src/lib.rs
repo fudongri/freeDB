@@ -447,8 +447,8 @@ impl Theme {
                 warning_icon: Color32::from_rgb(255, 140, 0),
                 context_menu_hover: Color32::from_rgb(50, 100, 170),
                 context_menu_active: Color32::from_rgb(40, 80, 140),
-                search_highlight_bg: Color32::from_rgb(255, 230, 0),
-                search_highlight_fg: Color32::from_rgb(80, 60, 0),
+                search_highlight_bg: Color32::from_rgb(114, 156, 214),
+                search_highlight_fg: Color32::from_rgb(214, 232, 255),
                 explain_scan: Color32::from_rgb(100, 149, 237),
                 explain_sort: Color32::from_rgb(255, 165, 0),
                 explain_join: Color32::from_rgb(72, 199, 142),
@@ -478,9 +478,9 @@ impl Theme {
                 toast_text: Color32::WHITE,
 
                 // ── 搜索匹配 ──
-                search_match_bg: Color32::from_rgba_unmultiplied(255, 230, 0, 70),
-                search_current_match_bg: Color32::from_rgba_unmultiplied(255, 100, 0, 160),
-                sidebar_search_match_fg: Color32::from_rgb(255, 230, 0),
+                search_match_bg: Color32::from_rgba_unmultiplied(98, 146, 214, 72),
+                search_current_match_bg: Color32::from_rgba_unmultiplied(214, 162, 92, 136),
+                sidebar_search_match_fg: Color32::from_rgb(140, 188, 255),
 
                 // ── 右键菜单文字 ──
                 context_menu_fg: Color32::WHITE,
@@ -634,8 +634,8 @@ impl Theme {
                 warning_icon: Color32::from_rgb(230, 130, 0),
                 context_menu_hover: Color32::from_rgb(65, 125, 200),
                 context_menu_active: Color32::from_rgb(50, 100, 170),
-                search_highlight_bg: Color32::from_rgb(255, 230, 0),
-                search_highlight_fg: Color32::from_rgb(80, 60, 0),
+                search_highlight_bg: Color32::from_rgb(192, 220, 255),
+                search_highlight_fg: Color32::from_rgb(36, 82, 145),
                 explain_scan: Color32::from_rgb(65, 105, 225),
                 explain_sort: Color32::from_rgb(210, 130, 0),
                 explain_join: Color32::from_rgb(50, 170, 115),
@@ -665,9 +665,9 @@ impl Theme {
                 toast_text: Color32::WHITE,
 
                 // ── 搜索匹配 ──
-                search_match_bg: Color32::from_rgba_unmultiplied(255, 255, 0, 90),
-                search_current_match_bg: Color32::from_rgba_unmultiplied(255, 80, 0, 180),
-                sidebar_search_match_fg: Color32::from_rgb(200, 160, 0),
+                search_match_bg: Color32::from_rgba_unmultiplied(124, 168, 226, 92),
+                search_current_match_bg: Color32::from_rgba_unmultiplied(222, 172, 96, 132),
+                sidebar_search_match_fg: Color32::from_rgb(64, 116, 192),
 
                 // ── 右键菜单文字 ──
                 context_menu_fg: Color32::WHITE,
