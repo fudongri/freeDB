@@ -780,41 +780,75 @@ const MONGO_OPERATORS: &[&str] = &[
     "$arrayFilters", "$position",
 ];
 
+const MONGO_UPDATE_OPERATORS: &[&str] = &[
+    "$set", "$unset", "$inc", "$mul", "$min", "$max", "$rename",
+    "$push", "$pull", "$addToSet", "$pop", "$currentDate",
+];
+
 /// 返回方法的参数模板和光标偏移（相对于模板起始位置）
 fn mongo_method_template(method: &str) -> (String, usize) {
     match method {
         "find" | "findOne" | "deleteOne" | "deleteMany" | "countDocuments" |
         "findOneAndDelete" | "drop" => {
-            let t = format!("{}({})", method, if method == "drop" { "" } else { "{}" });
-            let c = method.len() + 1; // after '(' or after '{'
+            let t = if method == "drop" {
+                format!("{method}()")
+            } else {
+                format!("{method}({{ field: value }})")
+            };
+            let c = method.len() + 2;
             (t, c)
         }
         "insertOne" | "replaceOne" => {
-            (format!("{}({})", method, "{}"), method.len() + 1)
+            (
+                format!("{method}({{ field: value }})"),
+                method.len() + 2,
+            )
         }
         "updateOne" | "updateMany" | "findOneAndUpdate" | "findOneAndReplace" => {
-            (format!("{}({{ }}, {{ }})", method), method.len() + 2)
+            (
+                format!("{method}({{ _id: value }}, {{ $set: {{ field: value }} }})"),
+                method.len() + 2,
+            )
         }
         "insertMany" | "bulkWrite" | "aggregate" => {
-            (format!("{}([])", method), method.len() + 1)
+            let template = match method {
+                "aggregate" => "([{ $match: { field: value } }])".to_string(),
+                _ => "([{ field: value }])".to_string(),
+            };
+            (format!("{method}{template}"), method.len() + 2)
         }
         "distinct" => {
-            (format!("distinct(\"\")"), 9) // after first "
+            ("distinct(\"field\")".to_string(), 10)
         }
         "createIndex" | "dropIndex" => {
-            (format!("{}({})", method, "{}"), method.len() + 1)
+            let template = if method == "createIndex" {
+                "({ field: 1 }, { name: \"idx_field\" })"
+            } else {
+                "(\"idx_field\")"
+            };
+            (format!("{method}{template}"), method.len() + 1)
         }
         // Cursor methods
         "sort" | "project" | "hint" | "collation" => {
-            (format!("{}({})", method, "{}"), method.len() + 1)
+            let template = match method {
+                "sort" | "hint" => "({ field: 1 })",
+                "project" => "({ field: 1, _id: 0 })",
+                _ => "({ locale: \"en\" })",
+            };
+            (format!("{method}{template}"), method.len() + 2)
         }
         "limit" | "skip" | "batchSize" | "maxTimeMS" => {
-            (format!("{}()", method), method.len() + 1)
+            let value = match method {
+                "limit" | "batchSize" => "10",
+                "skip" => "0",
+                _ => "1000",
+            };
+            (format!("{method}({value})"), method.len() + 1)
         }
-        "comment" => (format!("comment(\"\")"), 9),
+        "comment" => ("comment(\"query intent\")".to_string(), 9),
         "explain" | "allowDiskUse" => {
-            (format!("{}({})", method, if method == "allowDiskUse" { "true" } else { "" }),
-             method.len() + 1)
+            let template = if method == "allowDiskUse" { "(true)" } else { "()" };
+            (format!("{method}{template}"), method.len() + 1)
         }
         _ => (format!("{}()", method), method.len() + 1),
     }
@@ -827,7 +861,14 @@ enum MongoContext {
     /// db.coll. → 建议方法名
     AfterCollection { collection: String },
     /// db.coll.method( → 在方法参数内，建议操作符
-    AfterMethod { collection: String, method: String },
+    AfterMethod {
+        collection: String,
+        method: String,
+        arg_index: usize,
+        field_context: bool,
+        field_path_prefix: Option<String>,
+        active_object_key: Option<String>,
+    },
     /// 非 MongoDB 查询
     NotMongo,
 }
@@ -868,8 +909,16 @@ fn detect_mongo_context(sql: &str, cursor: usize) -> MongoContext {
             let method = method_part.rsplit('.').next().unwrap_or("").trim();
             if !method.is_empty() && method.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 // Has opening paren → inside method args
-                if rest.contains('(') {
-                    return MongoContext::AfterMethod { collection, method: method.to_string() };
+                if let Some(paren_pos) = rest.rfind('(') {
+                    let args = &rest[paren_pos + 1..];
+                    return MongoContext::AfterMethod {
+                        collection,
+                        method: method.to_string(),
+                        arg_index: mongo_arg_index(args),
+                        field_context: mongo_is_field_context(args),
+                        field_path_prefix: mongo_field_path_prefix(args),
+                        active_object_key: mongo_active_object_key(args),
+                    };
                 }
                 // No paren yet → still typing method name, show collection methods
                 return MongoContext::AfterCollection { collection };
@@ -889,6 +938,170 @@ fn detect_mongo_context(sql: &str, cursor: usize) -> MongoContext {
     }
 
     MongoContext::NotMongo
+}
+
+fn mongo_arg_index(args: &str) -> usize {
+    let mut depth_brace = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_paren = 0usize;
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escape = false;
+    let mut commas = 0usize;
+    for ch in args.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == quote {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            in_string = true;
+            quote = ch;
+            continue;
+        }
+        match ch {
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            ',' if depth_brace == 0 && depth_bracket == 0 && depth_paren == 0 => commas += 1,
+            _ => {}
+        }
+    }
+    commas
+}
+
+fn mongo_is_field_context(args: &str) -> bool {
+    let trimmed = args.trim_end();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.ends_with('{') || trimmed.ends_with(',') {
+        return true;
+    }
+    if trimmed.ends_with(':') {
+        return false;
+    }
+    let mut depth_brace = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escape = false;
+    let mut last_top_level_colon = false;
+    for ch in trimmed.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == quote {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            in_string = true;
+            quote = ch;
+            continue;
+        }
+        match ch {
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            ':' if depth_brace == 1 && depth_bracket == 0 => last_top_level_colon = true,
+            ',' if depth_brace == 1 && depth_bracket == 0 => last_top_level_colon = false,
+            ',' if depth_brace == 0 && depth_bracket == 0 => last_top_level_colon = false,
+            _ => {}
+        }
+    }
+    !last_top_level_colon
+}
+
+fn mongo_field_path_prefix(args: &str) -> Option<String> {
+    let trimmed = args.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut start = trimmed.len();
+    while start > 0 {
+        let ch = trimmed[..start].chars().next_back()?;
+        if ch.is_alphanumeric() || matches!(ch, '_' | '.' | '"' | '\'') {
+            start -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let prefix = trimmed[start..]
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim();
+    (!prefix.is_empty()).then(|| prefix.to_string())
+}
+
+fn mongo_active_object_key(args: &str) -> Option<String> {
+    let trimmed = args.trim_end();
+    let brace_pos = trimmed.rfind('{')?;
+    let before = trimmed[..brace_pos].trim_end();
+    let before = before.strip_suffix(':')?.trim_end();
+    let mut start = before.len();
+    while start > 0 {
+        let ch = before[..start].chars().next_back()?;
+        if ch.is_alphanumeric() || matches!(ch, '_' | '.' | '$' | '"' | '\'') {
+            start -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let key = before[start..]
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+fn mongo_field_insertion_text(label: &str, path_prefix: Option<&str>) -> Option<String> {
+    let prefix = path_prefix
+        .map(str::trim)
+        .filter(|prefix| !prefix.is_empty())
+        .map(|prefix| prefix.trim_matches(|c| c == '"' || c == '\''))
+        .unwrap_or("");
+    if prefix.is_empty() {
+        return Some(label.to_string());
+    }
+    if label == prefix {
+        return Some(label.to_string());
+    }
+    if let Some(remainder) = label.strip_prefix(prefix) {
+        if remainder.is_empty() {
+            return Some(label.to_string());
+        }
+        return Some(remainder.to_string());
+    }
+    if label.starts_with(prefix)
+        || prefix.starts_with(label)
+        || label
+            .split('.')
+            .next()
+            .map(|head| prefix.starts_with(head))
+            .unwrap_or(false)
+    {
+        return Some(label.to_string());
+    }
+    None
 }
 
 /// Extract captures from a regex-like pattern (simplified helper).
@@ -1273,18 +1486,119 @@ impl AutocompleteEngine {
                     });
                 }
             }
-            MongoContext::AfterMethod { .. } => {
-                for op in MONGO_OPERATORS {
-                    suggestions.push(AutocompleteSuggestion::new(
-                        op.to_string(),
-                        SuggestionKind::MongoKeyword,
-                    ));
+            MongoContext::AfterMethod {
+                collection,
+                method,
+                arg_index,
+                field_context,
+                field_path_prefix,
+                active_object_key,
+            } => {
+                match method.as_str() {
+                    "find" | "findOne" | "deleteOne" | "deleteMany" | "countDocuments" => {
+                        if field_context {
+                            Self::push_mongo_collection_fields(
+                                &mut suggestions,
+                                cache,
+                                &collection,
+                                field_path_prefix.as_deref(),
+                            );
+                        } else {
+                            Self::push_mongo_operators(&mut suggestions, MONGO_OPERATORS);
+                        }
+                    }
+                    "sort" | "project" | "hint" => {
+                        Self::push_mongo_collection_fields(
+                            &mut suggestions,
+                            cache,
+                            &collection,
+                            field_path_prefix.as_deref(),
+                        );
+                    }
+                    "updateOne" | "updateMany" | "findOneAndUpdate" => {
+                        if arg_index == 0 {
+                            if field_context {
+                                Self::push_mongo_collection_fields(
+                                    &mut suggestions,
+                                    cache,
+                                    &collection,
+                                    field_path_prefix.as_deref(),
+                                );
+                            } else {
+                                Self::push_mongo_operators(&mut suggestions, MONGO_OPERATORS);
+                            }
+                        } else if matches!(
+                            active_object_key.as_deref(),
+                            Some("$set" | "$project" | "$sort")
+                        ) {
+                            Self::push_mongo_collection_fields(
+                                &mut suggestions,
+                                cache,
+                                &collection,
+                                field_path_prefix.as_deref(),
+                            );
+                        } else if field_context {
+                            Self::push_mongo_operators(&mut suggestions, MONGO_UPDATE_OPERATORS);
+                        } else {
+                            Self::push_mongo_collection_fields(
+                                &mut suggestions,
+                                cache,
+                                &collection,
+                                field_path_prefix.as_deref(),
+                            );
+                        }
+                    }
+                    _ => {
+                        Self::push_mongo_operators(&mut suggestions, MONGO_OPERATORS);
+                    }
                 }
             }
             MongoContext::NotMongo => {}
         }
         let filtered = Self::filter_by_prefix(suggestions, prefix);
         Self::rank(filtered, prefix, &SqlContext::General, usage_memory)
+    }
+
+    fn push_mongo_collection_fields(
+        suggestions: &mut Vec<AutocompleteSuggestion>,
+        cache: &SchemaCache,
+        collection: &str,
+        path_prefix: Option<&str>,
+    ) {
+        if let Some(cols) = lookup_columns_for_table(cache, collection) {
+            let mut seen = HashMap::<String, String>::new();
+            for col in cols {
+                let Some(insertion_text) =
+                    mongo_field_insertion_text(&col.name, path_prefix)
+                else {
+                    continue;
+                };
+                seen.entry(col.name.clone()).or_insert(insertion_text);
+            }
+            for (label, insertion_text) in seen {
+                suggestions.push(AutocompleteSuggestion {
+                    label,
+                    kind: SuggestionKind::Column {
+                        parent_table: collection.to_string(),
+                    },
+                    matched_indices: Vec::new(),
+                    insertion_text: Some(insertion_text),
+                    cursor_offset: None,
+                });
+            }
+        }
+    }
+
+    fn push_mongo_operators(
+        suggestions: &mut Vec<AutocompleteSuggestion>,
+        operators: &[&str],
+    ) {
+        for op in operators {
+            suggestions.push(AutocompleteSuggestion::new(
+                op.to_string(),
+                SuggestionKind::MongoKeyword,
+            ));
+        }
     }
 
     fn filter_by_prefix(
@@ -2225,6 +2539,126 @@ mod tests {
         let (sql, cursor) = apply_autocomplete_suggestion("db.users.fi|nd".replace('|', "").as_str(), 11, 9, "find({})", Some(5));
         assert_eq!(sql, "db.users.find({})");
         assert_eq!(cursor, 14);
+    }
+
+    #[test]
+    fn mongo_find_prefers_collection_fields_inside_filter_object() {
+        let cache = make_cache(&[("users", false, &["name", "age", "email"])]);
+        let suggestions = AutocompleteEngine::suggest(
+            "db.users.find({ na",
+            18,
+            &cache,
+            None,
+            Some(DatabaseKind::MongoDb),
+            None,
+        );
+        assert!(suggestions.iter().any(|s| s.label == "name"));
+        assert!(!suggestions.iter().any(|s| s.label == "$set"));
+    }
+
+    #[test]
+    fn mongo_find_value_position_prefers_query_operators() {
+        let cache = make_cache(&[("users", false, &["name", "age"])]);
+        let sql = "db.users.find({ age: $g";
+        let suggestions = AutocompleteEngine::suggest(
+            sql,
+            sql.chars().count(),
+            &cache,
+            None,
+            Some(DatabaseKind::MongoDb),
+            None,
+        );
+        assert!(suggestions.iter().any(|s| s.label == "$gt"));
+        assert!(suggestions.iter().any(|s| s.label == "$gte"));
+        assert!(!suggestions.iter().any(|s| s.label == "age"));
+    }
+
+    #[test]
+    fn mongo_sort_prefers_collection_fields() {
+        let cache = make_cache(&[("users", false, &["createdAt", "name"])]);
+        let suggestions = AutocompleteEngine::suggest(
+            "db.users.find({}).sort({ cr",
+            27,
+            &cache,
+            None,
+            Some(DatabaseKind::MongoDb),
+            None,
+        );
+        assert!(suggestions.iter().any(|s| s.label == "createdAt"));
+        assert!(!suggestions.iter().any(|s| s.label == "$gt"));
+    }
+
+    #[test]
+    fn mongo_update_second_argument_prefers_update_operators() {
+        let cache = make_cache(&[("users", false, &["name", "age"])]);
+        let sql = "db.users.updateOne({ _id: 1 }, { $s";
+        let suggestions = AutocompleteEngine::suggest(
+            sql,
+            sql.chars().count(),
+            &cache,
+            None,
+            Some(DatabaseKind::MongoDb),
+            None,
+        );
+        assert!(suggestions.iter().any(|s| s.label == "$set"));
+        assert!(suggestions.iter().any(|s| s.label == "$unset"));
+        assert!(!suggestions.iter().any(|s| s.label == "name"));
+    }
+
+    #[test]
+    fn mongo_project_prefers_nested_field_paths() {
+        let cache = make_cache(&[(
+            "users",
+            false,
+            &["user.name", "user.profile.nickname", "createdAt"],
+        )]);
+        let sql = "db.users.find({}).project({ user.pr";
+        let suggestions = AutocompleteEngine::suggest(
+            sql,
+            sql.chars().count(),
+            &cache,
+            None,
+            Some(DatabaseKind::MongoDb),
+            None,
+        );
+        let nickname = suggestions
+            .iter()
+            .find(|s| s.label == "user.profile.nickname")
+            .unwrap();
+        assert_eq!(nickname.insertion_text.as_deref(), Some("ofile.nickname"));
+    }
+
+    #[test]
+    fn mongo_set_object_prefers_nested_field_paths_over_update_operators() {
+        let cache = make_cache(&[(
+            "users",
+            false,
+            &["profile.name", "profile.nickname", "age"],
+        )]);
+        let sql = "db.users.updateOne({ _id: 1 }, { $set: { prof";
+        let suggestions = AutocompleteEngine::suggest(
+            sql,
+            sql.chars().count(),
+            &cache,
+            None,
+            Some(DatabaseKind::MongoDb),
+            None,
+        );
+        assert!(suggestions.iter().any(|s| s.label == "profile.name"));
+        assert!(!suggestions.iter().any(|s| s.label == "$unset"));
+    }
+
+    #[test]
+    fn mongo_templates_use_compass_style_defaults() {
+        let (find_template, _) = mongo_method_template("find");
+        let (update_template, _) = mongo_method_template("updateOne");
+        let (project_template, _) = mongo_method_template("project");
+        assert_eq!(find_template, "find({ field: value })");
+        assert_eq!(
+            update_template,
+            "updateOne({ _id: value }, { $set: { field: value } })"
+        );
+        assert_eq!(project_template, "project({ field: 1, _id: 0 })");
     }
 
     #[test]

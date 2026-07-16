@@ -170,21 +170,7 @@ impl DatabaseDriver for MongoDbDriver {
         let mut fields = Vec::new();
         let mut fields_set = HashSet::new();
         while let Some(doc) = cursor.try_next().await.map_err(map_mongo_error)? {
-            for (key, value) in &doc {
-                if fields_set.insert(key.clone()) {
-                    fields.push(ColumnDefinition {
-                        name: key.clone(),
-                        data_type: bson_type_name(value),
-                        nullable: true,
-                        primary_key: key == "_id",
-                        unique: key == "_id",
-                        auto_increment: false,
-                        on_update_current_timestamp: false,
-                        default_value: None,
-                        comment: None,
-                    });
-                }
-            }
+            collect_document_fields(&doc, None, &mut fields, &mut fields_set);
         }
         tracing::info!("[MongoDB] 字段采样耗时: {}ms ({}个字段)", t_sample.elapsed().as_millis(), fields.len());
 
@@ -205,7 +191,7 @@ impl DatabaseDriver for MongoDbDriver {
                 while let Ok(Some(doc)) = c.try_next().await {
                     for field in fields.iter_mut() {
                         if field.data_type == "null" {
-                            if let Some(val) = doc.get(&field.name) {
+                            if let Some(val) = lookup_bson_path(&doc, &field.name) {
                                 let t = bson_type_name(val);
                                 if t != "null" {
                                     field.data_type = t;
@@ -511,6 +497,67 @@ impl DatabaseDriver for MongoDbDriver {
         };
         Ok(Some((count, data_size, idx_size, total)))
     }
+}
+
+fn collect_document_fields(
+    doc: &Document,
+    prefix: Option<&str>,
+    fields: &mut Vec<ColumnDefinition>,
+    fields_set: &mut HashSet<String>,
+) {
+    for (key, value) in doc {
+        let path = match prefix {
+            Some(prefix) if !prefix.is_empty() => format!("{prefix}.{key}"),
+            _ => key.clone(),
+        };
+        if fields_set.insert(path.clone()) {
+            fields.push(ColumnDefinition {
+                name: path.clone(),
+                data_type: bson_type_name(value),
+                nullable: true,
+                primary_key: path == "_id",
+                unique: path == "_id",
+                auto_increment: false,
+                on_update_current_timestamp: false,
+                default_value: None,
+                comment: None,
+            });
+        }
+        match value {
+            Bson::Document(nested) => collect_document_fields(nested, Some(&path), fields, fields_set),
+            Bson::Array(items) => {
+                for item in items {
+                    if let Bson::Document(nested) = item {
+                        collect_document_fields(nested, Some(&path), fields, fields_set);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lookup_bson_path<'a>(doc: &'a Document, path: &str) -> Option<&'a Bson> {
+    fn descend<'a>(value: &'a Bson, segments: &[&str]) -> Option<&'a Bson> {
+        if segments.is_empty() {
+            return Some(value);
+        }
+        let (head, tail) = segments.split_first()?;
+        match value {
+            Bson::Document(document) => descend(document.get(*head)?, tail),
+            Bson::Array(items) => items.iter().find_map(|item| match item {
+                Bson::Document(document) => descend(document.get(*head)?, tail),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    let mut segments = path.split('.');
+    let first = segments.next()?;
+    let first_value = doc.get(first)?;
+    let rest: Vec<_> = segments.collect();
+    descend(first_value, &rest)
 }
 
 // ── Mongo Shell 命令解析与执行 ──
@@ -1643,5 +1690,28 @@ mod tests {
         assert_eq!(v["hobbies"][1], "reading", "hobbies[1] mismatch");
         assert_eq!(v["address"]["city"], "北京", "address.city mismatch");
         assert_eq!(v["address"]["district"], "海淀", "address.district mismatch");
+    }
+
+    #[test]
+    fn test_collect_document_fields_flattens_nested_paths() {
+        let doc = doc! {
+            "profile": {
+                "name": "alice",
+                "stats": { "score": 42 }
+            },
+            "tags": [
+                { "label": "vip" }
+            ]
+        };
+        let mut fields = Vec::new();
+        let mut seen = HashSet::new();
+        collect_document_fields(&doc, None, &mut fields, &mut seen);
+        let names: HashSet<_> = fields.into_iter().map(|f| f.name).collect();
+        assert!(names.contains("profile"));
+        assert!(names.contains("profile.name"));
+        assert!(names.contains("profile.stats"));
+        assert!(names.contains("profile.stats.score"));
+        assert!(names.contains("tags"));
+        assert!(names.contains("tags.label"));
     }
 }
