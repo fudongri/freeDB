@@ -3729,12 +3729,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     return;
                 }
                 let database_kind = self.database_kind_for_connection(connection_id);
-                let conn_name = self.connection_name(connection_id);
-                let db_label = schema.as_deref().unwrap_or(database.as_str());
-                let tab_title = format!("{}@{} 表信息", db_label, conn_name);
+                let tab_id = format!("table-summary-{}", uuid::Uuid::new_v4());
                 let state = TableSummaryTabState {
-                    id: format!("table-summary-{}", uuid::Uuid::new_v4()),
-                    title: tab_title,
+                    id: tab_id.clone(),
+                    title: title.clone(),
                     connection_id: connection_id.clone(),
                     database: database.clone(),
                     schema: schema.clone(),
@@ -3762,6 +3760,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.tabs.push(WorkspaceTab::TableSummary(state));
                 self.active_tab = self.tabs.len().saturating_sub(1);
                 self.scroll_tabs_to_end = true;
+
+                let services = self.services.clone();
+                let handle = self.runtime.handle().clone();
+                let (sender, receiver) = mpsc::channel();
+                self.pending_table_summary = Some(receiver);
+                let connection_id = connection_id.clone();
+                let database = database.clone();
+                let schema = schema.clone();
+                handle.spawn(async move {
+                    let result = services
+                        .load_tables_summary(&connection_id, &database, schema.as_deref())
+                        .await;
+                    let _ = sender.send(TableSummaryLoadResult {
+                        tab_id,
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
             }
         }
     }
