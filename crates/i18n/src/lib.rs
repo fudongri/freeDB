@@ -711,6 +711,8 @@ fn en(key: &'static str) -> &'static str {
         "关闭所有标签页" => "Close All Tabs",
         "标签页后退" => "Tab Back",
         "标签页前进" => "Tab Forward",
+        "最近打开的标签页" => "Recent Tabs",
+        "暂无最近标签页" => "No recent tabs",
         "执行查询" => "Execute Query",
         "Explain 查询" => "Explain Query",
         "切换行注释" => "Toggle Line Comment",

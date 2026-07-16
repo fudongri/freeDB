@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use crate::autocomplete::{
     autocomplete_palette, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
@@ -139,6 +140,9 @@ pub struct DesktopApp {
     is_shortcuts_open: bool,
     is_log_window_open: bool,
     is_scroll_speed_open: bool,
+    is_recent_tabs_open: bool,
+    recent_tabs: Vec<RecentTabEntry>,
+    recent_tabs_popup_rect: Option<egui::Rect>,
     scroll_speed: f32,
     log_buffer: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     menu_event_rx: Option<Receiver<muda::MenuEvent>>,
@@ -155,6 +159,7 @@ pub struct DesktopApp {
     menu_theme: Option<muda::Submenu>,
     menu_tab_back: Option<muda::MenuItem>,
     menu_tab_forward: Option<muda::MenuItem>,
+    menu_recent_tabs: Option<muda::MenuItem>,
     locale: Locale,
     /// 帧计数器：延迟最大化到窗口完全显示后执行
     frame_count: usize,
@@ -273,6 +278,64 @@ enum WorkspaceTab {
     CreateTable(CreateTableState),
     TableSummary(TableSummaryTabState),
     Dashboard,
+}
+
+const MAX_RECENT_TABS: usize = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum RecentTabEntry {
+    Query { connection_id: Option<String>, database: Option<String>, title: String, sql: String },
+    Table { connection_id: String, database: Option<String>, schema: Option<String>, table_name: String, is_view: bool },
+    CreateTable { connection_id: String, database: String, schema: Option<String> },
+    TableSummary { connection_id: String, database: String, schema: Option<String>, title: String },
+}
+
+fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
+    match tab {
+        WorkspaceTab::Query(t) => Some(RecentTabEntry::Query {
+            connection_id: t.connection_id.clone(),
+            database: t.database.clone(),
+            title: t.title.clone(),
+            sql: t.sql.clone(),
+        }),
+        WorkspaceTab::Table(t) => Some(RecentTabEntry::Table {
+            connection_id: t.table.connection_id.clone(),
+            database: t.table.database.clone(),
+            schema: t.table.schema.clone(),
+            table_name: t.table.table.clone(),
+            is_view: t.table.is_view,
+        }),
+        WorkspaceTab::CreateTable(t) => Some(RecentTabEntry::CreateTable {
+            connection_id: t.connection_id.clone(),
+            database: t.database.clone(),
+            schema: t.schema.clone(),
+        }),
+        WorkspaceTab::TableSummary(t) => Some(RecentTabEntry::TableSummary {
+            connection_id: t.connection_id.clone(),
+            database: t.database.clone(),
+            schema: t.schema.clone(),
+            title: t.title.clone(),
+        }),
+        WorkspaceTab::Dashboard => None,
+    }
+}
+
+fn recent_tab_matches(a: &RecentTabEntry, b: &RecentTabEntry) -> bool {
+    match (a, b) {
+        (RecentTabEntry::Query { connection_id: a_conn, database: a_db, title: a_title, .. },
+         RecentTabEntry::Query { connection_id: b_conn, database: b_db, title: b_title, .. }) =>
+            a_conn == b_conn && a_db == b_db && a_title == b_title,
+        (RecentTabEntry::Table { connection_id: a_conn, database: a_db, schema: a_schema, table_name: a_tbl, .. },
+         RecentTabEntry::Table { connection_id: b_conn, database: b_db, schema: b_schema, table_name: b_tbl, .. }) =>
+            a_conn == b_conn && a_db == b_db && a_schema == b_schema && a_tbl == b_tbl,
+        (RecentTabEntry::CreateTable { connection_id: a_conn, database: a_db, schema: a_schema },
+         RecentTabEntry::CreateTable { connection_id: b_conn, database: b_db, schema: b_schema }) =>
+            a_conn == b_conn && a_db == b_db && a_schema == b_schema,
+        (RecentTabEntry::TableSummary { connection_id: a_conn, database: a_db, schema: a_schema, .. },
+         RecentTabEntry::TableSummary { connection_id: b_conn, database: b_db, schema: b_schema, .. }) =>
+            a_conn == b_conn && a_db == b_db && a_schema == b_schema,
+        _ => false,
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -1148,6 +1211,7 @@ impl DesktopApp {
         menu_theme: Option<muda::Submenu>,
         menu_tab_back: Option<muda::MenuItem>,
         menu_tab_forward: Option<muda::MenuItem>,
+        menu_recent_tabs: Option<muda::MenuItem>,
         locale: Locale,
     ) -> Self {
         // 加载已保存的语言，优先于系统检测
@@ -1276,6 +1340,9 @@ impl DesktopApp {
             is_shortcuts_open: false,
             is_log_window_open: false,
             is_scroll_speed_open: false,
+            is_recent_tabs_open: false,
+            recent_tabs: Vec::new(),
+            recent_tabs_popup_rect: None,
             scroll_speed,
             log_buffer,
             menu_event_rx,
@@ -1291,9 +1358,17 @@ impl DesktopApp {
             menu_theme,
             menu_tab_back,
             menu_tab_forward,
+            menu_recent_tabs,
             locale,
             frame_count: 0,
         };
+
+        // 加载最近打开的标签页
+        if let Ok(Some(json)) = app.services.load_ui_state("recent_tabs") {
+            if let Ok(list) = serde_json::from_str::<Vec<RecentTabEntry>>(&json) {
+                app.recent_tabs = list;
+            }
+        }
 
         // 启动后台更新检查
         {
@@ -1565,6 +1640,8 @@ impl DesktopApp {
                 self.tab_back();
             } else if event.id == "标签页前进" {
                 self.tab_forward();
+            } else if event.id == "最近打开的标签页" {
+                self.is_recent_tabs_open = true;
             } else if event.id == "滚动速度" {
                 self.is_scroll_speed_open = true;
             } else if event.id == "主题_浅色" {
@@ -1679,6 +1756,7 @@ impl DesktopApp {
                 if let Some(m) = &self.menu_log { m.set_text(tr!("运行日志")); }
                 if let Some(m) = &self.menu_tab_back { m.set_text(tr!("标签页后退")); }
                 if let Some(m) = &self.menu_tab_forward { m.set_text(tr!("标签页前进")); }
+                if let Some(m) = &self.menu_recent_tabs { m.set_text(tr!("最近打开的标签页")); }
                 if let Some(m) = &self.menu_lang {
                     let lang_label = if new_locale == Locale::En { "中文" } else { "English" };
                     m.set_text(lang_label);
@@ -2792,6 +2870,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.tabs.push(tab);
                 self.active_tab = self.tabs.len().saturating_sub(1);
                 self.scroll_tabs_to_end = true;
+                self.record_recent_tab();
                 return;
             }
         }
@@ -2872,6 +2951,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.tabs.push(WorkspaceTab::Table(table_tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.scroll_tabs_to_end = true;
+        self.record_recent_tab();
 
         // Spawn async background task to load definition (and optionally preview data)
         let services = self.services.clone();
@@ -3469,9 +3549,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.tabs.push(WorkspaceTab::Query(tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.scroll_tabs_to_end = true;
+        self.record_recent_tab();
     }
-
-    /// 根据侧栏选中节点的上下文创建查询，自动预填 SQL
     fn new_query_from_selected_node(&mut self) {
         if let Some(node) = self.selected_sidebar_node() {
             match node.node_type {
@@ -3517,6 +3596,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.tab_back_stack.push(self.active_tab);
         self.tab_forward_stack.clear();
         self.active_tab = new_tab;
+        self.record_recent_tab();
     }
 
     fn tab_back(&mut self) {
@@ -3559,6 +3639,130 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             self.active_tab -= 1;
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len().saturating_sub(1);
+        }
+    }
+
+    fn record_recent_tab(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let Some(entry) = recent_entry_from_tab(tab) else { return };
+        self.recent_tabs.retain(|e| !recent_tab_matches(e, &entry));
+        self.recent_tabs.insert(0, entry);
+        if self.recent_tabs.len() > MAX_RECENT_TABS {
+            self.recent_tabs.truncate(MAX_RECENT_TABS);
+        }
+        // 立即持久化，防止异常退出时丢失
+        if let Ok(json) = serde_json::to_string(&self.recent_tabs) {
+            let _ = self.services.save_ui_state("recent_tabs", &json);
+        }
+    }
+
+    fn reopen_recent_tab(&mut self, entry: &RecentTabEntry) {
+        match entry {
+            RecentTabEntry::Query { connection_id, database, sql, .. } => {
+                self.create_query_tab(connection_id.clone(), database.clone(), Some(sql.clone()));
+            }
+            RecentTabEntry::Table { connection_id, database, schema, table_name, is_view } => {
+                let node = ExplorerNode {
+                    id: String::new(),
+                    connection_id: connection_id.clone(),
+                    name: table_name.clone(),
+                    node_type: if *is_view { ExplorerNodeType::View } else { ExplorerNodeType::Table },
+                    parent_id: None,
+                    database: database.clone(),
+                    schema: schema.clone(),
+                    expandable: false,
+                    loaded: false,
+                };
+                self.open_table_tab(&node, true, false);
+            }
+            RecentTabEntry::CreateTable { connection_id, database, schema } => {
+                let kind = self.database_kind_for_connection(connection_id);
+                let state = CreateTableState {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    connection_id: connection_id.clone(),
+                    database: database.clone(),
+                    schema: schema.clone(),
+                    database_kind: kind,
+                    table_name: String::new(),
+                    engine: "InnoDB".into(),
+                    charset: "utf8mb4".into(),
+                    columns: vec![
+                        EditableColumn {
+                            name: "id".into(),
+                            original_name: String::new(),
+                            data_type: if kind == DatabaseKind::Postgres { "SERIAL".into() } else { "INT".into() },
+                            nullable: false,
+                            primary_key: true,
+                            auto_increment: true,
+                            on_update_current_timestamp: false,
+                            default_value: String::new(),
+                            comment: String::new(),
+                            is_new: true,
+                            is_dropped: false,
+                            needs_focus: false,
+                        },
+                    ],
+                    pending_indexes: Vec::new(),
+                    add_index_dialog_open: false,
+                    add_index_needs_focus: false,
+                    new_index_name: String::new(),
+                    new_index_columns: Vec::new(),
+                    new_index_unique: false,
+                    active_view: CreateTableView::Columns,
+                    error: None,
+                    needs_focus: true,
+                    loading: false,
+                };
+                self.tabs.push(WorkspaceTab::CreateTable(state));
+                self.active_tab = self.tabs.len().saturating_sub(1);
+                self.scroll_tabs_to_end = true;
+            }
+            RecentTabEntry::TableSummary { connection_id, database, schema, title } => {
+                if let Some(idx) = self.tabs.iter().position(|t| {
+                    matches!(t, WorkspaceTab::TableSummary(ts) if
+                        ts.connection_id == *connection_id
+                        && ts.database == *database
+                        && ts.schema == *schema
+                    )
+                }) {
+                    self.navigate_to_tab(idx);
+                    return;
+                }
+                let database_kind = self.database_kind_for_connection(connection_id);
+                let conn_name = self.connection_name(connection_id);
+                let db_label = schema.as_deref().unwrap_or(database.as_str());
+                let tab_title = format!("{}@{} 表信息", db_label, conn_name);
+                let state = TableSummaryTabState {
+                    id: format!("table-summary-{}", uuid::Uuid::new_v4()),
+                    title: tab_title,
+                    connection_id: connection_id.clone(),
+                    database: database.clone(),
+                    schema: schema.clone(),
+                    database_kind,
+                    loading: true,
+                    table_summaries: Vec::new(),
+                    selected_indices: HashSet::new(),
+                    sort_column: None,
+                    sort_ascending: true,
+                    search_filter: String::new(),
+                    needs_reload: false,
+                    pending_open_table: None,
+                    pending_actions: Vec::new(),
+                    col_widths: Vec::new(),
+                    resize_drag: None,
+                    renaming_row: None,
+                    rename_edit: String::new(),
+                    rename_focus_requested: false,
+                    pending_stats: HashSet::new(),
+                    visible_rows: HashSet::new(),
+                    stats_loading: false,
+                    stats_sender: None,
+                    stats_receiver: None,
+                };
+                self.tabs.push(WorkspaceTab::TableSummary(state));
+                self.active_tab = self.tabs.len().saturating_sub(1);
+                self.scroll_tabs_to_end = true;
+            }
         }
     }
 
@@ -4083,6 +4287,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                     if ui.button(tr!("运行日志")).clicked() {
                         self.is_log_window_open = true;
+                        ui.close_menu();
+                    }
+                    if ui.button(tr!("最近打开的标签页")).clicked() {
+                        self.is_recent_tabs_open = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -4662,6 +4870,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     self.tabs.push(WorkspaceTab::TableSummary(state));
                     self.active_tab = self.tabs.len().saturating_sub(1);
                     self.scroll_tabs_to_end = true;
+                    self.record_recent_tab();
 
                     let services = self.services.clone();
                     let handle = self.runtime.handle().clone();
@@ -4744,6 +4953,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     self.tabs.push(WorkspaceTab::CreateTable(state));
                     self.active_tab = self.tabs.len().saturating_sub(1);
                     self.scroll_tabs_to_end = true;
+                    self.record_recent_tab();
                 }
                 SidebarAction::CommitTreeRename => {
                     self.commit_tree_rename();
@@ -13183,7 +13393,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             (format!("{}+[", MOD_KEY), tr!("标签页后退")),
                             (format!("{}+]", MOD_KEY), tr!("标签页前进")),
                             (format!("{}+R", MOD_KEY), tr!("执行查询")),
-                            (format!("{}+E", MOD_KEY), tr!("Explain 查询")),
+                            (format!("{}+E", MOD_KEY), tr!("最近打开的标签页")),
+                            (format!("{}+Shift+E", MOD_KEY), tr!("Explain 查询")),
                             (format!("{}+S", MOD_KEY), tr!("保存查询")),
                             (format!("{}+/", MOD_KEY), tr!("切换行注释")),
                             (format!("{}+C", MOD_KEY), tr!("复制")),
@@ -13308,6 +13519,130 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     });
             });
         self.is_scroll_speed_open = open;
+    }
+
+    fn render_recent_tabs_dialog(&mut self, ctx: &egui::Context) {
+        if !self.is_recent_tabs_open {
+            return;
+        }
+
+        // 预计算显示数据
+        let mut display_items: Vec<(usize, String, String, String)> = Vec::new();
+        for (idx, entry) in self.recent_tabs.iter().enumerate() {
+            let (icon, title, subtitle) = match entry {
+                RecentTabEntry::Query { connection_id, database, title, .. } => {
+                    let sub = match (connection_id.as_ref(), database.as_ref()) {
+                        (Some(cid), Some(db)) => format!("{} / {}", self.connection_name(cid), db),
+                        (Some(cid), None) => self.connection_name(cid),
+                        _ => String::new(),
+                    };
+                    ("Q".to_string(), title.clone(), sub)
+                }
+                RecentTabEntry::Table { connection_id, database, table_name, is_view, .. } => {
+                    let sub = format!("{} / {}", self.connection_name(connection_id), database.as_deref().unwrap_or(""));
+                    let icon = if *is_view { "V" } else { "T" };
+                    (icon.to_string(), table_name.clone(), sub)
+                }
+                RecentTabEntry::CreateTable { connection_id, database, .. } => {
+                    let sub = format!("{} / {}", self.connection_name(connection_id), database);
+                    ("+".to_string(), tr!("新建表").to_string(), sub)
+                }
+                RecentTabEntry::TableSummary { connection_id, database, title, .. } => {
+                    let sub = format!("{} / {}", self.connection_name(connection_id), database);
+                    ("S".to_string(), title.clone(), sub)
+                }
+            };
+            display_items.push((idx, icon, title, subtitle));
+        }
+
+        let mut pending_open_idx: Option<usize> = None;
+        let mut popup_rect: Option<egui::Rect> = None;
+
+        egui::Area::new(egui::Id::new("recent_tabs_popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(ctx.content_rect().center() - egui::vec2(250.0, 200.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(500.0);
+                        ui.set_max_height(400.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(tr!("最近打开的标签页"))
+                                    .size(self.theme.fonts.md)
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("✕").clicked() {
+                                    self.is_recent_tabs_open = false;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let palette = mac_ui_palette_from_ui(ui);
+                            for (idx, icon, title, subtitle) in &display_items {
+                                let frame_resp = egui::Frame::NONE
+                                    .fill(Color32::TRANSPARENT)
+                                    .inner_margin(egui::Margin::symmetric(4, 3))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(icon.as_str())
+                                                    .family(FontFamily::Monospace)
+                                                    .size(self.theme.fonts.lg)
+                                                    .color(ui.visuals().widgets.inactive.fg_stroke.color),
+                                            );
+                                            ui.vertical(|ui| {
+                                                ui.label(RichText::new(title.as_str()).size(self.theme.fonts.md));
+                                                if !subtitle.is_empty() {
+                                                    ui.label(
+                                                        RichText::new(subtitle.as_str())
+                                                            .size(self.theme.fonts.xs)
+                                                            .color(ui.visuals().weak_text_color()),
+                                                    );
+                                                }
+                                            });
+                                        });
+                                    });
+                                let row_rect = frame_resp.response.rect;
+                                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                let hovered = pointer_pos.map_or(false, |p| row_rect.contains(p));
+                                if hovered {
+                                    ui.painter().rect_filled(
+                                        row_rect,
+                                        egui::Rounding::same(3),
+                                        palette.selection_bg.gamma_multiply(0.3),
+                                    );
+                                }
+                                if frame_resp.response.interact(egui::Sense::click()).clicked() {
+                                    pending_open_idx = Some(*idx);
+                                }
+                            }
+                            if display_items.is_empty() {
+                                ui.label(
+                                    RichText::new(tr!("暂无最近标签页"))
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                            }
+                        });
+
+                        popup_rect = Some(ui.min_rect());
+                    });
+            });
+
+        self.recent_tabs_popup_rect = popup_rect;
+
+        if let Some(idx) = pending_open_idx {
+            if let Some(entry) = self.recent_tabs.get(idx).cloned() {
+                self.is_recent_tabs_open = false;
+                self.reopen_recent_tab(&entry);
+            }
+        }
     }
 
     fn start_update_download(&mut self, info: &UpdateInfo) {
@@ -13813,6 +14148,22 @@ impl eframe::App for DesktopApp {
 
         let palette = mac_sidebar_palette(ctx.style().visuals.dark_mode, self.dark_variant, self.light_variant);
         let half_screen = ctx.viewport_rect().width() / 2.0;
+        // 最近标签页弹窗：ESC 或点击外部关闭（在其他 ESC 处理之前）
+        if self.is_recent_tabs_open {
+            let escape = ctx.input_mut(|i| i.key_pressed(egui::Key::Escape));
+            let clicked_outside = self.recent_tabs_popup_rect
+                .map(|rect| {
+                    ctx.input_mut(|i| {
+                        i.pointer.any_released()
+                            && !rect.contains(i.pointer.latest_pos().unwrap_or(egui::Pos2::ZERO))
+                    })
+                })
+                .unwrap_or(false);
+            if escape || clicked_outside {
+                self.is_recent_tabs_open = false;
+            }
+        }
+
         // 全局预消费 Enter/Esc：仅在侧边栏持有焦点（且搜索框无焦点）时才预消费，
         // 否则让 TextEdit (如 SQL 编辑器、侧边栏搜索框) 正常接收 Enter。
         let sidebar_focused = (self.sidebar_has_focus && !self.search_field_focused)
@@ -14251,12 +14602,22 @@ impl eframe::App for DesktopApp {
         if refresh_active_workspace {
             self.refresh_active_workspace();
         }
-        // Cmd+E: EXPLAIN current query
-        let explain_current = ctx.input_mut(|input| {
+        // Cmd+E: 最近打开的标签页
+        let recent_tabs_shortcut = ctx.input_mut(|input| {
             input.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::COMMAND,
                 egui::Key::E,
-            )) || (input.modifiers.command && input.key_pressed(egui::Key::E))
+            )) || (input.modifiers.command && !input.modifiers.shift && input.key_pressed(egui::Key::E))
+        });
+        if recent_tabs_shortcut {
+            self.is_recent_tabs_open = !self.is_recent_tabs_open;
+        }
+        // Cmd+Shift+E: EXPLAIN current query
+        let explain_current = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+                egui::Key::E,
+            )) || (input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::E))
         });
         if explain_current {
             if let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) {
@@ -14490,6 +14851,7 @@ impl eframe::App for DesktopApp {
         self.render_shortcuts_dialog(ctx);
         self.render_log_window(ctx);
         self.render_scroll_speed_dialog(ctx);
+        self.render_recent_tabs_dialog(ctx);
 
         // Cmd+D: new query tab (优先使用侧栏选中节点的上下文)
         let new_query = ctx.input_mut(|input| {
@@ -14613,6 +14975,9 @@ impl eframe::App for DesktopApp {
         let _ = self
             .services
             .save_ui_state("scroll_speed", &format!("{:.1}", self.scroll_speed));
+        if let Ok(json) = serde_json::to_string(&self.recent_tabs) {
+            let _ = self.services.save_ui_state("recent_tabs", &json);
+        }
     }
 }
 
