@@ -403,14 +403,16 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
         }),
         WorkspaceTab::Dashboard => None,
         WorkspaceTab::SlowQuery(_) => None,
+        _ => None,
     }
 }
 
 fn recent_tab_matches(a: &RecentTabEntry, b: &RecentTabEntry) -> bool {
     match (a, b) {
-        (RecentTabEntry::Query { connection_id: a_conn, database: a_db, title: a_title, saved_query_id: a_sqid, .. },
-         RecentTabEntry::Query { connection_id: b_conn, database: b_db, title: b_title, saved_query_id: b_sqid, .. }) =>
-            a_sqid == b_sqid && (a_sqid.is_some() || (a_conn == b_conn && a_db == b_db && a_title == b_title)),
+        (RecentTabEntry::Query { connection_id: a_conn, database: a_db, title: a_title, saved_query_id: a_sqid, sql: a_sql },
+         RecentTabEntry::Query { connection_id: b_conn, database: b_db, title: b_title, saved_query_id: b_sqid, sql: b_sql }) =>
+            if a_sqid.is_some() { a_sqid == b_sqid }
+            else { a_conn == b_conn && a_db == b_db && a_sql == b_sql },
         (RecentTabEntry::Table { connection_id: a_conn, database: a_db, schema: a_schema, table_name: a_tbl, .. },
          RecentTabEntry::Table { connection_id: b_conn, database: b_db, schema: b_schema, table_name: b_tbl, .. }) =>
             a_conn == b_conn && a_db == b_db && a_schema == b_schema && a_tbl == b_tbl,
@@ -1915,6 +1917,7 @@ impl DesktopApp {
             } else if event.id == "标签页前进" {
                 self.tab_forward();
             } else if event.id == "最近打开的标签页" {
+                self.record_recent_tab();
                 self.is_recent_tabs_open = true;
             } else if event.id == "滚动速度" {
                 self.is_scroll_speed_open = true;
@@ -3927,15 +3930,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if new_tab >= self.tabs.len() || new_tab == self.active_tab {
             return;
         }
+        self.record_recent_tab();
         self.tab_back_stack.push(self.active_tab);
         self.tab_forward_stack.clear();
         self.active_tab = new_tab;
-        self.record_recent_tab();
     }
 
     fn tab_back(&mut self) {
         if let Some(prev) = self.tab_back_stack.pop() {
             if prev < self.tabs.len() {
+                self.record_recent_tab();
                 self.tab_forward_stack.push(self.active_tab);
                 self.active_tab = prev;
             }
@@ -3945,6 +3949,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     fn tab_forward(&mut self) {
         if let Some(next) = self.tab_forward_stack.pop() {
             if next < self.tabs.len() {
+                self.record_recent_tab();
                 self.tab_back_stack.push(self.active_tab);
                 self.active_tab = next;
             }
@@ -3955,7 +3960,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if index >= self.tabs.len() {
             return;
         }
-
+        if index == self.active_tab {
+            self.record_recent_tab();
+        }
         self.tabs.remove(index);
         self.tab_back_stack.retain(|i| *i != index);
         self.tab_back_stack.iter_mut().for_each(|i| { if *i > index { *i -= 1; } });
@@ -4663,6 +4670,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.close_menu();
                     }
                     if ui.button(tr!("最近打开的标签页")).clicked() {
+                        self.record_recent_tab();
                         self.is_recent_tabs_open = true;
                         ui.close_menu();
                     }
@@ -15643,6 +15651,9 @@ impl eframe::App for DesktopApp {
             )) || (input.modifiers.command && !input.modifiers.shift && input.key_pressed(egui::Key::E))
         });
         if recent_tabs_shortcut {
+            if !self.is_recent_tabs_open {
+                self.record_recent_tab();
+            }
             self.is_recent_tabs_open = !self.is_recent_tabs_open;
         }
         // Cmd+Shift+E: EXPLAIN current query
