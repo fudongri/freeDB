@@ -376,7 +376,7 @@ enum RecentTabEntry {
 
 fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
     match tab {
-        WorkspaceTab::Query(t) => Some(RecentTabEntry::Query {
+        WorkspaceTab::Query(t) if !t.sql.trim().is_empty() => Some(RecentTabEntry::Query {
             connection_id: t.connection_id.clone(),
             database: t.database.clone(),
             title: t.title.clone(),
@@ -1488,6 +1488,11 @@ impl DesktopApp {
                 }
             }
         }
+        // 移除空 SQL 的查询条目
+        app.recent_tabs.retain(|e| match e {
+            RecentTabEntry::Query { sql, .. } => !sql.trim().is_empty(),
+            _ => true,
+        });
 
         // 启动后台更新检查
         {
