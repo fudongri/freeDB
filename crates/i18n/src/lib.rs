@@ -422,6 +422,30 @@ fn en(key: &'static str) -> &'static str {
         // ── driver-postgres.rs ──
         "PostgreSQL 表格编辑将在后续迭代中补全" => "PostgreSQL table editing will be available in a future release",
 
+        // ── app.rs 慢查询分析 ──
+        "导入日志文件" => "Import Log File",
+        "日志文件" => "Log Files",
+        "解析失败" => "Parse failed",
+        "读取文件失败" => "Failed to read file",
+        "聚合统计" => "Aggregated Stats",
+        "进程列表" => "Process List",
+        "原始日志条目" => "Raw Log Entries",
+        "次数" => "Count",
+        "总耗时" => "Total Time",
+        "均耗时" => "Avg Time",
+        "最大耗时" => "Max Time",
+        "总耗时(s)" => "Total(s)",
+        "均耗时(s)" => "Avg(s)",
+        "最大耗时(s)" => "Max(s)",
+        "示例 SQL:" => "Example SQL:",
+        "点击「SHOW PROCESSLIST」查看当前进程" => "Click SHOW PROCESSLIST to view processes",
+        "点击「导入日志文件」加载 MySQL 慢查询日志" => "Click Import Log File to load MySQL slow query log",
+        "无日志数据，请先导入文件" => "No log data, import a file first",
+        "共" => "Total",
+        "查询耗时(s)" => "Query Time(s)",
+        "发送行" => "Rows Sent",
+        "扫描行" => "Rows Exam",
+
         // ── driver-mongodb.rs ──
         "MongoDB 表格编辑将在后续迭代中补全" => "MongoDB collection editing will be available in a future release",
         "MongoDB 不支持重命名数据库" => "MongoDB does not support renaming databases",
