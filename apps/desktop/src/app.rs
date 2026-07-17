@@ -5976,7 +5976,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     },
                                                     WorkspaceTab::Dashboard => ("Dashboard", "◉"),
                                                     WorkspaceTab::TableSummary(tab) => (tab.title.as_str(), "☰"),
-                                                    WorkspaceTab::SlowQuery(_) => ("慢查询分析", "⏱"),
+                                                    WorkspaceTab::SlowQuery(_) => (tr!("慢查询分析"), "⏱"),
                                                 };
                                                 let interaction = tab_button(
                                                     ui, index, icon, title, self.active_tab == index,
