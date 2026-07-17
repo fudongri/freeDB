@@ -245,6 +245,19 @@ pub struct TableDefinition {
     pub charset: Option<String>,
 }
 
+/// SHOW PROCESSLIST 结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub id: u64,
+    pub user: String,
+    pub host: String,
+    pub db: Option<String>,
+    pub command: String,
+    pub time_secs: u64,
+    pub state: Option<String>,
+    pub info: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryExecution {
     pub connection_id: String,

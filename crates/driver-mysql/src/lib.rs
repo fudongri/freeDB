@@ -465,6 +465,30 @@ impl DatabaseDriver for MySqlDriver {
 
         Ok(summaries)
     }
+
+    async fn show_processlist(
+        &self,
+        handle: &mut ConnectionHandle,
+    ) -> AppResult<Vec<core_domain::ProcessInfo>> {
+        let conn = mysql_conn_mut(handle)?;
+        let sql = "SHOW FULL PROCESSLIST";
+        let rows: Vec<Row> = conn.query(sql).await.map_err(map_mysql_error)?;
+        let mut result = Vec::new();
+        for row in rows {
+            let id: u64 = row.get::<u64, _>(0).unwrap_or(0);
+            let user: String = row.get::<String, _>(1).unwrap_or_default();
+            let host: String = row.get::<String, _>(2).unwrap_or_default();
+            let db: Option<String> = row.get::<Option<String>, _>(3).flatten();
+            let command: String = row.get::<String, _>(4).unwrap_or_default();
+            let time_secs: u64 = row.get::<u64, _>(5).unwrap_or(0);
+            let state: Option<String> = row.get::<Option<String>, _>(6).flatten();
+            let info: Option<String> = row.get::<Option<String>, _>(7).flatten();
+            result.push(core_domain::ProcessInfo {
+                id, user, host, db, command, time_secs, state, info,
+            });
+        }
+        Ok(result)
+    }
 }
 
 // ── helpers ──

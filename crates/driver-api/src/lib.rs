@@ -180,4 +180,12 @@ pub trait DatabaseDriver: Send + Sync {
     ) -> AppResult<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>> {
         Ok(None)
     }
+
+    /// 获取当前服务器进程列表（SHOW PROCESSLIST）。默认不支持。
+    async fn show_processlist(
+        &self,
+        _handle: &mut ConnectionHandle,
+    ) -> AppResult<Vec<core_domain::ProcessInfo>> {
+        Err(core_domain::AppError::Unsupported("该数据库不支持 SHOW PROCESSLIST".into()))
+    }
 }
