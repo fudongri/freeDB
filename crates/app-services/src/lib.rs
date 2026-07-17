@@ -385,6 +385,15 @@ impl AppServices {
             .map_err(into_anyhow)
     }
 
+    pub async fn show_processlist(&self, connection_id: &str) -> Result<Vec<core_domain::ProcessInfo>> {
+        let profile = self.require_connection(connection_id)?;
+        let password = self.require_saved_password(connection_id)?;
+        self.session_manager
+            .show_processlist(&profile, &password)
+            .await
+            .map_err(into_anyhow)
+    }
+
     pub fn list_query_history(&self, connection_id: &str, limit: usize) -> Result<Vec<history_store::HistoryEntry>> {
         Ok(self
             .history_store

@@ -319,6 +319,15 @@ impl SessionManager {
         with_pool!(self, profile, password, db, h, d => d.dump_table_all_data(h, table))
     }
 
+    pub async fn show_processlist(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+    ) -> AppResult<Vec<core_domain::ProcessInfo>> {
+        let db = profile.default_database.as_deref();
+        with_pool!(self, profile, password, db, h, d => d.show_processlist(h))
+    }
+
     // ── DDL 操作 ──
 
     pub async fn create_database(
