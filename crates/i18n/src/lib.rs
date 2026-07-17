@@ -445,6 +445,12 @@ fn en(key: &'static str) -> &'static str {
         "查询耗时(s)" => "Query Time(s)",
         "发送行" => "Rows Sent",
         "扫描行" => "Rows Exam",
+        "扫描行数" => "Rows Examined",
+        "SQL 指纹" => "SQL Fingerprint",
+        "首次出现" => "First Seen",
+        "最后出现" => "Last Seen",
+        "未选择连接" => "No connection selected",
+        "发送行数" => "Rows Sent",
 
         // ── driver-mongodb.rs ──
         "MongoDB 表格编辑将在后续迭代中补全" => "MongoDB collection editing will be available in a future release",
