@@ -115,6 +115,7 @@ pub struct DesktopApp {
     pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
     pending_table_summary: Option<Receiver<TableSummaryLoadResult>>,
     pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
+    pending_file_load: Option<Receiver<FileLoadResult>>,
     generate_data_receiver: Option<Receiver<GenerateDataEvent>>,
     generate_data_cancel: Option<Arc<AtomicBool>>,
     pending_query_definition: Option<Receiver<QueryDefinitionLoadResult>>,
@@ -292,7 +293,6 @@ enum WorkspaceTab {
     CreateTable(CreateTableState),
     TableSummary(TableSummaryTabState),
     Dashboard,
-    // TODO: Task 5 将替换为完整实现
     SlowQuery(SlowQueryTabState),
 }
 
@@ -317,6 +317,8 @@ struct SlowQueryTabState {
     loading_processlist: bool,
     /// 已解析文件路径（用于显示）
     loaded_file_path: Option<String>,
+    /// 是否正在加载文件
+    loading_file: bool,
 }
 
 impl Default for SlowQueryTabState {
@@ -331,6 +333,7 @@ impl Default for SlowQueryTabState {
             error_message: None,
             loading_processlist: false,
             loaded_file_path: None,
+            loading_file: false,
         }
     }
 }
@@ -354,6 +357,7 @@ impl SlowQueryBottomTab {
 }
 
 type ProcesslistLoadResult = Result<Vec<core_domain::ProcessInfo>, String>;
+type FileLoadResult = Result<(String, std::path::PathBuf), String>;
 
 const MAX_RECENT_TABS: usize = 50;
 
@@ -1402,6 +1406,7 @@ impl DesktopApp {
             pending_table_preview: None,
             pending_table_summary: None,
             pending_processlist: None,
+            pending_file_load: None,
             generate_data_receiver: None,
             generate_data_cancel: None,
             pending_query_definition: None,
@@ -1986,7 +1991,6 @@ impl DesktopApp {
                     }
                 }
             } else if event.id == "慢查询分析" {
-                // TODO: Task 5 将替换为 WorkspaceTab::SlowQuery(SlowQueryTabState::default())
                 self.tabs.push(WorkspaceTab::SlowQuery(SlowQueryTabState::default()));
                 self.active_tab = self.tabs.len() - 1;
             } else if event.id == "切换语言" {
@@ -2531,6 +2535,37 @@ impl DesktopApp {
                     match result {
                         Ok(list) => state.process_list = list,
                         Err(e) => state.error_message = Some(e),
+                    }
+                }
+            }
+        }
+
+        // 轮询文件加载异步结果
+        if let Some(ref mut rx) = self.pending_file_load {
+            if let Ok(result) = rx.try_recv() {
+                self.pending_file_load = None;
+                if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get_mut(self.active_tab) {
+                    state.loading_file = false;
+                    match result {
+                        Ok((content, path)) => {
+                            match slowlog_parser::parse_slow_log(&content) {
+                                Ok(entries) => {
+                                    let mut stats = slowlog_parser::aggregate(&entries);
+                                    slowlog_parser::sort_stats(&mut stats, state.sort_by);
+                                    state.aggregated_stats = stats;
+                                    state.raw_entries = entries;
+                                    state.loaded_file_path = Some(path.display().to_string());
+                                    state.error_message = None;
+                                    state.selected_agg_index = None;
+                                }
+                                Err(e) => {
+                                    state.error_message = Some(format!("{}: {}", tr!("解析失败"), e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            state.error_message = Some(e);
+                        }
                     }
                 }
             }
@@ -6999,6 +7034,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     } else {
                         Err(tr!("未选择连接").to_string())
                     };
+                    let _ = sender.send(result);
+                });
+            }
+            TabUiAction::LoadFile(path) => {
+                let (sender, receiver) = mpsc::channel();
+                self.pending_file_load = Some(receiver);
+                if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get_mut(self.active_tab) {
+                    state.loading_file = true;
+                    state.error_message = None;
+                }
+                self.runtime.spawn(async move {
+                    let result = std::fs::read_to_string(&path)
+                        .map(|content| (content, path))
+                        .map_err(|e| format!("{}: {}", tr!("读取文件失败"), e));
                     let _ = sender.send(result);
                 });
             }
@@ -14586,32 +14635,15 @@ fn render_slow_query_tab(
     // ── 工具栏 ──
     ui.horizontal(|ui| {
         // 导入日志文件按钮
-        if toolbar_button(ui, tr!("导入日志文件"), primary_button_style(&theme.colors, theme.fonts.md)).clicked() {
+        if state.loading_file {
+            ui.spinner();
+            ui.label(tr!("加载中..."));
+        } else if toolbar_button(ui, tr!("导入日志文件"), primary_button_style(&theme.colors, theme.fonts.md)).clicked() {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter(tr!("日志文件"), &["log", "txt", "slow"])
                 .pick_file()
             {
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        match slowlog_parser::parse_slow_log(&content) {
-                            Ok(entries) => {
-                                let mut stats = slowlog_parser::aggregate(&entries);
-                                slowlog_parser::sort_stats(&mut stats, state.sort_by);
-                                state.aggregated_stats = stats;
-                                state.raw_entries = entries;
-                                state.loaded_file_path = Some(path.display().to_string());
-                                state.error_message = None;
-                                state.selected_agg_index = None;
-                            }
-                            Err(e) => {
-                                state.error_message = Some(format!("{}: {}", tr!("解析失败"), e));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        state.error_message = Some(format!("{}: {}", tr!("读取文件失败"), e));
-                    }
-                }
+                action = TabUiAction::LoadFile(path);
             }
         }
 
@@ -16143,6 +16175,7 @@ enum TabUiAction {
     GenerateData,
     ReorderSavedQueries(Vec<(String, i32)>),
     RefreshProcesslist,
+    LoadFile(std::path::PathBuf),
 }
 
 #[derive(Clone)]

@@ -110,7 +110,7 @@ fn en(key: &'static str) -> &'static str {
         "设置" => "Settings",
         "工具" => "Tools",
         "慢查询分析" => "Slow Query Analysis",
-        "慢查询分析（开发中）" => "Slow Query Analysis (In Development)",
+
         "快捷键速查表" => "Shortcuts",
         "运行日志" => "Logs",
         "切换语言" => "Language",
@@ -289,6 +289,7 @@ fn en(key: &'static str) -> &'static str {
         "取消" => "Cancel",
         "筛选" => "Filter",
         "排序" => "Sort",
+        "排序:" => "Sort:",
         "启用" => "Enabled",
         "禁用" => "Disabled",
         "启用条件" => "Enable condition",
