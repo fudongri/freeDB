@@ -110,6 +110,7 @@ fn en(key: &'static str) -> &'static str {
         "设置" => "Settings",
         "工具" => "Tools",
         "慢查询分析" => "Slow Query Analysis",
+        "MySQL 慢查询分析" => "MySQL Slow Query Analysis",
 
         "快捷键速查表" => "Shortcuts",
         "运行日志" => "Logs",

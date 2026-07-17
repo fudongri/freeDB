@@ -132,7 +132,7 @@ fn main() -> eframe::Result<()> {
 
         // ── 工具 ──
         let tools_menu = muda::Submenu::new(&tr!("工具"), true);
-        let mi_slow_query = muda::MenuItem::with_id("慢查询分析", &tr!("慢查询分析"), true, None::<muda::accelerator::Accelerator>);
+        let mi_slow_query = muda::MenuItem::with_id("慢查询分析", &tr!("MySQL 慢查询分析"), true, None::<muda::accelerator::Accelerator>);
         tools_menu.append(&mi_slow_query).unwrap();
         menu.append(&tools_menu).unwrap();
 

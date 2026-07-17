@@ -2006,7 +2006,7 @@ impl DesktopApp {
                 if let Some(m) = &self.menu_view { m.set_text(tr!("查看")); }
                 if let Some(m) = &self.menu_settings { m.set_text(tr!("设置")); }
                 if let Some(m) = &self.menu_tools { m.set_text(tr!("工具")); }
-                if let Some(m) = &self.menu_slow_query { m.set_text(tr!("慢查询分析")); }
+                if let Some(m) = &self.menu_slow_query { m.set_text(tr!("MySQL 慢查询分析")); }
                 if let Some(m) = &self.menu_shortcuts { m.set_text(tr!("快捷键速查表")); }
                 if let Some(m) = &self.menu_log { m.set_text(tr!("运行日志")); }
                 if let Some(m) = &self.menu_tab_back { m.set_text(tr!("标签页后退")); }
@@ -6083,7 +6083,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     },
                                                     WorkspaceTab::Dashboard => ("Dashboard", "◉"),
                                                     WorkspaceTab::TableSummary(tab) => (tab.title.as_str(), "☰"),
-                                                    WorkspaceTab::SlowQuery(_) => (tr!("慢查询分析"), "⏱"),
+                                                    WorkspaceTab::SlowQuery(_) => (tr!("MySQL 慢查询分析"), "⏱"),
                                                 };
                                                 let interaction = tab_button(
                                                     ui, index, icon, title, self.active_tab == index,
@@ -6220,7 +6220,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 },
                 WorkspaceTab::Dashboard => ("Dashboard".to_string(), "◉"),
                 WorkspaceTab::TableSummary(tab) => (tab.title.clone(), "☰"),
-                WorkspaceTab::SlowQuery(_) => (tr!("慢查询分析").to_string(), "⏱"),
+                WorkspaceTab::SlowQuery(_) => (tr!("MySQL 慢查询分析").to_string(), "⏱"),
             };
 
             // 使用egui::Area绘制幽灵标题
