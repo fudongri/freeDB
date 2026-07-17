@@ -267,10 +267,15 @@ struct TableSummaryTabState {
     rename_edit: String,
     rename_focus_requested: bool,
     pending_stats: HashSet<String>,
-    visible_rows: HashSet<usize>,
     stats_loading: bool,
     stats_sender: Option<mpsc::Sender<(String, Result<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String>)>>,
     stats_receiver: Option<Arc<std::sync::Mutex<mpsc::Receiver<(String, Result<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String>)>>>>,
+    // 缓存：避免每帧重复过滤/排序
+    cached_sorted_indices: Vec<usize>,
+    cached_filter: String,
+    cached_sort_col: Option<usize>,
+    cached_sort_asc: bool,
+    cached_data_len: usize,
 }
 
 #[derive(Clone)]
@@ -4065,10 +4070,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     rename_edit: String::new(),
                     rename_focus_requested: false,
                     pending_stats: HashSet::new(),
-                    visible_rows: HashSet::new(),
                     stats_loading: false,
                     stats_sender: None,
                     stats_receiver: None,
+                    cached_sorted_indices: Vec::new(),
+                    cached_filter: String::new(),
+                    cached_sort_col: None,
+                    cached_sort_asc: true,
+                    cached_data_len: 0,
                 };
                 self.tabs.push(WorkspaceTab::TableSummary(state));
                 self.active_tab = self.tabs.len().saturating_sub(1);
@@ -5190,10 +5199,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         rename_edit: String::new(),
                         rename_focus_requested: false,
                         pending_stats: HashSet::new(),
-                        visible_rows: HashSet::new(),
                         stats_loading: false,
                         stats_sender: None,
                         stats_receiver: None,
+                        cached_sorted_indices: Vec::new(),
+                        cached_filter: String::new(),
+                        cached_sort_col: None,
+                        cached_sort_asc: true,
+                        cached_data_len: 0,
                     };
                     self.tabs.push(WorkspaceTab::TableSummary(state));
                     self.active_tab = self.tabs.len().saturating_sub(1);
@@ -6335,7 +6348,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             tab.loading = true;
                             tab.table_summaries.clear();
                             tab.pending_stats.clear();
-                            tab.visible_rows.clear();
                             tab.stats_loading = false;
                             tab.stats_sender = None;
                             tab.stats_receiver = None;
@@ -9715,55 +9727,64 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     ) -> TabUiAction {
         let palette = mac_ui_palette_from_ui(ui);
 
-        // 计算过滤后的行
-        let filtered_indices: Vec<usize> = if tab.search_filter.is_empty() {
-            (0..tab.table_summaries.len()).collect()
-        } else {
-            let q = tab.search_filter.to_lowercase();
-            tab.table_summaries.iter().enumerate()
-                .filter(|(_, s)| s.name.to_lowercase().contains(&q))
-                .map(|(i, _)| i)
-                .collect()
-        };
+        let cols = summary_table_columns(tab.database_kind);
 
-        // 排序：默认按表名升序
-        let mut sorted_indices = filtered_indices;
-        if let Some(sort_col) = tab.sort_column {
-            let cols = summary_table_columns(tab.database_kind);
-            let col_name = cols.get(sort_col).map(|c| c.0).unwrap_or_default();
-            sorted_indices.sort_by(|&a, &b| {
-                let sa = &tab.table_summaries[a];
-                let sb = &tab.table_summaries[b];
-                // 优先用原始数值排序
-                let (na, nb) = match col_name {
-                    "行数" | "文档数" => (sa.row_count.map(|v| v as f64), sb.row_count.map(|v| v as f64)),
-                    "总大小" => (sa.total_size.map(|v| v as f64), sb.total_size.map(|v| v as f64)),
-                    "数据大小" => (sa.data_size.map(|v| v as f64), sb.data_size.map(|v| v as f64)),
-                    "索引大小" => (sa.index_size.map(|v| v as f64), sb.index_size.map(|v| v as f64)),
-                    _ => {
-                        let va = summary_cell_value(sa, sort_col, tab.database_kind);
-                        let vb = summary_cell_value(sb, sort_col, tab.database_kind);
-                        let ord = va.cmp(&vb);
-                        return if tab.sort_ascending { ord } else { ord.reverse() };
-                    }
-                };
-                let ord = match (na, nb) {
-                    (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                };
-                if tab.sort_ascending { ord } else { ord.reverse() }
-            });
-        } else {
-            sorted_indices.sort_by(|&a, &b| {
-                tab.table_summaries[a].name.cmp(&tab.table_summaries[b].name)
-            });
+        // 仅在输入变化时重新过滤/排序，避免每帧 O(n) 分配
+        let filter_changed = tab.search_filter != tab.cached_filter;
+        let sort_changed = tab.sort_column != tab.cached_sort_col || tab.sort_ascending != tab.cached_sort_asc;
+        let data_changed = tab.table_summaries.len() != tab.cached_data_len;
+        if filter_changed || sort_changed || data_changed {
+            let filtered: Vec<usize> = if tab.search_filter.is_empty() {
+                (0..tab.table_summaries.len()).collect()
+            } else {
+                let q = tab.search_filter.to_lowercase();
+                tab.table_summaries.iter().enumerate()
+                    .filter(|(_, s)| s.name.to_lowercase().contains(&q))
+                    .map(|(i, _)| i)
+                    .collect()
+            };
+
+            let mut sorted = filtered;
+            if let Some(sort_col) = tab.sort_column {
+                let col_name = cols.get(sort_col).map(|c| c.0).unwrap_or_default();
+                sorted.sort_by(|&a, &b| {
+                    let sa = &tab.table_summaries[a];
+                    let sb = &tab.table_summaries[b];
+                    let (na, nb) = match col_name {
+                        "行数" | "文档数" => (sa.row_count.map(|v| v as f64), sb.row_count.map(|v| v as f64)),
+                        "总大小" => (sa.total_size.map(|v| v as f64), sb.total_size.map(|v| v as f64)),
+                        "数据大小" => (sa.data_size.map(|v| v as f64), sb.data_size.map(|v| v as f64)),
+                        "索引大小" => (sa.index_size.map(|v| v as f64), sb.index_size.map(|v| v as f64)),
+                        _ => {
+                            let va = summary_cell_value(sa, sort_col, &cols);
+                            let vb = summary_cell_value(sb, sort_col, &cols);
+                            let ord = va.cmp(&vb);
+                            return if tab.sort_ascending { ord } else { ord.reverse() };
+                        }
+                    };
+                    let ord = match (na, nb) {
+                        (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    };
+                    if tab.sort_ascending { ord } else { ord.reverse() }
+                });
+            } else {
+                sorted.sort_by(|&a, &b| {
+                    tab.table_summaries[a].name.cmp(&tab.table_summaries[b].name)
+                });
+            }
+            tab.cached_sorted_indices = sorted;
+            tab.cached_filter = tab.search_filter.clone();
+            tab.cached_sort_col = tab.sort_column;
+            tab.cached_sort_asc = tab.sort_ascending;
+            tab.cached_data_len = tab.table_summaries.len();
         }
+        let sorted_indices = tab.cached_sorted_indices.clone();
 
         let total = tab.table_summaries.len();
         let selected_count = tab.selected_indices.len();
-        let cols = summary_table_columns(tab.database_kind);
 
         // StripBuilder: toolbar(38) + content(rest) + status(26)
         StripBuilder::new(ui)
@@ -9841,7 +9862,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             }
 
                             // 外层水平 ScrollArea（与数据表格一致），TableBuilder 负责垂直滚动
-                            tab.visible_rows.clear();
                             egui::ScrollArea::horizontal()
                                 .id_salt(format!("ts-hscroll-{}", tab.id))
                                 .auto_shrink([false, false])
@@ -9854,7 +9874,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                             // 初始化列宽（首次使用估算值，之后由拖拽状态保持）
                             if tab.col_widths.len() != cols.len() {
-                                let estimated = estimate_summary_column_widths(&cols, &tab.table_summaries, tab.database_kind);
+                                let estimated = estimate_summary_column_widths(&cols, &tab.table_summaries);
                                 tab.col_widths = estimated;
                             }
 
@@ -9883,7 +9903,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             let row_count = sorted_indices.len();
 
                             // 提取到局部变量，供 header 闭包内使用（避免对 tab 的多层借用）
-                            let mut local_widths = tab.col_widths.clone();
+                            let mut local_widths = std::mem::take(&mut tab.col_widths);
                             let mut local_resize = tab.resize_drag.take();
 
                             table
@@ -9962,7 +9982,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         };
 
                                         body.row(28.0, |mut row| {
-                                            tab.visible_rows.insert(ri);
                                             for (col_idx, &(_, _, is_numeric)) in cols.iter().enumerate() {
                                                 row.col(|ui| {
                                                     let rect = ui.max_rect();
@@ -10030,7 +10049,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         inner.inner.response.on_hover_cursor(egui::CursorIcon::Text);
                                                     } else {
                                                     // 正常文本绘制
-                                                    let text = summary_cell_value(&tab.table_summaries[ri], col_idx, tab.database_kind);
+                                                    let text = summary_cell_value(&tab.table_summaries[ri], col_idx, &cols);
                                                     if text.is_empty() {
                                                         // 空值不绘制
                                                     } else {
@@ -10044,7 +10063,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         } else {
                                                             egui::FontId::new(fonts.base, egui::FontFamily::Proportional)
                                                         };
-                                                        let galley = ui.painter().layout_no_wrap(text.clone(), font_id, text_color);
+                                                        let galley = ui.painter().layout_no_wrap(text, font_id, text_color);
                                                         let text_pos = egui::pos2(
                                                             content_rect.left(),
                                                             content_rect.center().y - galley.size().y / 2.0,
@@ -20916,7 +20935,6 @@ fn summary_table_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)
 fn estimate_summary_column_widths(
     cols: &[(&str, f32, bool)],
     summaries: &[driver_api::TableSummary],
-    db_kind: DatabaseKind,
 ) -> Vec<f32> {
     cols.iter()
         .enumerate()
@@ -20925,7 +20943,7 @@ fn estimate_summary_column_widths(
             let body_w = summaries
                 .iter()
                 .take(300)
-                .map(|s| estimate_table_text_width(&summary_cell_value(s, col_idx, db_kind)) + 20.0)
+                .map(|s| estimate_table_text_width(&summary_cell_value(s, col_idx, cols)) + 20.0)
                 .fold(0.0, f32::max);
             let body_auto = body_w.clamp(88.0, 300.0);
             header_w.max(body_auto).max(88.0)
@@ -20933,8 +20951,7 @@ fn estimate_summary_column_widths(
         .collect()
 }
 
-fn summary_cell_value(summary: &driver_api::TableSummary, col_index: usize, db_kind: DatabaseKind) -> String {
-    let cols = summary_table_columns(db_kind);
+fn summary_cell_value(summary: &driver_api::TableSummary, col_index: usize, cols: &[(&str, f32, bool)]) -> String {
     let col_name = cols.get(col_index).map(|c| c.0).unwrap_or_default();
     match col_name {
         "表名" | "集合名" => summary.name.clone(),
