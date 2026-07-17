@@ -5080,10 +5080,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                     }
 
-                    if let Some(error) = status.last_error {
-                        ui.add_space(2.0);
-                        ui.small(RichText::new(error).color(palette.danger));
-                    }
                     ui.add_space(4.0);
                 }
 
@@ -11970,13 +11966,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     fn render_status_bar(&mut self, ui: &mut egui::Ui) {
         let palette = MacUiPalette::from(&self.theme);
         ui.horizontal_wrapped(|ui| {
-            let color = match self.status_level {
-                StatusLevel::Pending => palette.selection_text,
-                StatusLevel::Success => palette.success,
-                StatusLevel::Error => palette.danger,
-                StatusLevel::Normal => palette.weak_text,
-            };
-            ui.label(RichText::new(&self.status_message).color(color));
+            // 优先显示选中连接的 last_error
+            let error_text = self.selected_connection.as_ref().and_then(|conn_id| {
+                self.services.connection_status(conn_id).last_error
+            });
+            if let Some(error) = error_text {
+                ui.label(RichText::new(error).color(palette.danger));
+            } else {
+                let color = match self.status_level {
+                    StatusLevel::Pending => palette.selection_text,
+                    StatusLevel::Success => palette.success,
+                    StatusLevel::Error => palette.danger,
+                    StatusLevel::Normal => palette.weak_text,
+                };
+                ui.label(RichText::new(&self.status_message).color(color));
+            }
             if let Some(connection_id) = &self.selected_connection {
                 let conn_name = self.connection_name(connection_id);
                 ui.separator();
