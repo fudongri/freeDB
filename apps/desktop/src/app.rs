@@ -368,7 +368,7 @@ const MAX_RECENT_TABS: usize = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum RecentTabEntry {
-    Query { connection_id: Option<String>, database: Option<String>, title: String, sql: String },
+    Query { connection_id: Option<String>, database: Option<String>, title: String, sql: String, #[serde(default)] saved_query_id: Option<String> },
     Table { connection_id: String, database: Option<String>, schema: Option<String>, table_name: String, is_view: bool },
     CreateTable { connection_id: String, database: String, schema: Option<String> },
     TableSummary { connection_id: String, database: String, schema: Option<String>, title: String },
@@ -381,6 +381,7 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
             database: t.database.clone(),
             title: t.title.clone(),
             sql: t.sql.clone(),
+            saved_query_id: t.selected_saved_query_id.clone(),
         }),
         WorkspaceTab::Table(t) => Some(RecentTabEntry::Table {
             connection_id: t.table.connection_id.clone(),
@@ -407,9 +408,9 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
 
 fn recent_tab_matches(a: &RecentTabEntry, b: &RecentTabEntry) -> bool {
     match (a, b) {
-        (RecentTabEntry::Query { connection_id: a_conn, database: a_db, title: a_title, .. },
-         RecentTabEntry::Query { connection_id: b_conn, database: b_db, title: b_title, .. }) =>
-            a_conn == b_conn && a_db == b_db && a_title == b_title,
+        (RecentTabEntry::Query { connection_id: a_conn, database: a_db, title: a_title, saved_query_id: a_sqid, .. },
+         RecentTabEntry::Query { connection_id: b_conn, database: b_db, title: b_title, saved_query_id: b_sqid, .. }) =>
+            a_sqid == b_sqid && (a_sqid.is_some() || (a_conn == b_conn && a_db == b_db && a_title == b_title)),
         (RecentTabEntry::Table { connection_id: a_conn, database: a_db, schema: a_schema, table_name: a_tbl, .. },
          RecentTabEntry::Table { connection_id: b_conn, database: b_db, schema: b_schema, table_name: b_tbl, .. }) =>
             a_conn == b_conn && a_db == b_db && a_schema == b_schema && a_tbl == b_tbl,
@@ -1472,6 +1473,19 @@ impl DesktopApp {
         if let Ok(Some(json)) = app.services.load_ui_state("recent_tabs") {
             if let Ok(list) = serde_json::from_str::<Vec<RecentTabEntry>>(&json) {
                 app.recent_tabs = list;
+            }
+        }
+        // 修正旧数据：将 saved_query_id 为空但标题匹配的条目关联到已保存查询
+        if let Ok(all_saved) = app.services.list_all_saved_queries() {
+            for entry in app.recent_tabs.iter_mut() {
+                if let RecentTabEntry::Query { saved_query_id: sqid @ None, connection_id, title, .. } = entry {
+                    if title == "查询" { continue; }
+                    if let Some(matched) = all_saved.iter().find(|s| {
+                        s.title == *title && connection_id.as_deref() == Some(&s.connection_id)
+                    }) {
+                        *sqid = Some(matched.id.clone());
+                    }
+                }
             }
         }
 
@@ -3864,7 +3878,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.tabs.push(WorkspaceTab::Query(tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.scroll_tabs_to_end = true;
-        self.record_recent_tab();
     }
     fn new_query_from_selected_node(&mut self) {
         if let Some(node) = self.selected_sidebar_node() {
@@ -3902,6 +3915,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         } else {
             self.create_query_tab(self.selected_connection.clone(), None, None);
         }
+        self.record_recent_tab();
     }
 
     fn navigate_to_tab(&mut self, new_tab: usize) {
@@ -3973,8 +3987,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn reopen_recent_tab(&mut self, entry: &RecentTabEntry) {
         match entry {
-            RecentTabEntry::Query { connection_id, database, sql, .. } => {
+            RecentTabEntry::Query { connection_id, database, sql, title, saved_query_id, .. } => {
                 self.create_query_tab(connection_id.clone(), database.clone(), Some(sql.clone()));
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.last_mut() {
+                    // 按 saved_query_id 查找，或按标题回退（兼容旧数据）
+                    let matched = if let Some(sq_id) = saved_query_id {
+                        tab.saved_queries.iter().find(|e| &e.id == sq_id)
+                    } else if title != "查询" {
+                        tab.saved_queries.iter().find(|e| e.title == *title)
+                    } else {
+                        None
+                    };
+                    if let Some(entry) = matched {
+                        tab.title = entry.title.clone();
+                        tab.selected_saved_query_id = Some(entry.id.clone());
+                        tab.selected_saved_query_sql = Some(entry.sql_text.clone());
+                        tab.selected_saved_query_connection_id = Some(entry.connection_id.clone());
+                        tab.selected_saved_query_database = entry.database.clone();
+                    }
+                }
             }
             RecentTabEntry::Table { connection_id, database, schema, table_name, is_view } => {
                 let node = ExplorerNode {
@@ -5010,6 +5041,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 if menu_button_with_shortcut(ui, tr!("新建查询"), &format!("{}+D", MOD_KEY)) {
                                     let conn_id = connection.id.clone();
                                     self.create_query_tab(Some(conn_id), None, None);
+                                    self.record_recent_tab();
                                     ui.close();
                                 }
                                 if ui.button(tr!("编辑连接")).clicked() {
@@ -5693,6 +5725,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 db.or_else(|| Some(node.name.clone())),
                                 schema.map(|s| format!("-- Schema: {s}\n")),
                             );
+                            self.record_recent_tab();
                             ui.close();
                         }
                     }
@@ -5741,6 +5774,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 db,
                                 Some(sql),
                             );
+                            self.record_recent_tab();
                             ui.close();
                         }
                         let is_view = matches!(node.node_type, ExplorerNodeType::View);
@@ -6409,6 +6443,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             }
                             SummaryContextAction::NewQuery { connection_id, database, sql } => {
                                 self.create_query_tab(Some(connection_id), database, Some(sql));
+                                self.record_recent_tab();
                             }
                             SummaryContextAction::TriggerSqlDump { connection_id, database, schema, table, is_view, kind, include_data } => {
                                 self.trigger_sql_dump(connection_id, database, schema, Some(table), is_view, kind, include_data);
@@ -6963,6 +6998,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     format!("SELECT *\nFROM {from_clause}\nLIMIT 100;\n")
                 };
                 self.create_query_tab(Some(connection_id), database, Some(sql));
+                self.record_recent_tab();
             }
             TabUiAction::ExecuteStructureSql(sql) => {
                 let success = self.execute_active_table_mutation(sql, tr!("表结构已更新"));
@@ -6990,6 +7026,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     tab.saved_queries = saved_queries;
                     tab.all_saved_queries = all_saved_queries;
                 }
+                self.record_recent_tab();
             }
             TabUiAction::CreateTableExecute => {
                 self.execute_create_table();
