@@ -1322,6 +1322,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "slowlog-parser",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1440,6 +1441,7 @@ version = "1.1.2"
 dependencies = [
  "async-trait",
  "core-domain",
+ "i18n",
  "mongodb",
  "mysql_async",
  "tokio",
@@ -5276,6 +5278,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
 dependencies = [
  "version_check",
+]
+
+[[package]]
+name = "slowlog-parser"
+version = "1.1.2"
+dependencies = [
+ "regex",
 ]
 
 [[package]]
