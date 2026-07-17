@@ -14567,6 +14567,15 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn sort_by_label(sort: slowlog_parser::SortBy) -> &'static str {
+    match sort {
+        slowlog_parser::SortBy::Count => tr!("次数"),
+        slowlog_parser::SortBy::TotalTime => tr!("总耗时"),
+        slowlog_parser::SortBy::AvgTime => tr!("均耗时"),
+        slowlog_parser::SortBy::MaxTime => tr!("最大耗时"),
+    }
+}
+
 fn render_slow_query_tab(
     ui: &mut egui::Ui,
     state: &mut SlowQueryTabState,
@@ -14613,14 +14622,18 @@ fn render_slow_query_tab(
 
         // 排序下拉
         ui.label(tr!("排序:"));
+        let old_sort = state.sort_by;
         egui::ComboBox::from_id_salt("slow_query_sort")
-            .selected_text(state.sort_by.label())
+            .selected_text(sort_by_label(state.sort_by))
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut state.sort_by, slowlog_parser::SortBy::Count, tr!("次数"));
                 ui.selectable_value(&mut state.sort_by, slowlog_parser::SortBy::TotalTime, tr!("总耗时"));
                 ui.selectable_value(&mut state.sort_by, slowlog_parser::SortBy::AvgTime, tr!("均耗时"));
                 ui.selectable_value(&mut state.sort_by, slowlog_parser::SortBy::MaxTime, tr!("最大耗时"));
             });
+        if state.sort_by != old_sort {
+            slowlog_parser::sort_stats(&mut state.aggregated_stats, state.sort_by);
+        }
 
         // 已加载文件路径显示
         if let Some(ref path) = state.loaded_file_path {

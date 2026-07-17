@@ -39,17 +39,6 @@ pub enum SortBy {
     MaxTime,
 }
 
-impl SortBy {
-    /// 返回排序维度的中文显示名
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Count => "次数",
-            Self::TotalTime => "总耗时",
-            Self::AvgTime => "均耗时",
-            Self::MaxTime => "最大耗时",
-        }
-    }
-}
 
 #[derive(Debug)]
 pub enum SlowLogError {
