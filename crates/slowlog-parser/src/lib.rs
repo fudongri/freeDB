@@ -1,5 +1,15 @@
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
+
+static TIME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^# Time:\s+(.+)$").unwrap());
+static USER_HOST_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^# User@Host:\s+(\S+)\s*@\s*(\S*)").unwrap());
+static STATS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^# Query_time:\s+([\d.]+)\s+Lock_time:\s+([\d.]+)\s+Rows_sent:\s+(\d+)\s+Rows_examined:\s+(\d+)").unwrap()
+});
+static SET_TIMESTAMP_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^SET timestamp=\d+;?\s*$").unwrap());
+static WHITESPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+static IN_CLAUSE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?\s*(?:,\s*\?)+").unwrap());
 
 /// 单条慢查询记录
 #[derive(Debug, Clone)]
@@ -55,13 +65,6 @@ impl std::fmt::Display for SlowLogError {
 
 /// 解析 MySQL slow query log 文本
 pub fn parse_slow_log(input: &str) -> Result<Vec<SlowQueryEntry>, SlowLogError> {
-    let time_re = Regex::new(r"^# Time:\s+(.+)$").unwrap();
-    let user_host_re = Regex::new(r"^# User@Host:\s+(\S+)\s*@\s*(\S*)").unwrap();
-    let stats_re = Regex::new(
-        r"^# Query_time:\s+([\d.]+)\s+Lock_time:\s+([\d.]+)\s+Rows_sent:\s+(\d+)\s+Rows_examined:\s+(\d+)"
-    ).unwrap();
-    let set_timestamp_re = Regex::new(r"^SET timestamp=\d+;?\s*$").unwrap();
-
     let mut entries = Vec::new();
     let mut current_time: Option<String> = None;
     let mut current_user: Option<String> = None;
@@ -72,7 +75,7 @@ pub fn parse_slow_log(input: &str) -> Result<Vec<SlowQueryEntry>, SlowLogError> 
 
     for line in input.lines() {
         // 新条目开始：遇到 # Time: 或 # User@Host:
-        if time_re.is_match(line) {
+        if TIME_RE.is_match(line) {
             // 保存上一条
             if in_entry && !sql_lines.is_empty() {
                 let sql = sql_lines.join("\n").trim().to_string();
@@ -91,7 +94,7 @@ pub fn parse_slow_log(input: &str) -> Result<Vec<SlowQueryEntry>, SlowLogError> 
                     }
                 }
             }
-            current_time = time_re.captures(line).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
+            current_time = TIME_RE.captures(line).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
             sql_lines.clear();
             in_entry = true;
             current_stats = None;
@@ -100,14 +103,14 @@ pub fn parse_slow_log(input: &str) -> Result<Vec<SlowQueryEntry>, SlowLogError> 
             continue;
         }
 
-        if let Some(caps) = user_host_re.captures(line) {
+        if let Some(caps) = USER_HOST_RE.captures(line) {
             current_user = caps.get(1).map(|m| m.as_str().to_string());
             current_host = caps.get(2).map(|m| m.as_str().to_string());
             in_entry = true;
             continue;
         }
 
-        if let Some(caps) = stats_re.captures(line) {
+        if let Some(caps) = STATS_RE.captures(line) {
             let qt = caps.get(1).unwrap().as_str().parse::<f64>().unwrap_or(0.0);
             let lt = caps.get(2).unwrap().as_str().parse::<f64>().unwrap_or(0.0);
             let rs = caps.get(3).unwrap().as_str().parse::<u64>().unwrap_or(0);
@@ -117,7 +120,7 @@ pub fn parse_slow_log(input: &str) -> Result<Vec<SlowQueryEntry>, SlowLogError> 
             continue;
         }
 
-        if set_timestamp_re.is_match(line) {
+        if SET_TIMESTAMP_RE.is_match(line) {
             continue;
         }
 
@@ -153,36 +156,41 @@ pub fn parse_slow_log(input: &str) -> Result<Vec<SlowQueryEntry>, SlowLogError> 
 
 /// SQL 指纹归一化：将具体参数替换为 ?
 pub fn normalize_sql(sql: &str) -> String {
-    let mut result = String::with_capacity(sql.len());
-    let chars: Vec<char> = sql.chars().collect();
-    let len = chars.len();
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut result = Vec::with_capacity(len);
     let mut i = 0;
+    let mut in_token = false;
 
     while i < len {
         // 单行注释
-        if i + 1 < len && chars[i] == '-' && chars[i + 1] == '-' {
+        if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
             break;
         }
         // 多行注释
-        if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
             i += 2;
             while i + 1 < len {
-                if chars[i] == '*' && chars[i + 1] == '/' {
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
                     i += 2;
                     break;
                 }
                 i += 1;
             }
+            in_token = false;
             continue;
         }
         // 单引号字符串
-        if chars[i] == '\'' {
-            result.push('?');
+        if bytes[i] == b'\'' {
+            if !in_token && !result.is_empty() && *result.last().unwrap() != b' ' && *result.last().unwrap() != b'(' && *result.last().unwrap() != b'[' {
+                result.push(b' ');
+            }
+            result.push(b'?');
             i += 1;
             while i < len {
-                if chars[i] == '\'' {
+                if bytes[i] == b'\'' {
                     i += 1;
-                    if i < len && chars[i] == '\'' {
+                    if i < len && bytes[i] == b'\'' {
                         i += 1;
                         continue;
                     }
@@ -190,16 +198,20 @@ pub fn normalize_sql(sql: &str) -> String {
                 }
                 i += 1;
             }
+            in_token = false;
             continue;
         }
         // 双引号字符串
-        if chars[i] == '"' {
-            result.push('?');
+        if bytes[i] == b'"' {
+            if !in_token && !result.is_empty() && *result.last().unwrap() != b' ' && *result.last().unwrap() != b'(' && *result.last().unwrap() != b'[' {
+                result.push(b' ');
+            }
+            result.push(b'?');
             i += 1;
             while i < len {
-                if chars[i] == '"' {
+                if bytes[i] == b'"' {
                     i += 1;
-                    if i < len && chars[i] == '"' {
+                    if i < len && bytes[i] == b'"' {
                         i += 1;
                         continue;
                     }
@@ -207,28 +219,66 @@ pub fn normalize_sql(sql: &str) -> String {
                 }
                 i += 1;
             }
+            in_token = false;
             continue;
         }
         // 数字
-        if chars[i].is_ascii_digit()
-            && (i == 0 || !chars[i - 1].is_ascii_alphanumeric() && chars[i - 1] != '_')
+        if bytes[i].is_ascii_digit()
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
         {
-            result.push('?');
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') {
+            if !in_token && !result.is_empty() && *result.last().unwrap() != b' ' && *result.last().unwrap() != b'(' && *result.last().unwrap() != b'[' {
+                result.push(b' ');
+            }
+            result.push(b'?');
+            while i < len && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
                 i += 1;
             }
+            in_token = false;
             continue;
         }
-        result.push(chars[i]);
+        // 空白：保留至多一个空格，退出 token
+        if bytes[i].is_ascii_whitespace() {
+            if !result.is_empty() && *result.last().unwrap() != b' ' {
+                result.push(b' ');
+            }
+            in_token = false;
+            i += 1;
+            continue;
+        }
+        // ASCII 标识符字符（字母、数字、下划线）
+        if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+            if !in_token && !result.is_empty() && *result.last().unwrap() != b' ' && *result.last().unwrap() != b'(' && *result.last().unwrap() != b'[' {
+                result.push(b' ');
+            }
+            result.push(bytes[i]);
+            in_token = true;
+            i += 1;
+            continue;
+        }
+        // 多字节 UTF-8 字符，原样保留
+        if bytes[i] > 0x7F {
+            let char_len = if bytes[i] & 0xE0 == 0xC0 { 2 }
+                else if bytes[i] & 0xF0 == 0xE0 { 3 }
+                else { 4 };
+            let end = (i + char_len).min(len);
+            result.extend_from_slice(&bytes[i..end]);
+            i = end;
+            in_token = false;
+            continue;
+        }
+        // 其他 ASCII 符号（括号、逗号、运算符等）
+        result.push(bytes[i]);
+        in_token = false;
         i += 1;
     }
 
     // 合并连续空白为单个空格
-    let re = Regex::new(r"\s+").unwrap();
-    let normalized = re.replace_all(result.trim(), " ");
+    let normalized = WHITESPACE_RE.replace_all(
+        std::str::from_utf8(&result).unwrap_or("").trim(),
+        " ",
+    );
     // 合并连续的 ? 为单个 ?（处理 IN 子句）
-    let re_q = Regex::new(r"\?\s*(?:,\s*\?)+").unwrap();
-    re_q.replace_all(&normalized, "?").to_string()
+    IN_CLAUSE_RE.replace_all(&normalized, "?").to_string()
 }
 
 /// 对慢查询条目进行指纹聚合

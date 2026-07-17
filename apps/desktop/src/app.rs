@@ -302,7 +302,7 @@ struct SlowQueryTabState {
     /// 聚合统计结果
     aggregated_stats: Vec<slowlog_parser::FingerprintStats>,
     /// 原始日志条目
-    raw_entries: Vec<slowlog_parser::SlowQueryEntry>,
+    raw_entries: Option<Vec<slowlog_parser::SlowQueryEntry>>,
     /// SHOW PROCESSLIST 结果
     process_list: Vec<core_domain::ProcessInfo>,
     /// 当前排序方式
@@ -325,7 +325,7 @@ impl Default for SlowQueryTabState {
     fn default() -> Self {
         Self {
             aggregated_stats: Vec::new(),
-            raw_entries: Vec::new(),
+            raw_entries: None,
             process_list: Vec::new(),
             sort_by: slowlog_parser::SortBy::TotalTime,
             active_bottom_tab: SlowQueryBottomTab::Aggregated,
@@ -357,7 +357,7 @@ impl SlowQueryBottomTab {
 }
 
 type ProcesslistLoadResult = Result<Vec<core_domain::ProcessInfo>, String>;
-type FileLoadResult = Result<(String, std::path::PathBuf), String>;
+type FileLoadResult = Result<(Vec<slowlog_parser::FingerprintStats>, Vec<slowlog_parser::SlowQueryEntry>, std::path::PathBuf), String>;
 
 const MAX_RECENT_TABS: usize = 50;
 
@@ -2547,21 +2547,12 @@ impl DesktopApp {
                 if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get_mut(self.active_tab) {
                     state.loading_file = false;
                     match result {
-                        Ok((content, path)) => {
-                            match slowlog_parser::parse_slow_log(&content) {
-                                Ok(entries) => {
-                                    let mut stats = slowlog_parser::aggregate(&entries);
-                                    slowlog_parser::sort_stats(&mut stats, state.sort_by);
-                                    state.aggregated_stats = stats;
-                                    state.raw_entries = entries;
-                                    state.loaded_file_path = Some(path.display().to_string());
-                                    state.error_message = None;
-                                    state.selected_agg_index = None;
-                                }
-                                Err(e) => {
-                                    state.error_message = Some(format!("{}: {}", tr!("解析失败"), e));
-                                }
-                            }
+                        Ok((stats, entries, path)) => {
+                            state.aggregated_stats = stats;
+                            state.raw_entries = Some(entries);
+                            state.loaded_file_path = Some(path.display().to_string());
+                            state.error_message = None;
+                            state.selected_agg_index = None;
                         }
                         Err(e) => {
                             state.error_message = Some(e);
@@ -7039,15 +7030,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 });
             }
             TabUiAction::LoadFile(path) => {
-                let (sender, receiver) = mpsc::channel();
-                self.pending_file_load = Some(receiver);
                 if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get_mut(self.active_tab) {
                     state.loading_file = true;
                     state.error_message = None;
                 }
-                self.runtime.spawn(async move {
+                let sort_by = if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get(self.active_tab) {
+                    state.sort_by
+                } else {
+                    slowlog_parser::SortBy::TotalTime
+                };
+                let (sender, receiver) = mpsc::channel();
+                self.pending_file_load = Some(receiver);
+                self.runtime.spawn_blocking(move || {
                     let result = std::fs::read_to_string(&path)
-                        .map(|content| (content, path))
+                        .and_then(|content| {
+                            let entries = slowlog_parser::parse_slow_log(&content)
+                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+                            let mut stats = slowlog_parser::aggregate(&entries);
+                            slowlog_parser::sort_stats(&mut stats, sort_by);
+                            Ok((stats, entries, path))
+                        })
                         .map_err(|e| format!("{}: {}", tr!("读取文件失败"), e));
                     let _ = sender.send(result);
                 });
@@ -14632,83 +14634,108 @@ fn render_slow_query_tab(
     theme: &ui_theme::Theme,
 ) -> TabUiAction {
     let mut action = TabUiAction::None;
+    let palette = mac_ui_palette_from_ui(ui);
 
     // ── 工具栏 ──
-    ui.horizontal(|ui| {
-        // 导入日志文件按钮
-        if state.loading_file {
-            ui.spinner();
-            ui.label(tr!("加载中..."));
-        } else if toolbar_button(ui, tr!("导入日志文件"), primary_button_style(&theme.colors, theme.fonts.md)).clicked() {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter(tr!("日志文件"), &["log", "txt", "slow"])
-                .pick_file()
-            {
-                action = TabUiAction::LoadFile(path);
-            }
-        }
+    egui::Frame::new()
+        .fill(palette.toolbar_bg)
+        .stroke(Stroke::NONE)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // 导入日志文件按钮
+                if state.loading_file {
+                    ui.spinner();
+                    ui.label(RichText::new(tr!("加载中...")).color(palette.weak_text));
+                } else if toolbar_button(ui, tr!("导入日志文件"), primary_button_style(&theme.colors, theme.fonts.md)).clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(tr!("日志文件"), &["log", "txt", "slow"])
+                        .pick_file()
+                    {
+                        action = TabUiAction::LoadFile(path);
+                    }
+                }
 
-        // SHOW PROCESSLIST 按钮
-        if toolbar_button(ui, "SHOW PROCESSLIST", secondary_button_style(&theme.colors, theme.fonts.md)).clicked() {
-            action = TabUiAction::RefreshProcesslist;
-        }
+                // SHOW PROCESSLIST 按钮
+                if toolbar_button(ui, "SHOW PROCESSLIST", secondary_button_style(&theme.colors, theme.fonts.md)).clicked() {
+                    action = TabUiAction::RefreshProcesslist;
+                }
 
-        // 排序下拉
-        ui.label(tr!("排序:"));
-        let old_sort = state.sort_by;
-        egui::ComboBox::from_id_salt("slow_query_sort")
-            .selected_text(sort_by_label(state.sort_by))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.sort_by, slowlog_parser::SortBy::Count, tr!("次数"));
-                ui.selectable_value(&mut state.sort_by, slowlog_parser::SortBy::TotalTime, tr!("总耗时"));
-                ui.selectable_value(&mut state.sort_by, slowlog_parser::SortBy::AvgTime, tr!("均耗时"));
-                ui.selectable_value(&mut state.sort_by, slowlog_parser::SortBy::MaxTime, tr!("最大耗时"));
+                ui.separator();
+
+                // 排序下拉（与数据页筛选排序组件一致）
+                let sort_by_items: Vec<(&str, bool)> = vec![
+                    (tr!("次数"), state.sort_by == slowlog_parser::SortBy::Count),
+                    (tr!("总耗时"), state.sort_by == slowlog_parser::SortBy::TotalTime),
+                    (tr!("均耗时"), state.sort_by == slowlog_parser::SortBy::AvgTime),
+                    (tr!("最大耗时"), state.sort_by == slowlog_parser::SortBy::MaxTime),
+                ];
+                let old_sort = state.sort_by;
+                if let Some(sel) = toolbar_dropdown(
+                    ui,
+                    egui::Id::new("slow_query_sort_dropdown"),
+                    sort_by_label(state.sort_by),
+                    100.0,
+                    &sort_by_items,
+                ) {
+                    state.sort_by = match sel {
+                        0 => slowlog_parser::SortBy::Count,
+                        1 => slowlog_parser::SortBy::TotalTime,
+                        2 => slowlog_parser::SortBy::AvgTime,
+                        _ => slowlog_parser::SortBy::MaxTime,
+                    };
+                }
+                if state.sort_by != old_sort {
+                    slowlog_parser::sort_stats(&mut state.aggregated_stats, state.sort_by);
+                }
+
+                // 已加载文件路径显示
+                if let Some(ref path) = state.loaded_file_path {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(path.as_str()).small().color(palette.weak_text));
+                    });
+                }
             });
-        if state.sort_by != old_sort {
-            slowlog_parser::sort_stats(&mut state.aggregated_stats, state.sort_by);
-        }
-
-        // 已加载文件路径显示
-        if let Some(ref path) = state.loaded_file_path {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(path.as_str()).small());
-            });
-        }
-    });
+        });
 
     // 错误消息
     if let Some(ref err) = state.error_message {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(err.as_str()).color(egui::Color32::from_rgb(255, 80, 80)));
+            ui.label(RichText::new(err.as_str()).color(palette.danger));
         });
     }
 
-    ui.separator();
-
     // ── 底部 Tab 切换 ──
-    ui.horizontal(|ui| {
-        for tab in [SlowQueryBottomTab::Aggregated, SlowQueryBottomTab::ProcessList, SlowQueryBottomTab::RawEntries] {
-            let selected = state.active_bottom_tab == tab;
-            if ui.selectable_label(selected, tab.label()).clicked() {
-                state.active_bottom_tab = tab;
-            }
-        }
-    });
+    egui::Frame::new()
+        .fill(palette.toolbar_bg)
+        .stroke(Stroke::NONE)
+        .inner_margin(egui::Margin::symmetric(8, 8))
+        .corner_radius(palette.radius_sm)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for tab in [SlowQueryBottomTab::Aggregated, SlowQueryBottomTab::ProcessList, SlowQueryBottomTab::RawEntries] {
+                    let selected = state.active_bottom_tab == tab;
+                    if segment_button(ui, tab.label(), selected).clicked() {
+                        state.active_bottom_tab = tab;
+                    }
+                }
+            });
+        });
 
-    ui.separator();
+    ui.add_space(4.0);
 
     // ── 子面板内容 ──
     let available = ui.available_height();
     egui::ScrollArea::vertical().max_height(available).show(ui, |ui| {
         match state.active_bottom_tab {
             SlowQueryBottomTab::Aggregated => {
-                render_aggregated_tab(ui, state);
+                render_aggregated_tab(ui, state, &palette);
             }
             SlowQueryBottomTab::ProcessList => {
-                render_processlist_tab(ui, state);
+                render_processlist_tab(ui, state, &palette);
             }
             SlowQueryBottomTab::RawEntries => {
-                render_raw_entries_tab(ui, state);
+                render_raw_entries_tab(ui, state, &palette);
             }
         }
     });
@@ -14716,10 +14743,10 @@ fn render_slow_query_tab(
     action
 }
 
-fn render_aggregated_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState) {
+fn render_aggregated_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, palette: &MacUiPalette) {
     if state.aggregated_stats.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(tr!("点击「导入日志文件」加载 MySQL 慢查询日志"));
+            ui.label(RichText::new(tr!("点击「导入日志文件」加载 MySQL 慢查询日志")).color(palette.weak_text));
         });
         return;
     }
@@ -14735,35 +14762,35 @@ fn render_aggregated_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState) {
         .column(egui_extras::Column::auto().at_least(80.0))
         .column(egui_extras::Column::remainder().at_least(200.0));
 
-    table.header(20.0, |mut header| {
-        header.col(|ui| { ui.label(tr!("次数")); });
-        header.col(|ui| { ui.label(tr!("总耗时(s)")); });
-        header.col(|ui| { ui.label(tr!("均耗时(s)")); });
-        header.col(|ui| { ui.label(tr!("最大耗时(s)")); });
-        header.col(|ui| { ui.label(tr!("扫描行数")); });
-        header.col(|ui| { ui.label(tr!("SQL 指纹")); });
+    let header_labels = [tr!("次数"), tr!("总耗时(s)"), tr!("均耗时(s)"), tr!("最大耗时(s)"), tr!("扫描行数"), tr!("SQL 指纹")];
+    table.header(30.0, |mut header| {
+        for label in &header_labels {
+            header.col(|ui| {
+                let rect = ui.max_rect();
+                ui.painter().rect_filled(rect, 0.0, palette.card_bg);
+                ui.label(RichText::new(*label).size(palette.fonts.md).color(palette.text).strong());
+            });
+        }
     }).body(|body| {
         let stats = &state.aggregated_stats;
-        body.rows(20.0, stats.len(), |mut row| {
+        body.rows(28.0, stats.len(), |mut row| {
             let idx = row.index();
             let s = &stats[idx];
             let selected = state.selected_agg_index == Some(idx);
             row.set_selected(selected);
 
-            row.col(|ui| { ui.label(s.count.to_string()); });
-            row.col(|ui| { ui.label(format!("{:.3}", s.total_time)); });
-            row.col(|ui| { ui.label(format!("{:.3}", s.avg_time)); });
-            row.col(|ui| { ui.label(format!("{:.3}", s.max_time)); });
-            row.col(|ui| { ui.label(s.total_rows_examined.to_string()); });
+            row.col(|ui| { ui.label(RichText::new(s.count.to_string()).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(format!("{:.3}", s.total_time)).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(format!("{:.3}", s.avg_time)).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(format!("{:.3}", s.max_time)).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(s.total_rows_examined.to_string()).color(palette.text)); });
             row.col(|ui| {
                 let text = if s.fingerprint.len() > 120 {
                     format!("{}…", &s.fingerprint[..120])
                 } else {
                     s.fingerprint.clone()
                 };
-                if ui.selectable_label(selected, &text).clicked() {
-                    // 切换选中并展开示例 SQL
-                }
+                ui.label(RichText::new(text).color(palette.text));
             });
 
             if row.response().clicked() {
@@ -14775,33 +14802,33 @@ fn render_aggregated_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState) {
     // 展开详情
     if let Some(idx) = state.selected_agg_index {
         if let Some(s) = state.aggregated_stats.get(idx) {
-            ui.separator();
-            ui.label(egui::RichText::new(tr!("示例 SQL:")).strong());
+            ui.add_space(8.0);
+            ui.label(RichText::new(tr!("示例 SQL:")).strong().color(palette.text));
             ui.add(egui::TextEdit::multiline(&mut s.example_sql.as_str())
                 .font(egui::TextStyle::Monospace)
                 .desired_rows(4)
                 .desired_width(f32::INFINITY));
             ui.horizontal(|ui| {
-                ui.label(format!("{}: {}", tr!("首次出现"), s.first_seen.as_deref().unwrap_or("-")));
-                ui.label(format!("{}: {}", tr!("最后出现"), s.last_seen.as_deref().unwrap_or("-")));
-                ui.label(format!("{}: {}", tr!("发送行数"), s.total_rows_sent));
+                ui.label(RichText::new(format!("{}: {}", tr!("首次出现"), s.first_seen.as_deref().unwrap_or("-"))).color(palette.weak_text));
+                ui.label(RichText::new(format!("{}: {}", tr!("最后出现"), s.last_seen.as_deref().unwrap_or("-"))).color(palette.weak_text));
+                ui.label(RichText::new(format!("{}: {}", tr!("发送行数"), s.total_rows_sent)).color(palette.weak_text));
             });
         }
     }
 }
 
-fn render_processlist_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState) {
+fn render_processlist_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, palette: &MacUiPalette) {
     if state.loading_processlist {
         ui.centered_and_justified(|ui| {
             ui.spinner();
-            ui.label(tr!("加载中..."));
+            ui.label(RichText::new(tr!("加载中...")).color(palette.weak_text));
         });
         return;
     }
 
     if state.process_list.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(tr!("点击「SHOW PROCESSLIST」查看当前进程"));
+            ui.label(RichText::new(tr!("点击「SHOW PROCESSLIST」查看当前进程")).color(palette.weak_text));
         });
         return;
     }
@@ -14819,60 +14846,62 @@ fn render_processlist_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState) {
         .column(egui_extras::Column::auto().at_least(80.0))
         .column(egui_extras::Column::remainder().at_least(200.0));
 
-    table.header(20.0, |mut header| {
-        header.col(|ui| { ui.label("ID"); });
-        header.col(|ui| { ui.label(tr!("用户")); });
-        header.col(|ui| { ui.label(tr!("主机")); });
-        header.col(|ui| { ui.label(tr!("数据库")); });
-        header.col(|ui| { ui.label(tr!("命令")); });
-        header.col(|ui| { ui.label(tr!("时间(s)")); });
-        header.col(|ui| { ui.label(tr!("状态")); });
-        header.col(|ui| { ui.label(tr!("SQL")); });
+    let header_labels = ["ID", tr!("用户"), tr!("主机"), tr!("数据库"), tr!("命令"), tr!("时间(s)"), tr!("状态"), tr!("SQL")];
+    table.header(30.0, |mut header| {
+        for label in &header_labels {
+            header.col(|ui| {
+                let rect = ui.max_rect();
+                ui.painter().rect_filled(rect, 0.0, palette.card_bg);
+                ui.label(RichText::new(*label).size(palette.fonts.md).color(palette.text).strong());
+            });
+        }
     }).body(|body| {
         let processes = &state.process_list;
-        body.rows(20.0, processes.len(), |mut row| {
+        body.rows(28.0, processes.len(), |mut row| {
             let idx = row.index();
             let p = &processes[idx];
             let is_slow = p.command != "Sleep" && p.time_secs > 10;
 
-            row.col(|ui| { ui.label(p.id.to_string()); });
-            row.col(|ui| { ui.label(&p.user); });
-            row.col(|ui| { ui.label(&p.host); });
-            row.col(|ui| { ui.label(p.db.as_deref().unwrap_or("-")); });
+            row.col(|ui| { ui.label(RichText::new(p.id.to_string()).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(&p.user).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(&p.host).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(p.db.as_deref().unwrap_or("-")).color(palette.text)); });
             row.col(|ui| {
-                let text = &p.command;
                 let color = if p.command == "Sleep" {
-                    egui::Color32::GRAY
+                    palette.weak_text
                 } else if is_slow {
-                    egui::Color32::from_rgb(255, 80, 80)
+                    palette.danger
                 } else {
-                    egui::Color32::from_rgb(80, 200, 120)
+                    palette.success
                 };
-                ui.label(egui::RichText::new(text.as_str()).color(color));
+                ui.label(RichText::new(p.command.as_str()).color(color));
             });
             row.col(|ui| {
-                let color = if is_slow { egui::Color32::from_rgb(255, 80, 80) } else { ui.visuals().text_color() };
-                ui.label(egui::RichText::new(p.time_secs.to_string()).color(color));
+                let color = if is_slow { palette.danger } else { palette.text };
+                ui.label(RichText::new(p.time_secs.to_string()).color(color));
             });
-            row.col(|ui| { ui.label(p.state.as_deref().unwrap_or("-")); });
+            row.col(|ui| { ui.label(RichText::new(p.state.as_deref().unwrap_or("-")).color(palette.text)); });
             row.col(|ui| {
                 let sql = p.info.as_deref().unwrap_or("-");
-                let display = if sql.len() > 100 { format!("{}…", &sql[..100]) } else { sql.to_string() };
-                ui.label(display);
+                let display = if sql.len() > 120 { format!("{}…", &sql[..120]) } else { sql.to_string() };
+                ui.label(RichText::new(display).color(palette.text));
             });
         });
     });
 }
 
-fn render_raw_entries_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState) {
-    if state.raw_entries.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.label(tr!("无日志数据，请先导入文件"));
-        });
-        return;
-    }
+fn render_raw_entries_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, palette: &MacUiPalette) {
+    let entries = match &state.raw_entries {
+        Some(e) if !e.is_empty() => e,
+        _ => {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new(tr!("无日志数据，请先导入文件")).color(palette.weak_text));
+            });
+            return;
+        }
+    };
 
-    ui.label(format!("{}: {}", tr!("共"), state.raw_entries.len()));
+    ui.label(RichText::new(format!("{}: {}", tr!("共"), entries.len())).color(palette.weak_text));
 
     let table = egui_extras::TableBuilder::new(ui)
         .striped(true)
@@ -14885,25 +14914,27 @@ fn render_raw_entries_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState) {
         .column(egui_extras::Column::auto().at_least(70.0))
         .column(egui_extras::Column::remainder().at_least(200.0));
 
-    table.header(20.0, |mut header| {
-        header.col(|ui| { ui.label(tr!("时间")); });
-        header.col(|ui| { ui.label(tr!("用户")); });
-        header.col(|ui| { ui.label(tr!("查询耗时(s)")); });
-        header.col(|ui| { ui.label(tr!("发送行")); });
-        header.col(|ui| { ui.label(tr!("扫描行")); });
-        header.col(|ui| { ui.label("SQL"); });
+    let header_labels = [tr!("时间"), tr!("用户"), tr!("查询耗时(s)"), tr!("发送行"), tr!("扫描行"), "SQL"];
+    table.header(30.0, |mut header| {
+        for label in &header_labels {
+            header.col(|ui| {
+                let rect = ui.max_rect();
+                ui.painter().rect_filled(rect, 0.0, palette.card_bg);
+                ui.label(RichText::new(*label).size(palette.fonts.md).color(palette.text).strong());
+            });
+        }
     }).body(|body| {
-        body.rows(18.0, state.raw_entries.len(), |mut row| {
+        body.rows(28.0, entries.len(), |mut row| {
             let idx = row.index();
-            let e = &state.raw_entries[idx];
-            row.col(|ui| { ui.label(e.timestamp.as_deref().unwrap_or("-")); });
-            row.col(|ui| { ui.label(e.user.as_deref().unwrap_or("-")); });
-            row.col(|ui| { ui.label(format!("{:.6}", e.query_time_secs)); });
-            row.col(|ui| { ui.label(e.rows_sent.to_string()); });
-            row.col(|ui| { ui.label(e.rows_examined.to_string()); });
+            let e = &entries[idx];
+            row.col(|ui| { ui.label(RichText::new(e.timestamp.as_deref().unwrap_or("-")).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(e.user.as_deref().unwrap_or("-")).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(format!("{:.6}", e.query_time_secs)).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(e.rows_sent.to_string()).color(palette.text)); });
+            row.col(|ui| { ui.label(RichText::new(e.rows_examined.to_string()).color(palette.text)); });
             row.col(|ui| {
-                let display = if e.sql.len() > 100 { format!("{}…", &e.sql[..100]) } else { e.sql.clone() };
-                ui.label(display);
+                let display = if e.sql.len() > 120 { format!("{}…", &e.sql[..120]) } else { e.sql.clone() };
+                ui.label(RichText::new(display).color(palette.text));
             });
         });
     });
