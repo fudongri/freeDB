@@ -432,6 +432,7 @@ fn en(key: &'static str) -> &'static str {
         "已创建集合: {}" => "Created collection: {}",
         "查询完成，返回 {} 条记录" => "Query returned {} record(s)",
         "EXPLAIN 不支持的方法: {}" => "EXPLAIN does not support method: {}",
+        "该数据库不支持 SHOW PROCESSLIST" => "SHOW PROCESSLIST is not supported for this database",
         "无法解析 MongoDB 命令。支持的语法: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])" => "Cannot parse MongoDB command. Supported syntax: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])",
         "insertOne 需要一个文档参数" => "insertOne requires a document parameter",
         "updateOne 需要 filter 和 update 两个参数" => "updateOne requires both filter and update parameters",

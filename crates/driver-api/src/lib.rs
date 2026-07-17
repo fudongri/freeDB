@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use core_domain::{AppResult, ConnectionProfile};
+use i18n::tr;
 
 /// 持久化连接句柄——被连接池缓存
 pub enum ConnectionHandle {
@@ -186,6 +187,6 @@ pub trait DatabaseDriver: Send + Sync {
         &self,
         _handle: &mut ConnectionHandle,
     ) -> AppResult<Vec<core_domain::ProcessInfo>> {
-        Err(core_domain::AppError::Unsupported("该数据库不支持 SHOW PROCESSLIST".into()))
+        Err(core_domain::AppError::Unsupported(tr!("该数据库不支持 SHOW PROCESSLIST").to_string()))
     }
 }
