@@ -14713,7 +14713,7 @@ fn render_slow_query_tab(
         .corner_radius(palette.radius_sm)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                for tab in [SlowQueryBottomTab::Aggregated, SlowQueryBottomTab::ProcessList, SlowQueryBottomTab::RawEntries] {
+                for tab in [SlowQueryBottomTab::Aggregated, SlowQueryBottomTab::RawEntries, SlowQueryBottomTab::ProcessList] {
                     let selected = state.active_bottom_tab == tab;
                     if segment_button(ui, tab.label(), selected).clicked() {
                         state.active_bottom_tab = tab;
