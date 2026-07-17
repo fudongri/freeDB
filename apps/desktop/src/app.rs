@@ -156,6 +156,8 @@ pub struct DesktopApp {
     menu_file: Option<muda::Submenu>,
     menu_view: Option<muda::Submenu>,
     menu_settings: Option<muda::Submenu>,
+    menu_tools: Option<muda::Submenu>,
+    menu_slow_query: Option<muda::MenuItem>,
     menu_shortcuts: Option<muda::MenuItem>,
     menu_log: Option<muda::MenuItem>,
     menu_lang: Option<muda::MenuItem>,
@@ -289,7 +291,12 @@ enum WorkspaceTab {
     CreateTable(CreateTableState),
     TableSummary(TableSummaryTabState),
     Dashboard,
+    // TODO: Task 5 将替换为完整实现
+    SlowQuery(SlowQueryTabState),
 }
+
+#[derive(Clone, Default)]
+struct SlowQueryTabState;
 
 const MAX_RECENT_TABS: usize = 50;
 
@@ -328,6 +335,7 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
             title: t.title.clone(),
         }),
         WorkspaceTab::Dashboard => None,
+        WorkspaceTab::SlowQuery(_) => None,
     }
 }
 
@@ -1226,6 +1234,8 @@ impl DesktopApp {
         menu_file: Option<muda::Submenu>,
         menu_view: Option<muda::Submenu>,
         menu_settings: Option<muda::Submenu>,
+        menu_tools: Option<muda::Submenu>,
+        menu_slow_query: Option<muda::MenuItem>,
         menu_shortcuts: Option<muda::MenuItem>,
         menu_log: Option<muda::MenuItem>,
         menu_lang: Option<muda::MenuItem>,
@@ -1376,6 +1386,8 @@ impl DesktopApp {
             menu_file,
             menu_view,
             menu_settings,
+            menu_tools,
+            menu_slow_query,
             menu_shortcuts,
             menu_log,
             menu_lang,
@@ -1915,6 +1927,10 @@ impl DesktopApp {
                         }
                     }
                 }
+            } else if event.id == "慢查询分析" {
+                // TODO: Task 5 将替换为 WorkspaceTab::SlowQuery(SlowQueryTabState::default())
+                self.tabs.push(WorkspaceTab::SlowQuery(SlowQueryTabState::default()));
+                self.active_tab = self.tabs.len() - 1;
             } else if event.id == "切换语言" {
                 let new_locale = match get_locale() {
                     Locale::ZhCn => Locale::En,
@@ -1927,6 +1943,8 @@ impl DesktopApp {
                 if let Some(m) = &self.menu_file { m.set_text(tr!("文件")); }
                 if let Some(m) = &self.menu_view { m.set_text(tr!("查看")); }
                 if let Some(m) = &self.menu_settings { m.set_text(tr!("设置")); }
+                if let Some(m) = &self.menu_tools { m.set_text(tr!("工具")); }
+                if let Some(m) = &self.menu_slow_query { m.set_text(tr!("慢查询分析")); }
                 if let Some(m) = &self.menu_shortcuts { m.set_text(tr!("快捷键速查表")); }
                 if let Some(m) = &self.menu_log { m.set_text(tr!("运行日志")); }
                 if let Some(m) = &self.menu_tab_back { m.set_text(tr!("标签页后退")); }
@@ -2633,6 +2651,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             WorkspaceTab::Dashboard => {}
             WorkspaceTab::CreateTable(_) => {}
+            WorkspaceTab::SlowQuery(_) => {}
             WorkspaceTab::TableSummary(tab) => {
                 tab.selected_indices.clear();
             }
@@ -2820,6 +2839,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             WorkspaceTab::CreateTable(_) => {}
             WorkspaceTab::Dashboard => {}
+            WorkspaceTab::SlowQuery(_) => {}
             WorkspaceTab::TableSummary(_) => {}
         }
     }
@@ -4229,7 +4249,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let result = match self.tabs.get(self.active_tab) {
             Some(WorkspaceTab::Query(tab)) => tab.result.clone(),
             Some(WorkspaceTab::Table(tab)) => tab.preview.clone(),
-            Some(WorkspaceTab::CreateTable(_)) | Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::TableSummary(_)) => None,
+            Some(WorkspaceTab::CreateTable(_)) | Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | Some(WorkspaceTab::TableSummary(_)) => None,
             None => None,
         };
         let Some(result) = result else {
@@ -4392,7 +4412,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 });
                 self.status_message = if tab.database_kind == DatabaseKind::MongoDb { tr!("正在刷新集合信息...").into() } else { tr!("正在刷新表信息...").into() };
             }
-            Some(WorkspaceTab::Dashboard) | None => {
+            Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | None => {
                 self.refresh_connections();
                 self.status_message = tr!("已刷新连接列表").into();
             }
@@ -5956,6 +5976,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     },
                                                     WorkspaceTab::Dashboard => ("Dashboard", "◉"),
                                                     WorkspaceTab::TableSummary(tab) => (tab.title.as_str(), "☰"),
+                                                    WorkspaceTab::SlowQuery(_) => ("慢查询分析", "⏱"),
                                                 };
                                                 let interaction = tab_button(
                                                     ui, index, icon, title, self.active_tab == index,
@@ -6092,6 +6113,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 },
                 WorkspaceTab::Dashboard => ("Dashboard".to_string(), "◉"),
                 WorkspaceTab::TableSummary(tab) => (tab.title.clone(), "☰"),
+                WorkspaceTab::SlowQuery(_) => (tr!("慢查询分析").to_string(), "⏱"),
             };
 
             // 使用egui::Area绘制幽灵标题
@@ -6200,6 +6222,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                         WorkspaceTab::TableSummary(tab) => {
                             Self::render_table_summary_tab(ui, tab, &self.theme.colors, &self.theme.fonts)
+                        }
+                        WorkspaceTab::SlowQuery(_) => {
+                            // TODO: Task 5 实现慢查询分析标签页渲染
+                            ui.centered_and_justified(|ui| {
+                                ui.label(tr!("慢查询分析（开发中）"));
+                            });
+                            TabUiAction::None
                         }
                     };
                     self.handle_tab_action(ui.ctx(), action);
@@ -17112,7 +17141,7 @@ fn render_result_table(
                                 for (col_idx, column) in display_columns.iter().enumerate() {
                                     row_ui.col(|ui| {
                                         let column_selected = selected_columns.contains(&col_idx);
-                                        let search_highlight = search.open && search.matches.iter().any(|&(r, c)| r == index && c == col_idx);
+                                        let search_highlight = search.open && search.match_set.contains(&(index, col_idx));
                                         let is_current_match = current_match_pos == Some((index, col_idx));
                                         table_body_cell(
                                             ui,
@@ -23063,30 +23092,31 @@ fn table_body_cell(
         };
         ui.painter().with_clip_rect(clipped_rect).galley(pos, galley, Color32::TRANSPARENT);
     } else {
-        // 可选中的 Label，替换原来的 painter().text()
-        let label = egui::Label::new(
-            egui::RichText::new(&display.text)
-                .size(palette.fonts.base)
-                .family(if display.monospace { FontFamily::Monospace } else { FontFamily::Proportional })
-                .color(display_color),
-        )
-        .selectable(true)
-        .truncate();
-        let mut child_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(clipped_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        ui.painter().with_clip_rect(clipped_rect).text(
+            match display.align {
+                TableCellAlign::Left => egui::pos2(clipped_rect.left(), rect.center().y),
+                TableCellAlign::Center => clipped_rect.center(),
+                TableCellAlign::Right => egui::pos2(clipped_rect.right(), rect.center().y),
+            },
+            match display.align {
+                TableCellAlign::Left => Align2::LEFT_CENTER,
+                TableCellAlign::Center => Align2::CENTER_CENTER,
+                TableCellAlign::Right => Align2::RIGHT_CENTER,
+            },
+            &display.text,
+            font_id,
+            display_color,
         );
-        let _ = child_ui.add(label);
     }
-    // hover 提示完整内容
-    let hover_text = match value {
-        QueryCellValue::Null => "(NULL)".to_string(),
-        QueryCellValue::Text(text) if text.is_empty() => String::new(),
-        QueryCellValue::Text(text) => text.clone(),
-    };
+    // hover 提示完整内容（仅截断时显示，避免每帧分配）
     let response = ui.allocate_rect(rect, egui::Sense::hover());
-    let _ = response.on_hover_text(hover_text);
+    match value {
+        QueryCellValue::Null => { let _ = response.on_hover_text("(NULL)"); }
+        QueryCellValue::Text(text) if !text.is_empty() && text.as_str() != display.text => {
+            let _ = response.on_hover_text(text.as_str());
+        }
+        _ => {}
+    }
 }
 
 fn table_text_cell(
