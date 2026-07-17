@@ -7025,6 +7025,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.pending_processlist = Some(receiver);
                 if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get_mut(self.active_tab) {
                     state.loading_processlist = true;
+                    state.active_bottom_tab = SlowQueryBottomTab::ProcessList;
                     state.error_message = None;
                 }
                 let connection_id = self.selected_connection.clone();
