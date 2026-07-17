@@ -15,6 +15,7 @@ members = [
     "crates/metadata-cache",
     "crates/secure-store",
     "crates/session-manager",
+    "crates/slowlog-parser",
     "crates/ui-theme",
 ]
 resolver = "2"
