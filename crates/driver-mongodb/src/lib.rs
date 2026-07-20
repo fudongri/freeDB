@@ -122,23 +122,33 @@ impl DatabaseDriver for MongoDbDriver {
             .ok_or_else(|| AppError::Validation("missing database".into()))?;
         let (client, _) = mongo_client_db(handle)?;
         let db = client.database(db_name);
-        let mut names = db
-            .list_collection_names()
+        // 用 list_collections() 代替 list_collection_names()，以区分集合和视图
+        let mut specs: Vec<_> = db
+            .list_collections()
+            .await
+            .map_err(map_mongo_error)?
+            .try_collect()
             .await
             .map_err(map_mongo_error)?;
-        names.sort();
-        Ok(names
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(specs
             .into_iter()
-            .map(|name| ExplorerNode {
-                id: format!("mongo-coll:{connection_id}:{db_name}:{name}"),
-                connection_id: connection_id.to_string(),
-                name: name.clone(),
-                node_type: ExplorerNodeType::Table,
-                parent_id: Some(parent.id.clone()),
-                database: Some(db_name.clone()),
-                schema: None,
-                expandable: false,
-                loaded: true,
+            .map(|spec| {
+                let node_type = match spec.collection_type {
+                    mongodb::results::CollectionType::View => ExplorerNodeType::View,
+                    _ => ExplorerNodeType::Table,
+                };
+                ExplorerNode {
+                    id: format!("mongo-coll:{connection_id}:{db_name}:{}", spec.name),
+                    connection_id: connection_id.to_string(),
+                    name: spec.name,
+                    node_type,
+                    parent_id: Some(parent.id.clone()),
+                    database: Some(db_name.clone()),
+                    schema: None,
+                    expandable: false,
+                    loaded: true,
+                }
             })
             .collect())
     }

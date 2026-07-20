@@ -141,9 +141,9 @@ impl DatabaseDriver for MySqlDriver {
             .ok()
             .and_then(|rows: Vec<Row>| rows.into_iter().next())
             .map(|row| {
-                let comment: Option<String> = row.get::<String, _>(0).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-                let engine: Option<String> = row.get::<String, _>(1).filter(|s| !s.is_empty());
-                let charset: Option<String> = row.get::<String, _>(2).filter(|s| !s.is_empty());
+                let comment: Option<String> = row.get::<Option<String>, _>(0).flatten().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                let engine: Option<String> = row.get::<Option<String>, _>(1).flatten().filter(|s| !s.is_empty());
+                let charset: Option<String> = row.get::<Option<String>, _>(2).flatten().filter(|s| !s.is_empty());
                 (comment, engine, charset)
             })
             .unwrap_or((None, None, None));
@@ -198,7 +198,7 @@ impl DatabaseDriver for MySqlDriver {
                 .map_err(map_mysql_error)
                 .ok()
                 .and_then(|rows: Vec<Row>| rows.into_iter().next())
-                .and_then(|row| row.get::<String, _>(1).or_else(|| row.get::<String, _>(0)))
+                .and_then(|row| row.get::<Option<String>, _>(1).flatten().or_else(|| row.get::<Option<String>, _>(0).flatten()))
         } else {
             let sql = format!(
                 "SHOW CREATE TABLE {}.{}",
@@ -210,7 +210,7 @@ impl DatabaseDriver for MySqlDriver {
                 .map_err(map_mysql_error)
                 .ok()
                 .and_then(|rows: Vec<Row>| rows.into_iter().next())
-                .and_then(|row| row.get::<String, _>(1).or_else(|| row.get::<String, _>(0)))
+                .and_then(|row| row.get::<Option<String>, _>(1).flatten().or_else(|| row.get::<Option<String>, _>(0).flatten()))
         };
         Ok(TableDefinition { columns, create_sql, table_comment, engine, charset })
     }
@@ -387,12 +387,12 @@ impl DatabaseDriver for MySqlDriver {
             .into_iter()
             .map(|row| {
                 let name: String = row.get::<String, _>(0).unwrap_or_default();
-                let engine: Option<String> = row.get(1);
-                let rows_est: Option<i64> = row.get(4);
-                let data_len: Option<i64> = row.get(6);
-                let index_len: Option<i64> = row.get(8);
-                let collation: Option<String> = row.get(14);
-                let comment: Option<String> = row.get(17);
+                let engine: Option<String> = row.get::<Option<String>, _>(1).flatten();
+                let rows_est: Option<i64> = row.get::<Option<i64>, _>(4).flatten();
+                let data_len: Option<i64> = row.get::<Option<i64>, _>(6).flatten();
+                let index_len: Option<i64> = row.get::<Option<i64>, _>(8).flatten();
+                let collation: Option<String> = row.get::<Option<String>, _>(14).flatten();
+                let comment: Option<String> = row.get::<Option<String>, _>(17).flatten();
                 let create_time: Option<String> = row
                     .get::<Option<mysql_async::Value>, _>(11)
                     .flatten()

@@ -112,8 +112,8 @@ pub struct DesktopApp {
     tab_forward_stack: Vec<usize>,
     database_cache: HashMap<String, Vec<String>>,
     pending_database_list: Option<Receiver<DatabaseListResult>>,
-    pending_table_preview: Option<Receiver<TablePreviewLoadResult>>,
-    pending_table_summary: Option<Receiver<TableSummaryLoadResult>>,
+    pending_table_preview: Option<(String, Receiver<TablePreviewLoadResult>)>,
+    pending_table_summary: Option<(String, Receiver<TableSummaryLoadResult>)>,
     pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
     pending_file_load: Option<Receiver<FileLoadResult>>,
     generate_data_receiver: Option<Receiver<GenerateDataEvent>>,
@@ -2401,7 +2401,7 @@ impl DesktopApp {
         }
 
         // Poll table preview results (async: open_table_tab)
-        if let Some(receiver) = self.pending_table_preview.take() {
+        if let Some((preview_tab_id, receiver)) = self.pending_table_preview.take() {
             match receiver.try_recv() {
                 Ok(message) => {
                     let mut cache_update: Option<(TableRef, bool, TableDefinition)> = None;
@@ -2517,16 +2517,23 @@ impl DesktopApp {
                     }
                 }
                 Err(TryRecvError::Empty) => {
-                    self.pending_table_preview = Some(receiver);
+                    self.pending_table_preview = Some((preview_tab_id, receiver));
                 }
                 Err(TryRecvError::Disconnected) => {
-                    // task dropped, ignore
+                    tracing::warn!(tab_id = %preview_tab_id, "表预览异步任务已断开");
+                    if let Some(WorkspaceTab::Table(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::Table(t) if t.id == preview_tab_id)
+                    }) {
+                        if tab.preview.is_none() && tab.error.is_none() {
+                            tab.error = Some(tr!("加载失败：任务异常终止").into());
+                        }
+                    }
                 }
             }
         }
 
         // Poll table summary results (async: OpenTableSummary)
-        if let Some(receiver) = self.pending_table_summary.take() {
+        if let Some((summary_tab_id, receiver)) = self.pending_table_summary.take() {
             match receiver.try_recv() {
                 Ok(message) => {
                     if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.iter_mut().find(|t| {
@@ -2547,9 +2554,18 @@ impl DesktopApp {
                     }
                 }
                 Err(TryRecvError::Empty) => {
-                    self.pending_table_summary = Some(receiver);
+                    self.pending_table_summary = Some((summary_tab_id, receiver));
                 }
-                Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Disconnected) => {
+                    tracing::warn!(tab_id = %summary_tab_id, "表汇总异步任务已断开");
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::TableSummary(ts) if ts.id == summary_tab_id)
+                    }) {
+                        tab.loading = false;
+                        self.status_message = tr!("加载失败：任务异常终止").into();
+                        self.status_level = StatusLevel::Error;
+                    }
+                }
             }
         }
 
@@ -3294,7 +3310,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
         let (sender, receiver) = mpsc::channel();
-        self.pending_table_preview = Some(receiver);
+        self.pending_table_preview = Some((tab_id.clone(), receiver));
         handle.spawn(async move {
             let t_ui = std::time::Instant::now();
             if load_data {
@@ -3796,7 +3812,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
         let (sender, receiver) = mpsc::channel();
-        self.pending_table_preview = Some(receiver);
+        self.pending_table_preview = Some((tab_id.clone(), receiver));
 
         // MongoDB 游标分页：无排序或按 _id 排序时使用 _id 游标，避免 skip() 性能问题
         let sort_active_clauses: Vec<_> = tab.preview_sort.clauses.iter().filter(|c| c.enabled && c.column.is_some()).collect();
@@ -4129,7 +4145,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let services = self.services.clone();
                 let handle = self.runtime.handle().clone();
                 let (sender, receiver) = mpsc::channel();
-                self.pending_table_summary = Some(receiver);
+                self.pending_table_summary = Some((tab_id.clone(), receiver));
                 let connection_id = connection_id.clone();
                 let database = database.clone();
                 let schema = schema.clone();
@@ -4552,7 +4568,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 let services = self.services.clone();
                 let handle = self.runtime.handle().clone();
                 let (sender, receiver) = mpsc::channel();
-                self.pending_table_summary = Some(receiver);
+                self.pending_table_summary = Some((tab_id.clone(), receiver));
                 handle.spawn(async move {
                     let result = services.load_tables_summary(&connection_id, &database, schema.as_deref()).await;
                     let _ = sender.send(TableSummaryLoadResult {
@@ -5257,7 +5273,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let services = self.services.clone();
                     let handle = self.runtime.handle().clone();
                     let (sender, receiver) = mpsc::channel();
-                    self.pending_table_summary = Some(receiver);
+                    self.pending_table_summary = Some((tab_id.clone(), receiver));
                     handle.spawn(async move {
                         let result = services.load_tables_summary(&connection_id, &database, schema.as_deref()).await;
                         let _ = sender.send(TableSummaryLoadResult {
@@ -6401,7 +6417,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             let services = self.services.clone();
                             let handle = self.runtime.handle().clone();
                             let (sender, receiver) = mpsc::channel();
-                            self.pending_table_summary = Some(receiver);
+                            self.pending_table_summary = Some((tab_id.clone(), receiver));
                             handle.spawn(async move {
                                 let result = services.load_tables_summary(&connection_id, &database, schema.as_deref()).await;
                                 let _ = sender.send(TableSummaryLoadResult {

@@ -314,6 +314,7 @@ fn en(key: &'static str) -> &'static str {
         "查询执行中断" => "Query execution interrupted",
         "表预览已刷新: {} 行, {} ms" => "Table preview refreshed: {} rows, {} ms",
         "表预览刷新失败" => "Table preview refresh failed",
+        "加载失败：任务异常终止" => "Load failed: task terminated abnormally",
         "已复制 {}" => "Copied {}",
         "已清除选择" => "Selection cleared",
         "已复制 {} 列, {} 行" => "Copied {} cols, {} rows",
