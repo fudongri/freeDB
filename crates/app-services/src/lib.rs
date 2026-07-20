@@ -700,6 +700,15 @@ impl AppServices {
             .map_err(into_anyhow)
     }
 
+    pub async fn load_schemas_summary(&self, connection_id: &str, database: &str) -> Result<Vec<driver_api::SchemaSummary>> {
+        let profile = self.require_connection(connection_id)?;
+        let password = self.require_saved_password(connection_id)?;
+        self.session_manager
+            .load_schemas_summary(&profile, &password, database)
+            .await
+            .map_err(into_anyhow)
+    }
+
     pub async fn load_collection_stats(&self, connection_id: &str, database: &str, collection: &str) -> Result<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>> {
         let profile = self.require_connection(connection_id)?;
         let password = self.require_saved_password(connection_id)?;

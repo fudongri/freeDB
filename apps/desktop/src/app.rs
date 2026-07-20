@@ -114,6 +114,7 @@ pub struct DesktopApp {
     pending_database_list: Option<Receiver<DatabaseListResult>>,
     pending_table_preview: Option<(String, Receiver<TablePreviewLoadResult>)>,
     pending_table_summary: Option<(String, Receiver<TableSummaryLoadResult>)>,
+    pending_schema_summary: Option<(String, Receiver<SchemaSummaryLoadResult>)>,
     pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
     pending_file_load: Option<Receiver<FileLoadResult>>,
     generate_data_receiver: Option<Receiver<GenerateDataEvent>>,
@@ -244,6 +245,11 @@ struct TableSummaryLoadResult {
     result: Result<Vec<driver_api::TableSummary>, String>,
 }
 
+struct SchemaSummaryLoadResult {
+    tab_id: String,
+    result: Result<Vec<driver_api::SchemaSummary>, String>,
+}
+
 #[derive(Clone)]
 struct TableSummaryTabState {
     id: String,
@@ -279,6 +285,36 @@ struct TableSummaryTabState {
 }
 
 #[derive(Clone)]
+struct SchemaSummaryTabState {
+    id: String,
+    title: String,
+    connection_id: String,
+    database: String,
+    database_kind: DatabaseKind,
+    loading: bool,
+    schemas: Vec<driver_api::SchemaSummary>,
+    selected_indices: HashSet<usize>,
+    sort_column: Option<usize>,
+    sort_ascending: bool,
+    search_filter: String,
+    needs_reload: bool,
+    pending_actions: Vec<SchemaContextAction>,
+    col_widths: Vec<f32>,
+    resize_drag: Option<(usize, f32)>,
+    // 缓存
+    cached_sorted_indices: Vec<usize>,
+    cached_filter: String,
+    cached_sort_col: Option<usize>,
+    cached_sort_asc: bool,
+    cached_data_len: usize,
+}
+
+#[derive(Clone)]
+enum SchemaContextAction {
+    OpenTableSummary { connection_id: String, database: String, schema: String, db_label: String },
+}
+
+#[derive(Clone)]
 enum SummaryContextAction {
     OpenTable { node: ExplorerNode, load_data: bool, force_new_tab: bool },
     NewQuery { connection_id: String, database: Option<String>, sql: String },
@@ -297,6 +333,7 @@ enum WorkspaceTab {
     Table(TableTabState),
     CreateTable(CreateTableState),
     TableSummary(TableSummaryTabState),
+    SchemaSummary(SchemaSummaryTabState),
     Dashboard,
     SlowQuery(SlowQueryTabState),
 }
@@ -372,6 +409,7 @@ enum RecentTabEntry {
     Table { connection_id: String, database: Option<String>, schema: Option<String>, table_name: String, is_view: bool },
     CreateTable { connection_id: String, database: String, schema: Option<String> },
     TableSummary { connection_id: String, database: String, schema: Option<String>, title: String },
+    SchemaSummary { connection_id: String, database: String, title: String },
 }
 
 fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
@@ -401,6 +439,11 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
             schema: t.schema.clone(),
             title: t.title.clone(),
         }),
+        WorkspaceTab::SchemaSummary(t) => Some(RecentTabEntry::SchemaSummary {
+            connection_id: t.connection_id.clone(),
+            database: t.database.clone(),
+            title: t.title.clone(),
+        }),
         WorkspaceTab::Dashboard => None,
         WorkspaceTab::SlowQuery(_) => None,
         _ => None,
@@ -422,6 +465,9 @@ fn recent_tab_matches(a: &RecentTabEntry, b: &RecentTabEntry) -> bool {
         (RecentTabEntry::TableSummary { connection_id: a_conn, database: a_db, schema: a_schema, .. },
          RecentTabEntry::TableSummary { connection_id: b_conn, database: b_db, schema: b_schema, .. }) =>
             a_conn == b_conn && a_db == b_db && a_schema == b_schema,
+        (RecentTabEntry::SchemaSummary { connection_id: a_conn, database: a_db, .. },
+         RecentTabEntry::SchemaSummary { connection_id: b_conn, database: b_db, .. }) =>
+            a_conn == b_conn && a_db == b_db,
         _ => false,
     }
 }
@@ -1413,6 +1459,7 @@ impl DesktopApp {
             database_cache: HashMap::new(),
             pending_table_preview: None,
             pending_table_summary: None,
+            pending_schema_summary: None,
             pending_processlist: None,
             pending_file_load: None,
             generate_data_receiver: None,
@@ -2569,6 +2616,42 @@ impl DesktopApp {
             }
         }
 
+        // Poll schema summary results (async: OpenTableSummary for PG)
+        if let Some((schema_tab_id, receiver)) = self.pending_schema_summary.take() {
+            match receiver.try_recv() {
+                Ok(message) => {
+                    if let Some(WorkspaceTab::SchemaSummary(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::SchemaSummary(ts) if ts.id == message.tab_id)
+                    }) {
+                        match message.result {
+                            Ok(schemas) => {
+                                tab.schemas = schemas;
+                                tab.loading = false;
+                            }
+                            Err(error) => {
+                                tab.loading = false;
+                                self.status_message = error;
+                                self.status_level = StatusLevel::Error;
+                            }
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_schema_summary = Some((schema_tab_id, receiver));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::warn!(tab_id = %schema_tab_id, "模式列表异步任务已断开");
+                    if let Some(WorkspaceTab::SchemaSummary(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::SchemaSummary(ts) if ts.id == schema_tab_id)
+                    }) {
+                        tab.loading = false;
+                        self.status_message = tr!("加载失败：任务异常终止").into();
+                        self.status_level = StatusLevel::Error;
+                    }
+                }
+            }
+        }
+
         // 轮询 SHOW PROCESSLIST 异步结果
         if let Some(ref mut rx) = self.pending_processlist {
             if let Ok(result) = rx.try_recv() {
@@ -2796,6 +2879,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             WorkspaceTab::TableSummary(tab) => {
                 tab.selected_indices.clear();
             }
+            WorkspaceTab::SchemaSummary(tab) => {
+                tab.selected_indices.clear();
+            }
         }
         self.status_message = tr!("已清除选择").into();
     }
@@ -2982,6 +3068,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             WorkspaceTab::Dashboard => {}
             WorkspaceTab::SlowQuery(_) => {}
             WorkspaceTab::TableSummary(_) => {}
+            WorkspaceTab::SchemaSummary(_) => {}
         }
     }
 
@@ -4159,6 +4246,60 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     });
                 });
             }
+            RecentTabEntry::SchemaSummary { connection_id, database, title } => {
+                if let Some(idx) = self.tabs.iter().position(|t| {
+                    matches!(t, WorkspaceTab::SchemaSummary(ts) if
+                        ts.connection_id == *connection_id
+                        && ts.database == *database
+                    )
+                }) {
+                    self.navigate_to_tab(idx);
+                    return;
+                }
+                let database_kind = self.database_kind_for_connection(connection_id);
+                let tab_id = format!("schema-summary-{}", uuid::Uuid::new_v4());
+                let state = SchemaSummaryTabState {
+                    id: tab_id.clone(),
+                    title: title.clone(),
+                    connection_id: connection_id.clone(),
+                    database: database.clone(),
+                    database_kind,
+                    loading: true,
+                    schemas: Vec::new(),
+                    selected_indices: HashSet::new(),
+                    sort_column: None,
+                    sort_ascending: true,
+                    search_filter: String::new(),
+                    needs_reload: false,
+                    pending_actions: Vec::new(),
+                    col_widths: Vec::new(),
+                    resize_drag: None,
+                    cached_sorted_indices: Vec::new(),
+                    cached_filter: String::new(),
+                    cached_sort_col: None,
+                    cached_sort_asc: true,
+                    cached_data_len: 0,
+                };
+                self.tabs.push(WorkspaceTab::SchemaSummary(state));
+                self.active_tab = self.tabs.len().saturating_sub(1);
+                self.scroll_tabs_to_end = true;
+
+                let services = self.services.clone();
+                let handle = self.runtime.handle().clone();
+                let (sender, receiver) = mpsc::channel();
+                self.pending_schema_summary = Some((tab_id.clone(), receiver));
+                let connection_id = connection_id.clone();
+                let database = database.clone();
+                handle.spawn(async move {
+                    let result = services
+                        .load_schemas_summary(&connection_id, &database)
+                        .await;
+                    let _ = sender.send(SchemaSummaryLoadResult {
+                        tab_id,
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
+            }
         }
     }
 
@@ -4415,7 +4556,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let result = match self.tabs.get(self.active_tab) {
             Some(WorkspaceTab::Query(tab)) => tab.result.clone(),
             Some(WorkspaceTab::Table(tab)) => tab.preview.clone(),
-            Some(WorkspaceTab::CreateTable(_)) | Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | Some(WorkspaceTab::TableSummary(_)) => None,
+            Some(WorkspaceTab::CreateTable(_)) | Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | Some(WorkspaceTab::TableSummary(_)) | Some(WorkspaceTab::SchemaSummary(_)) => None,
             None => None,
         };
         let Some(result) = result else {
@@ -4577,6 +4718,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     });
                 });
                 self.status_message = if tab.database_kind == DatabaseKind::MongoDb { tr!("正在刷新集合信息...").into() } else { tr!("正在刷新表信息...").into() };
+            }
+            Some(WorkspaceTab::SchemaSummary(tab)) => {
+                tab.loading = true;
+                tab.schemas.clear();
+                let connection_id = tab.connection_id.clone();
+                let database = tab.database.clone();
+                let tab_id = tab.id.clone();
+                let services = self.services.clone();
+                let handle = self.runtime.handle().clone();
+                let (sender, receiver) = mpsc::channel();
+                self.pending_schema_summary = Some((tab_id.clone(), receiver));
+                handle.spawn(async move {
+                    let result = services.load_schemas_summary(&connection_id, &database).await;
+                    let _ = sender.send(SchemaSummaryLoadResult {
+                        tab_id,
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
+                self.status_message = tr!("正在刷新模式列表...").into();
             }
             Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | None => {
                 self.refresh_connections();
@@ -5213,6 +5373,63 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
                 SidebarAction::OpenTable { node, load_data, force_new_tab } => self.open_table_tab(&node, load_data, force_new_tab),
                 SidebarAction::OpenTableSummary { connection_id, database, schema, db_label } => {
+                    let database_kind = self.database_kind_for_connection(&connection_id);
+                    // PostgreSQL 双击数据库（schema=None）→ 打开 schema 列表
+                    if database_kind == DatabaseKind::Postgres && schema.is_none() {
+                        if let Some(idx) = self.tabs.iter().position(|t| {
+                            matches!(t, WorkspaceTab::SchemaSummary(ts) if
+                                ts.connection_id == connection_id
+                                && ts.database == database
+                            )
+                        }) {
+                            let tab = self.tabs.remove(idx);
+                            self.tabs.push(tab);
+                            self.active_tab = self.tabs.len().saturating_sub(1);
+                            self.scroll_tabs_to_end = true;
+                        } else {
+                            let tab_id = format!("schema-summary-{}", uuid::Uuid::new_v4());
+                            let conn_name = self.connections.iter().find(|c| c.id == connection_id).map(|c| c.name.as_str()).unwrap_or(&connection_id);
+                            let label = format!("{}@{} 模式列表", db_label, conn_name);
+                            let state = SchemaSummaryTabState {
+                                id: tab_id.clone(),
+                                title: label,
+                                connection_id: connection_id.clone(),
+                                database: database.clone(),
+                                database_kind,
+                                loading: true,
+                                schemas: Vec::new(),
+                                selected_indices: HashSet::new(),
+                                sort_column: None,
+                                sort_ascending: true,
+                                search_filter: String::new(),
+                                needs_reload: false,
+                                pending_actions: Vec::new(),
+                                col_widths: Vec::new(),
+                                resize_drag: None,
+                                cached_sorted_indices: Vec::new(),
+                                cached_filter: String::new(),
+                                cached_sort_col: None,
+                                cached_sort_asc: true,
+                                cached_data_len: 0,
+                            };
+                            self.tabs.push(WorkspaceTab::SchemaSummary(state));
+                            self.active_tab = self.tabs.len().saturating_sub(1);
+                            self.scroll_tabs_to_end = true;
+                            self.record_recent_tab();
+
+                            let services = self.services.clone();
+                            let handle = self.runtime.handle().clone();
+                            let (sender, receiver) = mpsc::channel();
+                            self.pending_schema_summary = Some((tab_id.clone(), receiver));
+                            handle.spawn(async move {
+                                let result = services.load_schemas_summary(&connection_id, &database).await;
+                                let _ = sender.send(SchemaSummaryLoadResult {
+                                    tab_id,
+                                    result: result.map_err(|e| e.to_string()),
+                                });
+                            });
+                        }
+                    } else {
                     // 检查是否已有相同库的表汇总标签页，有则移到最右侧并切换
                     if let Some(idx) = self.tabs.iter().position(|t| {
                         matches!(t, WorkspaceTab::TableSummary(ts) if
@@ -5226,7 +5443,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         self.active_tab = self.tabs.len().saturating_sub(1);
                         self.scroll_tabs_to_end = true;
                     } else {
-                    let database_kind = self.database_kind_for_connection(&connection_id);
                     let tab_id = format!("table-summary-{}", uuid::Uuid::new_v4());
                     let conn_name = self.connections.iter().find(|c| c.id == connection_id).map(|c| c.name.as_str()).unwrap_or(&connection_id);
                     let label = if database_kind == DatabaseKind::MongoDb {
@@ -5282,6 +5498,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         });
                     });
                     } // end else (new tab)
+                    } // end else (not PostgreSQL schema routing)
                 }
                 SidebarAction::RefreshConnection(connection_id) => {
                     self.collapse_connection_tree(&connection_id);
@@ -5618,9 +5835,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.close();
                                 }
                             }
-                            // 查看所有表/集合信息
+                            // 查看所有表/集合/模式信息
                             let summary_label = if kind == DatabaseKind::MongoDb {
                                 tr!("查看所有集合信息")
+                            } else if kind == DatabaseKind::Postgres {
+                                tr!("查看所有模式")
                             } else {
                                 tr!("查看所有表信息")
                             };
@@ -6146,6 +6365,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     },
                                                     WorkspaceTab::Dashboard => ("Dashboard", "◉"),
                                                     WorkspaceTab::TableSummary(tab) => (tab.title.as_str(), "☰"),
+                                                    WorkspaceTab::SchemaSummary(tab) => (tab.title.as_str(), "☷"),
                                                     WorkspaceTab::SlowQuery(_) => (tr!("MySQL 慢查询分析"), "⏱"),
                                                 };
                                                 let interaction = tab_button(
@@ -6283,6 +6503,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 },
                 WorkspaceTab::Dashboard => ("Dashboard".to_string(), "◉"),
                 WorkspaceTab::TableSummary(tab) => (tab.title.clone(), "☰"),
+                WorkspaceTab::SchemaSummary(tab) => (tab.title.clone(), "☷"),
                 WorkspaceTab::SlowQuery(_) => (tr!("MySQL 慢查询分析").to_string(), "⏱"),
             };
 
@@ -6393,6 +6614,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         WorkspaceTab::TableSummary(tab) => {
                             Self::render_table_summary_tab(ui, tab, &self.theme.colors, &self.theme.fonts)
                         }
+                        WorkspaceTab::SchemaSummary(tab) => {
+                            Self::render_schema_summary_tab(ui, tab, &self.theme.colors, &self.theme.fonts)
+                        }
                         WorkspaceTab::SlowQuery(state) => {
                             render_slow_query_tab(ui, state, &self.theme)
                         }
@@ -6426,6 +6650,30 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 });
                             });
                             self.status_message = if db_kind == DatabaseKind::MongoDb { tr!("正在刷新集合信息...").into() } else { tr!("正在刷新表信息...").into() };
+                        }
+                    }
+
+                    // 检查 SchemaSummary 标签是否需要重新加载
+                    if let Some(WorkspaceTab::SchemaSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                        if tab.needs_reload {
+                            tab.needs_reload = false;
+                            tab.loading = true;
+                            tab.schemas.clear();
+                            let connection_id = tab.connection_id.clone();
+                            let database = tab.database.clone();
+                            let tab_id = tab.id.clone();
+                            let services = self.services.clone();
+                            let handle = self.runtime.handle().clone();
+                            let (sender, receiver) = mpsc::channel();
+                            self.pending_schema_summary = Some((tab_id.clone(), receiver));
+                            handle.spawn(async move {
+                                let result = services.load_schemas_summary(&connection_id, &database).await;
+                                let _ = sender.send(SchemaSummaryLoadResult {
+                                    tab_id,
+                                    result: result.map_err(|e| e.to_string()),
+                                });
+                            });
+                            self.status_message = tr!("正在刷新模式列表...").into();
                         }
                     }
 
@@ -6598,6 +6846,83 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 let _ = tx.send((coll, Err(e.to_string())));
                                             }
                                         }
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // 处理 SchemaSummary 标签的右键菜单动作
+                    let schema_actions: Vec<SchemaContextAction> = if let Some(WorkspaceTab::SchemaSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                        std::mem::take(&mut tab.pending_actions)
+                    } else {
+                        Vec::new()
+                    };
+                    for action in schema_actions {
+                        match action {
+                            SchemaContextAction::OpenTableSummary { connection_id, database, schema, db_label } => {
+                                // 内联 OpenTableSummary 逻辑（避免循环依赖）
+                                let database_kind = self.database_kind_for_connection(&connection_id);
+                                if let Some(idx) = self.tabs.iter().position(|t| {
+                                    matches!(t, WorkspaceTab::TableSummary(ts) if
+                                        ts.connection_id == connection_id
+                                        && ts.database == database
+                                        && ts.schema == Some(schema.clone())
+                                    )
+                                }) {
+                                    let tab = self.tabs.remove(idx);
+                                    self.tabs.push(tab);
+                                    self.active_tab = self.tabs.len().saturating_sub(1);
+                                    self.scroll_tabs_to_end = true;
+                                } else {
+                                    let tab_id = format!("table-summary-{}", uuid::Uuid::new_v4());
+                                    let conn_name = self.connections.iter().find(|c| c.id == connection_id).map(|c| c.name.as_str()).unwrap_or(&connection_id);
+                                    let label = format!("{}@{} 表信息", db_label, conn_name);
+                                    let state = TableSummaryTabState {
+                                        id: tab_id.clone(),
+                                        title: label,
+                                        connection_id: connection_id.clone(),
+                                        database: database.clone(),
+                                        schema: Some(schema.clone()),
+                                        database_kind,
+                                        loading: true,
+                                        table_summaries: Vec::new(),
+                                        selected_indices: HashSet::new(),
+                                        sort_column: None,
+                                        sort_ascending: true,
+                                        search_filter: String::new(),
+                                        needs_reload: false,
+                                        pending_open_table: None,
+                                        pending_actions: Vec::new(),
+                                        col_widths: Vec::new(),
+                                        resize_drag: None,
+                                        renaming_row: None,
+                                        rename_edit: String::new(),
+                                        rename_focus_requested: false,
+                                        pending_stats: HashSet::new(),
+                                        stats_loading: false,
+                                        stats_sender: None,
+                                        stats_receiver: None,
+                                        cached_sorted_indices: Vec::new(),
+                                        cached_filter: String::new(),
+                                        cached_sort_col: None,
+                                        cached_sort_asc: true,
+                                        cached_data_len: 0,
+                                    };
+                                    self.tabs.push(WorkspaceTab::TableSummary(state));
+                                    self.active_tab = self.tabs.len().saturating_sub(1);
+                                    self.scroll_tabs_to_end = true;
+                                    self.record_recent_tab();
+                                    let services = self.services.clone();
+                                    let handle = self.runtime.handle().clone();
+                                    let (sender, receiver) = mpsc::channel();
+                                    self.pending_table_summary = Some((tab_id.clone(), receiver));
+                                    handle.spawn(async move {
+                                        let result = services.load_tables_summary(&connection_id, &database, Some(schema.as_str())).await;
+                                        let _ = sender.send(TableSummaryLoadResult {
+                                            tab_id,
+                                            result: result.map_err(|e| e.to_string()),
+                                        });
                                     });
                                 }
                             }
@@ -10534,6 +10859,438 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         TabUiAction::None
     }
 
+    fn render_schema_summary_tab(
+        ui: &mut egui::Ui,
+        tab: &mut SchemaSummaryTabState,
+        colors: &ui_theme::ThemeColors,
+        fonts: &ui_theme::FontSizes,
+    ) -> TabUiAction {
+        let palette = mac_ui_palette_from_ui(ui);
+        let mut action = TabUiAction::None;
+
+        // 列定义：模式名、拥有者、表数量
+        let cols: Vec<(&str, f32, bool)> = vec![
+            ("模式名", 200.0, false),
+            ("拥有者", 160.0, false),
+            ("表数量", 60.0, false),
+        ];
+
+        // 过滤/排序缓存
+        let filter_changed = tab.search_filter != tab.cached_filter;
+        let sort_changed = tab.sort_column != tab.cached_sort_col || tab.sort_ascending != tab.cached_sort_asc;
+        let data_changed = tab.schemas.len() != tab.cached_data_len;
+        if filter_changed || sort_changed || data_changed {
+            let filtered: Vec<usize> = if tab.search_filter.is_empty() {
+                (0..tab.schemas.len()).collect()
+            } else {
+                let q = tab.search_filter.to_lowercase();
+                tab.schemas.iter().enumerate()
+                    .filter(|(_, s)| s.name.to_lowercase().contains(&q))
+                    .map(|(i, _)| i)
+                    .collect()
+            };
+
+            let mut sorted = filtered;
+            if let Some(sort_col) = tab.sort_column {
+                sorted.sort_by(|&a, &b| {
+                    let sa = &tab.schemas[a];
+                    let sb = &tab.schemas[b];
+                    let (va, vb): (String, String) = match sort_col {
+                        0 => (sa.name.clone(), sb.name.clone()),
+                        1 => (sa.owner.clone().unwrap_or_default(), sb.owner.clone().unwrap_or_default()),
+                        2 => {
+                            let ord = sa.table_count.cmp(&sb.table_count);
+                            return if tab.sort_ascending { ord } else { ord.reverse() };
+                        }
+                        _ => (sa.name.clone(), sb.name.clone()),
+                    };
+                    let ord = va.cmp(&vb);
+                    if tab.sort_ascending { ord } else { ord.reverse() }
+                });
+            } else {
+                sorted.sort_by(|&a, &b| tab.schemas[a].name.cmp(&tab.schemas[b].name));
+            }
+            tab.cached_sorted_indices = sorted;
+            tab.cached_filter = tab.search_filter.clone();
+            tab.cached_sort_col = tab.sort_column;
+            tab.cached_sort_asc = tab.sort_ascending;
+            tab.cached_data_len = tab.schemas.len();
+        }
+        let sorted_indices = tab.cached_sorted_indices.clone();
+
+        let total = tab.schemas.len();
+        let selected_count = tab.selected_indices.len();
+
+        StripBuilder::new(ui)
+            .size(Size::exact(38.0))
+            .size(Size::remainder())
+            .size(Size::exact(26.0))
+            .vertical(|mut strip| {
+                // 工具栏
+                strip.cell(|ui| {
+                    egui::Frame::new()
+                        .fill(palette.toolbar_bg)
+                        .stroke(Stroke::NONE)
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(tab.title.as_str()).strong().color(palette.text));
+                                ui.separator();
+                                let search_frame = egui::Frame::new()
+                                    .fill(palette.search_bg)
+                                    .stroke(egui::Stroke::new(1.0, palette.table_grid))
+                                    .corner_radius(palette.radius_lg)
+                                    .inner_margin(egui::Margin::symmetric(8, 4));
+                                search_frame.show(ui, |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut tab.search_filter)
+                                            .font(egui::TextStyle::Small)
+                                            .desired_width(200.0)
+                                            .frame(false)
+                                            .hint_text(tr!("搜索模式名...")),
+                                    );
+                                });
+                                if selected_count > 0 {
+                                    ui.separator();
+                                    ui.label(RichText::new(tr!("已选 {} 个", selected_count)).size(fonts.sm).color(palette.weak_text));
+                                }
+                            });
+                        });
+                });
+
+                // 内容区
+                strip.cell(|ui| {
+                    egui::Frame::new()
+                        .fill(palette.card_bg)
+                        .stroke(Stroke::NONE)
+                        .inner_margin(egui::Margin::symmetric(8, 8))
+                        .show(ui, |ui| {
+                            if tab.loading {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(80.0);
+                                    ui.add(egui::Spinner::new().size(fonts.spinner_size));
+                                    ui.add_space(12.0);
+                                    ui.label(RichText::new(tr!("加载中...")).color(palette.weak_text));
+                                });
+                                return;
+                            }
+
+                            if tab.schemas.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(60.0);
+                                    ui.label(RichText::new(tr!("暂无数据")).color(palette.weak_text));
+                                });
+                                return;
+                            }
+
+                            egui::ScrollArea::horizontal()
+                                .id_salt(format!("ss-hscroll-{}", tab.id))
+                                .auto_shrink([false, false])
+                                .drag_to_scroll(false)
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                                    let grid_h = subtle_grid_color(palette.table_grid, 30);
+                                    let grid_v = Color32::TRANSPARENT;
+
+                                    if tab.col_widths.len() != cols.len() {
+                                        tab.col_widths = cols.iter().map(|c| c.1).collect();
+                                    }
+
+                                    let header_painter = ui.painter().clone();
+                                    let header_y_start = ui.cursor().top();
+                                    let mut column_right_edges: Vec<f32> = vec![];
+                                    let mut is_hovering_header = false;
+                                    let mut hovered_header_col_idx: Option<usize> = None;
+
+                                    let mut table = egui_extras::TableBuilder::new(ui)
+                                        .vscroll(true)
+                                        .striped(true)
+                                        .resizable(false)
+                                        .drag_to_scroll(false)
+                                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+
+                                    let col_count = tab.col_widths.len();
+                                    for (i, w) in tab.col_widths.iter().enumerate() {
+                                        if i + 1 == col_count {
+                                            table = table.column(egui_extras::Column::remainder().at_least(w.max(72.0)).clip(true));
+                                        } else {
+                                            table = table.column(egui_extras::Column::initial(*w).at_least(72.0).clip(true));
+                                        }
+                                    }
+
+                                    let mut local_widths = std::mem::take(&mut tab.col_widths);
+                                    let mut local_resize = tab.resize_drag.take();
+
+                                    table
+                                        .header(30.0, |mut header| {
+                                            for (col_idx, &(title, _, is_numeric)) in cols.iter().enumerate() {
+                                                header.col(|ui| {
+                                                    let sort_state = if tab.sort_column == Some(col_idx) {
+                                                        Some(!tab.sort_ascending)
+                                                    } else {
+                                                        None
+                                                    };
+                                                    let (sort_choice, _, _, _) = table_header_cell(
+                                                        ui, &palette, title, true, sort_state, false, false, None, false, false,
+                                                    );
+                                                    match sort_choice {
+                                                        Some(TableHeaderSortChoice::Ascending) => {
+                                                            tab.sort_column = Some(col_idx);
+                                                            tab.sort_ascending = true;
+                                                        }
+                                                        Some(TableHeaderSortChoice::Descending) => {
+                                                            tab.sort_column = Some(col_idx);
+                                                            tab.sort_ascending = false;
+                                                        }
+                                                        Some(TableHeaderSortChoice::Clear) => {
+                                                            tab.sort_column = None;
+                                                        }
+                                                        None => {}
+                                                    }
+
+                                                    // 列宽拖拽调整手柄
+                                                    let cell_rect = ui.max_rect();
+                                                    column_right_edges.push(cell_rect.right() - 1.0);
+                                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                                        is_hovering_header = true;
+                                                        hovered_header_col_idx = Some(col_idx);
+                                                    }
+                                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                                    let resize_handle_rect = egui::Rect::from_min_max(
+                                                        egui::pos2(resize_handle_x, cell_rect.top()),
+                                                        cell_rect.right_bottom(),
+                                                    );
+                                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                                    let on_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                                    let is_resizing = local_resize.as_ref().map_or(false, |&(rc, _)| rc == col_idx);
+                                                    if on_handle || is_resizing {
+                                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                                    }
+                                                    if on_handle && just_pressed {
+                                                        local_resize = Some((col_idx, pointer_pos.unwrap().x));
+                                                    }
+                                                    if let Some((rc, start_x)) = local_resize {
+                                                        if rc == col_idx && pointer_down {
+                                                            if let Some(pos) = pointer_pos {
+                                                                let delta = pos.x - start_x;
+                                                                if col_idx < local_widths.len() {
+                                                                    local_widths[col_idx] = (local_widths[col_idx] + delta).max(72.0);
+                                                                    local_resize = Some((col_idx, pos.x));
+                                                                    ui.ctx().request_repaint();
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        })
+                                        .body(|mut body| {
+                                            for &ri in &sorted_indices {
+                                                let schema = &tab.schemas[ri];
+                                                let row_selected = tab.selected_indices.contains(&ri);
+                                                let fill = if row_selected {
+                                                    blend_color(palette.selection_bg, palette.card_bg, 0.18)
+                                                } else {
+                                                    palette.card_bg
+                                                };
+
+                                                body.row(28.0, |mut row| {
+                                                    // 模式名
+                                                    row.col(|ui| {
+                                                        let rect = ui.max_rect();
+                                                        let response = ui.allocate_rect(rect, egui::Sense::click());
+                                                        paint_table_grid_lines(ui, rect, grid_v, grid_h);
+                                                        let cell_fill = if row_selected {
+                                                            fill
+                                                        } else if ri % 2 == 1 {
+                                                            palette.table_alt_bg
+                                                        } else {
+                                                            fill
+                                                        };
+                                                        ui.painter().rect_filled(rect, 0.0, cell_fill);
+                                                        let content_rect = rect.shrink2(egui::vec2(4.0, 1.0));
+                                                        ui.painter().text(
+                                                            content_rect.left_center(),
+                                                            egui::Align2::LEFT_CENTER,
+                                                            &schema.name,
+                                                            egui::FontId::new(fonts.md, egui::FontFamily::Proportional),
+                                                            palette.text,
+                                                        );
+                                                        let modifiers = ui.ctx().input(|i| i.modifiers);
+                                                        if response.double_clicked() {
+                                                            tab.pending_actions.push(SchemaContextAction::OpenTableSummary {
+                                                                connection_id: tab.connection_id.clone(),
+                                                                database: tab.database.clone(),
+                                                                schema: schema.name.clone(),
+                                                                db_label: schema.name.clone(),
+                                                            });
+                                                        } else if response.clicked() {
+                                                            if modifiers.shift {
+                                                                tab.selected_indices.insert(ri);
+                                                            } else if modifiers.ctrl || modifiers.command {
+                                                                if row_selected {
+                                                                    tab.selected_indices.remove(&ri);
+                                                                } else {
+                                                                    tab.selected_indices.insert(ri);
+                                                                }
+                                                            } else {
+                                                                tab.selected_indices.clear();
+                                                                tab.selected_indices.insert(ri);
+                                                            }
+                                                        }
+                                                        response.context_menu(|ui| {
+                                                            ctx_menu_style(ui);
+                                                            if ui.button(tr!("查看表信息")).clicked() {
+                                                                tab.pending_actions.push(SchemaContextAction::OpenTableSummary {
+                                                                    connection_id: tab.connection_id.clone(),
+                                                                    database: tab.database.clone(),
+                                                                    schema: schema.name.clone(),
+                                                                    db_label: schema.name.clone(),
+                                                                });
+                                                                ui.close();
+                                                            }
+                                                        });
+                                                    });
+
+                                                    // 拥有者
+                                                    row.col(|ui| {
+                                                        let rect = ui.max_rect();
+                                                        let response = ui.allocate_rect(rect, egui::Sense::click());
+                                                        paint_table_grid_lines(ui, rect, grid_v, grid_h);
+                                                        let cell_fill = if row_selected {
+                                                            fill
+                                                        } else if ri % 2 == 1 {
+                                                            palette.table_alt_bg
+                                                        } else {
+                                                            fill
+                                                        };
+                                                        ui.painter().rect_filled(rect, 0.0, cell_fill);
+                                                        let content_rect = rect.shrink2(egui::vec2(4.0, 1.0));
+                                                        let owner = schema.owner.as_deref().unwrap_or("");
+                                                        ui.painter().text(
+                                                            content_rect.left_center(),
+                                                            egui::Align2::LEFT_CENTER,
+                                                            owner,
+                                                            egui::FontId::new(fonts.md, egui::FontFamily::Proportional),
+                                                            palette.text,
+                                                        );
+                                                        let modifiers = ui.ctx().input(|i| i.modifiers);
+                                                        if response.double_clicked() {
+                                                            tab.pending_actions.push(SchemaContextAction::OpenTableSummary {
+                                                                connection_id: tab.connection_id.clone(),
+                                                                database: tab.database.clone(),
+                                                                schema: schema.name.clone(),
+                                                                db_label: schema.name.clone(),
+                                                            });
+                                                        } else if response.clicked() {
+                                                            if modifiers.shift {
+                                                                tab.selected_indices.insert(ri);
+                                                            } else if modifiers.ctrl || modifiers.command {
+                                                                if row_selected {
+                                                                    tab.selected_indices.remove(&ri);
+                                                                } else {
+                                                                    tab.selected_indices.insert(ri);
+                                                                }
+                                                            } else {
+                                                                tab.selected_indices.clear();
+                                                                tab.selected_indices.insert(ri);
+                                                            }
+                                                        }
+                                                    });
+
+                                                    // 表数量
+                                                    row.col(|ui| {
+                                                        let rect = ui.max_rect();
+                                                        let response = ui.allocate_rect(rect, egui::Sense::click());
+                                                        paint_table_grid_lines(ui, rect, grid_v, grid_h);
+                                                        let cell_fill = if row_selected {
+                                                            fill
+                                                        } else if ri % 2 == 1 {
+                                                            palette.table_alt_bg
+                                                        } else {
+                                                            fill
+                                                        };
+                                                        ui.painter().rect_filled(rect, 0.0, cell_fill);
+                                                        let content_rect = rect.shrink2(egui::vec2(4.0, 1.0));
+                                                        ui.painter().text(
+                                                            content_rect.left_center(),
+                                                            egui::Align2::LEFT_CENTER,
+                                                            &schema.table_count.to_string(),
+                                                            egui::FontId::new(fonts.md, egui::FontFamily::Monospace),
+                                                            palette.text,
+                                                        );
+                                                        let modifiers = ui.ctx().input(|i| i.modifiers);
+                                                        if response.double_clicked() {
+                                                            tab.pending_actions.push(SchemaContextAction::OpenTableSummary {
+                                                                connection_id: tab.connection_id.clone(),
+                                                                database: tab.database.clone(),
+                                                                schema: schema.name.clone(),
+                                                                db_label: schema.name.clone(),
+                                                            });
+                                                        } else if response.clicked() {
+                                                            if modifiers.shift {
+                                                                tab.selected_indices.insert(ri);
+                                                            } else if modifiers.ctrl || modifiers.command {
+                                                                if row_selected {
+                                                                    tab.selected_indices.remove(&ri);
+                                                                } else {
+                                                                    tab.selected_indices.insert(ri);
+                                                                }
+                                                            } else {
+                                                                tab.selected_indices.clear();
+                                                                tab.selected_indices.insert(ri);
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                            }
+                                        });
+
+                                    tab.col_widths = local_widths;
+                                    tab.resize_drag = if local_resize.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+                                        None
+                                    } else {
+                                        local_resize
+                                    };
+                                    // 表头悬停时绘制列边界指示线
+                                    if is_hovering_header && !column_right_edges.is_empty() {
+                                        let header_y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                        if let Some(idx) = hovered_header_col_idx {
+                                            if idx < column_right_edges.len() {
+                                                header_painter.vline(column_right_edges[idx], header_y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                            }
+                                            if idx > 0 && idx - 1 < column_right_edges.len() {
+                                                header_painter.vline(column_right_edges[idx - 1], header_y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                            }
+                                        }
+                                    }
+                                });
+                        });
+                });
+
+                // 状态栏
+                strip.cell(|ui| {
+                    egui::Frame::new()
+                        .fill(palette.toolbar_bg)
+                        .stroke(Stroke::NONE)
+                        .inner_margin(egui::Margin::symmetric(10, 4))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(tr!("共 {} 个模式", total))
+                                        .size(fonts.sm)
+                                        .color(palette.weak_text),
+                                );
+                            });
+                        });
+                });
+            });
+
+        action
+    }
+
     fn render_table_tab(ui: &mut egui::Ui, tab: &mut TableTabState, pending_batch_save: bool, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> TabUiAction {
         tab.committed_edit_this_frame = false;
         let palette = mac_ui_palette_from_ui(ui);
@@ -14281,6 +15038,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let sub = format!("{} / {}", self.connection_name(connection_id), database);
                     ("S".to_string(), title.clone(), sub)
                 }
+                RecentTabEntry::SchemaSummary { connection_id, database, title, .. } => {
+                    let sub = format!("{} / {}", self.connection_name(connection_id), database);
+                    ("S".to_string(), title.clone(), sub)
+                }
             };
             display_items.push((idx, icon, title, subtitle));
         }
@@ -15176,6 +15937,7 @@ impl eframe::App for DesktopApp {
             || self.pending_update_check.is_some()
             || self.update_download_rx.is_some()
             || self.pending_table_summary.is_some()
+            || self.pending_schema_summary.is_some()
             || !self.pending_autocomplete_columns.is_empty()
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Table(t) if t.generate_data_running))
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::TableSummary(ts) if ts.stats_loading))

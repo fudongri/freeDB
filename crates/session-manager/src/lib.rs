@@ -416,6 +416,15 @@ impl SessionManager {
         with_pool!(self, profile, password, Some(database), h, d => d.load_tables_summary(h, database, schema))
     }
 
+    pub async fn load_schemas_summary(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        database: &str,
+    ) -> AppResult<Vec<driver_api::SchemaSummary>> {
+        with_pool!(self, profile, password, Some(database), h, d => d.load_schemas_summary(h, database))
+    }
+
     pub async fn load_collection_stats(
         &self,
         profile: &ConnectionProfile,

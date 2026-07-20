@@ -3,7 +3,7 @@ use core_domain::{
     AppError, AppResult, ColumnDefinition, ConnectionProfile, ExplorerNode, ExplorerNodeType,
     QueryCellValue, QueryExecution, QueryResult, SslMode, TableChangeSet, TableDefinition, TableRef,
 };
-use driver_api::{ConnectionHandle, ConnectionProvider, DatabaseDriver};
+use driver_api::{ConnectionHandle, ConnectionProvider, DatabaseDriver, SchemaSummary};
 use i18n::tr;
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
@@ -613,6 +613,39 @@ impl DatabaseDriver for PostgresDriver {
         }
 
         Ok(summaries)
+    }
+
+    async fn load_schemas_summary(
+        &self,
+        handle: &mut ConnectionHandle,
+        _database: &str,
+    ) -> AppResult<Vec<SchemaSummary>> {
+        let client = pg_client(handle)?;
+        let rows = client
+            .query(
+                "SELECT n.nspname, pg_catalog.pg_get_userbyid(n.nspowner), \
+                        COUNT(c.oid) \
+                 FROM pg_catalog.pg_namespace n \
+                 LEFT JOIN pg_catalog.pg_class c \
+                   ON c.relnamespace = n.oid AND c.relkind IN ('r','v','m') \
+                 WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+                   AND n.nspname !~ '^pg_toast_' \
+                   AND n.nspname !~ '^pg_temp_' \
+                 GROUP BY n.nspname, n.nspowner \
+                 ORDER BY n.nspname",
+                &[],
+            )
+            .await
+            .map_err(map_pg_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let name: String = row.get(0);
+                let owner: Option<String> = row.get(1);
+                let table_count: i64 = row.get(2);
+                SchemaSummary { name, owner, table_count }
+            })
+            .collect())
     }
 }
 

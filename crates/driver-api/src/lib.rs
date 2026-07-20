@@ -56,6 +56,14 @@ pub struct TableSummary {
     pub create_time: Option<String>,
 }
 
+/// 数据库模式（schema）的汇总信息
+#[derive(Clone, Debug)]
+pub struct SchemaSummary {
+    pub name: String,
+    pub owner: Option<String>,
+    pub table_count: i64,
+}
+
 /// 数据库操作 trait —— 所有方法接收池化的 `&mut ConnectionHandle`，
 /// 不再自行建立连接。
 #[async_trait]
@@ -171,6 +179,15 @@ pub trait DatabaseDriver: Send + Sync {
         database: &str,
         schema: Option<&str>,
     ) -> AppResult<Vec<TableSummary>>;
+
+    /// 加载数据库下的 schema 列表（仅 PostgreSQL 有意义）。默认返回空。
+    async fn load_schemas_summary(
+        &self,
+        _handle: &mut ConnectionHandle,
+        _database: &str,
+    ) -> AppResult<Vec<SchemaSummary>> {
+        Ok(Vec::new())
+    }
 
     /// 懒加载单个表/集合的统计信息（行数、大小）。默认不支持。
     async fn load_collection_stats(
