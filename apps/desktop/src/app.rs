@@ -20463,10 +20463,6 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                     let col_data_type = tab.definition.as_ref()
                                         .and_then(|d| d.columns.iter().find(|c| c.name == *column))
                                         .map(|c| c.data_type.clone());
-                                    let col_on_update = tab.definition.as_ref()
-                                        .and_then(|d| d.columns.iter().find(|c| c.name == *column))
-                                        .map(|c| c.on_update_current_timestamp)
-                                        .unwrap_or(false);
                                     let has_column_values = tab.preview.as_ref()
                                         .map_or(false, |p| !p.rows.is_empty());
                                     let (sort_choice, clicked, cell_dragged, copy_action) = table_header_cell(
@@ -20479,7 +20475,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         is_dragged,
                                         col_data_type.as_deref(),
                                         has_column_values,
-                                        col_on_update,
+                                        false,
                                     );
                                     if let Some(choice) = sort_choice {
                                         selected_sort = Some((column.clone(), choice));
