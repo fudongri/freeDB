@@ -4295,6 +4295,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn reopen_recent_tab(&mut self, entry: &RecentTabEntry) {
+        // 确保连接已建立（复用侧边栏展开连接的逻辑）
+        let cid = match entry {
+            RecentTabEntry::Query { connection_id: Some(c), .. } => Some(c.clone()),
+            RecentTabEntry::Query { connection_id: None, .. } => None,
+            RecentTabEntry::Table { connection_id, .. }
+            | RecentTabEntry::CreateTable { connection_id, .. }
+            | RecentTabEntry::TableSummary { connection_id, .. }
+            | RecentTabEntry::SchemaSummary { connection_id, .. }
+            | RecentTabEntry::Routine { connection_id, .. } => Some(connection_id.clone()),
+        };
+        if let Some(cid) = cid {
+            let connected = self.services.connection_status(&cid).state
+                == core_domain::ConnectionState::Connected;
+            if !connected && !self.loading_connections.contains(&cid) {
+                self.load_connection_tree(&cid);
+            }
+        }
         match entry {
             RecentTabEntry::Query { connection_id, database, sql, title, saved_query_id, .. } => {
                 self.create_query_tab(connection_id.clone(), database.clone(), Some(sql.clone()));
