@@ -13687,11 +13687,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.allocate_ui_at_rect(footer_rect, |ui| {
                             ui.horizontal(|ui| {
                                 ui.set_width(ui.available_width());
-                                ui.label(
-                                    RichText::new(tr!("Enter 确认 · Esc 取消"))
-                                        .size(self.theme.fonts.sm)
-                                        .color(palette.weak_text),
-                                );
                                 ui.add_space(ui.available_width());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
@@ -14124,12 +14119,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.allocate_ui_at_rect(footer_rect, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.set_width(ui.available_width());
-                                        ui.label(
-                                            RichText::new(tr!("Enter 确认 · Esc 取消"))
-                                                .size(self.theme.fonts.sm)
-                                                .color(palette.weak_text),
-                                        );
-                                        ui.add_space(ui.available_width());
+                                            ui.add_space(ui.available_width());
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
@@ -14441,11 +14431,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.allocate_ui_at_rect(footer_rect, |ui| {
                             ui.horizontal(|ui| {
                                 ui.set_width(ui.available_width());
-                                ui.label(
-                                    RichText::new(tr!("Enter 执行 · Esc 取消"))
-                                        .size(self.theme.fonts.sm)
-                                        .color(palette.weak_text),
-                                );
                                 ui.add_space(ui.available_width());
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
