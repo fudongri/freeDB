@@ -530,6 +530,57 @@ impl DatabaseDriver for MySqlDriver {
         Ok(summaries)
     }
 
+    async fn load_routines_summary(
+        &self,
+        handle: &mut ConnectionHandle,
+        database: &str,
+        _schema: Option<&str>,
+    ) -> AppResult<Vec<driver_api::TableSummary>> {
+        let conn = mysql_conn_mut(handle)?;
+        conn.query_drop(format!("USE {}", quote_mysql(database)))
+            .await
+            .map_err(map_mysql_error)?;
+
+        let sql = format!(
+            "SELECT ROUTINE_NAME, ROUTINE_TYPE, ROUTINE_COMMENT, CREATED, LAST_ALTERED \
+             FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '{}' ORDER BY ROUTINE_NAME",
+            escape_mysql_literal(database),
+        );
+        let rows: Vec<Row> = conn.query(sql).await.map_err(map_mysql_error)?;
+        let summaries = rows
+            .into_iter()
+            .map(|row| {
+                let name: String = row.get::<String, _>(0).unwrap_or_default();
+                let routine_type: String = row.get::<String, _>(1).unwrap_or_default();
+                let comment: Option<String> = row.get::<Option<String>, _>(2).flatten();
+                let create_time: Option<String> = row
+                    .get::<Option<mysql_async::Value>, _>(3)
+                    .flatten()
+                    .and_then(|v| match v {
+                        mysql_async::Value::Date(y, m, d, hh, mm, ss, _) => {
+                            Some(format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}"))
+                        }
+                        _ => None,
+                    });
+
+                driver_api::TableSummary {
+                    name,
+                    table_type: routine_type,
+                    row_count: None,
+                    total_size: None,
+                    data_size: None,
+                    index_size: None,
+                    engine: None,
+                    collation: None,
+                    primary_keys: Vec::new(),
+                    comment: comment.filter(|c| !c.is_empty()),
+                    create_time: create_time.filter(|c| !c.is_empty()),
+                }
+            })
+            .collect();
+        Ok(summaries)
+    }
+
     async fn show_processlist(
         &self,
         handle: &mut ConnectionHandle,

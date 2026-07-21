@@ -189,6 +189,16 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 加载存储过程/函数汇总列表。默认返回空。
+    async fn load_routines_summary(
+        &self,
+        _handle: &mut ConnectionHandle,
+        _database: &str,
+        _schema: Option<&str>,
+    ) -> AppResult<Vec<TableSummary>> {
+        Ok(Vec::new())
+    }
+
     /// 懒加载单个表/集合的统计信息（行数、大小）。默认不支持。
     async fn load_collection_stats(
         &self,

@@ -115,6 +115,7 @@ pub struct DesktopApp {
     pending_table_preview: Option<(String, Receiver<TablePreviewLoadResult>)>,
     pending_table_summary: Option<(String, Receiver<TableSummaryLoadResult>)>,
     pending_schema_summary: Option<(String, Receiver<SchemaSummaryLoadResult>)>,
+    pending_routine_summary: Option<(String, Receiver<TableSummaryLoadResult>)>,
     pending_routine_definition: HashMap<String, Receiver<RoutineDefinitionLoadResult>>,
     pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
     pending_file_load: Option<Receiver<FileLoadResult>>,
@@ -256,6 +257,9 @@ struct RoutineDefinitionLoadResult {
     result: Result<core_domain::RoutineDefinition, String>,
 }
 
+#[derive(Clone, PartialEq)]
+enum SummaryFilter { Tables, Views, Procedures, Functions }
+
 #[derive(Clone)]
 struct TableSummaryTabState {
     id: String,
@@ -270,6 +274,9 @@ struct TableSummaryTabState {
     sort_column: Option<usize>,
     sort_ascending: bool,
     search_filter: String,
+    filter: SummaryFilter,
+    routines_loaded: bool,
+    routine_summaries: Vec<driver_api::TableSummary>,
     needs_reload: bool,
     pending_open_table: Option<usize>, // 行索引，双击时设置
     pending_actions: Vec<SummaryContextAction>,
@@ -288,6 +295,7 @@ struct TableSummaryTabState {
     cached_sort_col: Option<usize>,
     cached_sort_asc: bool,
     cached_data_len: usize,
+    cached_summary_filter: SummaryFilter,
 }
 
 #[derive(Clone)]
@@ -331,6 +339,7 @@ enum SummaryContextAction {
     NewTable { connection_id: String, database: String, schema: Option<String> },
     Reload,
     LoadCollectionStats { connection_id: String, database: String, collections: Vec<String> },
+    LoadRoutines,
 }
 
 #[derive(Clone)]
@@ -1491,6 +1500,7 @@ impl DesktopApp {
             pending_table_preview: None,
             pending_table_summary: None,
             pending_schema_summary: None,
+            pending_routine_summary: None,
             pending_routine_definition: HashMap::new(),
             pending_processlist: None,
             pending_file_load: None,
@@ -2676,6 +2686,45 @@ impl DesktopApp {
                     if let Some(WorkspaceTab::SchemaSummary(tab)) = self.tabs.iter_mut().find(|t| {
                         matches!(t, WorkspaceTab::SchemaSummary(ts) if ts.id == schema_tab_id)
                     }) {
+                        tab.loading = false;
+                        self.status_message = tr!("加载失败：任务异常终止").into();
+                        self.status_level = StatusLevel::Error;
+                    }
+                }
+            }
+        }
+
+        // Poll routine summary results (async: filter tab switch to Procedures/Functions)
+        if let Some((routine_tab_id, receiver)) = self.pending_routine_summary.take() {
+            match receiver.try_recv() {
+                Ok(message) => {
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::TableSummary(ts) if ts.id == message.tab_id)
+                    }) {
+                        match message.result {
+                            Ok(summaries) => {
+                                tab.routine_summaries = summaries;
+                                tab.routines_loaded = true;
+                                tab.loading = false;
+                            }
+                            Err(error) => {
+                                tab.routines_loaded = true;
+                                tab.loading = false;
+                                self.status_message = error;
+                                self.status_level = StatusLevel::Error;
+                            }
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_routine_summary = Some((routine_tab_id, receiver));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::warn!(tab_id = %routine_tab_id, "存储过程汇总异步任务已断开");
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::TableSummary(ts) if ts.id == routine_tab_id)
+                    }) {
+                        tab.routines_loaded = true;
                         tab.loading = false;
                         self.status_message = tr!("加载失败：任务异常终止").into();
                         self.status_level = StatusLevel::Error;
@@ -4352,6 +4401,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     sort_column: None,
                     sort_ascending: true,
                     search_filter: String::new(),
+                    filter: SummaryFilter::Tables,
+                    routines_loaded: false,
+                    routine_summaries: Vec::new(),
                     needs_reload: false,
                     pending_open_table: None,
                     pending_actions: Vec::new(),
@@ -4369,11 +4421,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     cached_sort_col: None,
                     cached_sort_asc: true,
                     cached_data_len: 0,
+                    cached_summary_filter: SummaryFilter::Tables,
                 };
-                self.tabs.push(WorkspaceTab::TableSummary(state));
-                self.active_tab = self.tabs.len().saturating_sub(1);
-                self.scroll_tabs_to_end = true;
-
                 let services = self.services.clone();
                 let handle = self.runtime.handle().clone();
                 let (sender, receiver) = mpsc::channel();
@@ -5625,6 +5674,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         sort_column: None,
                         sort_ascending: true,
                         search_filter: String::new(),
+                        filter: SummaryFilter::Tables,
+                        routines_loaded: false,
+                        routine_summaries: Vec::new(),
                         needs_reload: false,
                         pending_open_table: None,
                         pending_actions: Vec::new(),
@@ -5642,6 +5694,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         cached_sort_col: None,
                         cached_sort_asc: true,
                         cached_data_len: 0,
+                        cached_summary_filter: SummaryFilter::Tables,
                     };
                     self.tabs.push(WorkspaceTab::TableSummary(state));
                     self.active_tab = self.tabs.len().saturating_sub(1);
@@ -6918,14 +6971,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                     }
 
-                    // 处理双击打开表
+                    // 处理双击打开表/视图/存储过程/函数
                     let pending_open = if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get(self.active_tab) {
-                        tab.pending_open_table.and_then(|ri| tab.table_summaries.get(ri).map(|s| {
+                        let items = Self::summary_display_items(tab);
+                        tab.pending_open_table.and_then(|ri| items.get(ri).map(|s| {
                             let node = ExplorerNode {
                                 id: format!("{}::{}", tab.connection_id, s.name),
                                 connection_id: tab.connection_id.clone(),
                                 name: s.name.clone(),
-                                node_type: if s.table_type == "VIEW" || s.table_type == "MATERIALIZED VIEW" {
+                                node_type: if s.table_type == "PROCEDURE" {
+                                    ExplorerNodeType::Procedure
+                                } else if s.table_type == "FUNCTION" {
+                                    ExplorerNodeType::Function
+                                } else if s.table_type == "VIEW" || s.table_type == "MATERIALIZED VIEW" {
                                     ExplorerNodeType::View
                                 } else {
                                     ExplorerNodeType::Table
@@ -6945,7 +7003,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         tab.pending_open_table = None;
                     }
                     if let Some(node) = pending_open {
-                        self.open_table_tab(&node, true, false);
+                        if matches!(node.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function) {
+                            self.open_routine_tab(&node, false);
+                        } else {
+                            self.open_table_tab(&node, true, false);
+                        }
                     }
 
                     // 处理右键菜单动作
@@ -6957,7 +7019,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     for action in actions {
                         match action {
                             SummaryContextAction::OpenTable { node, load_data, force_new_tab } => {
-                                self.open_table_tab(&node, load_data, force_new_tab);
+                                if matches!(node.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function) {
+                                    self.open_routine_tab(&node, force_new_tab);
+                                } else {
+                                    self.open_table_tab(&node, load_data, force_new_tab);
+                                }
                             }
                             SummaryContextAction::NewQuery { connection_id, database, sql } => {
                                 self.create_query_tab(Some(connection_id), database, Some(sql));
@@ -7049,6 +7115,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     tab.needs_reload = true;
                                 }
                             }
+                            SummaryContextAction::LoadRoutines => {
+                                if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                                    tab.loading = true;
+                                    let connection_id = tab.connection_id.clone();
+                                    let database = tab.database.clone();
+                                    let schema = tab.schema.clone();
+                                    let tab_id = tab.id.clone();
+                                    let services = self.services.clone();
+                                    let handle = self.runtime.handle().clone();
+                                    let (sender, receiver) = mpsc::channel();
+                                    self.pending_routine_summary = Some((tab_id.clone(), receiver));
+                                    handle.spawn(async move {
+                                        let result = services.load_routines_summary(&connection_id, &database, schema.as_deref()).await;
+                                        let _ = sender.send(TableSummaryLoadResult {
+                                            tab_id,
+                                            result: result.map_err(|e| e.to_string()),
+                                        });
+                                    });
+                                }
+                            }
                             SummaryContextAction::LoadCollectionStats { connection_id, database, collections } => {
                                 let services = self.services.clone();
                                 let handle = self.runtime.handle().clone();
@@ -7132,6 +7218,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         sort_column: None,
                                         sort_ascending: true,
                                         search_filter: String::new(),
+                                        filter: SummaryFilter::Tables,
+                                        routines_loaded: false,
+                                        routine_summaries: Vec::new(),
                                         needs_reload: false,
                                         pending_open_table: None,
                                         pending_actions: Vec::new(),
@@ -7149,6 +7238,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         cached_sort_col: None,
                                         cached_sort_asc: true,
                                         cached_data_len: 0,
+                                        cached_summary_filter: SummaryFilter::Tables,
                                     };
                                     self.tabs.push(WorkspaceTab::TableSummary(state));
                                     self.active_tab = self.tabs.len().saturating_sub(1);
@@ -10347,6 +10437,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         action
     }
 
+    /// 根据当前筛选标签返回对应的数据源
+    fn summary_display_items(tab: &TableSummaryTabState) -> &Vec<driver_api::TableSummary> {
+        match tab.filter {
+            SummaryFilter::Tables | SummaryFilter::Views => &tab.table_summaries,
+            SummaryFilter::Procedures | SummaryFilter::Functions => &tab.routine_summaries,
+        }
+    }
+
     fn render_table_summary_tab(
         ui: &mut egui::Ui,
         tab: &mut TableSummaryTabState,
@@ -10355,20 +10453,47 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     ) -> TabUiAction {
         let palette = mac_ui_palette_from_ui(ui);
 
-        let cols = summary_table_columns(tab.database_kind);
+        // 根据筛选标签选择合适的列定义
+        let cols = match tab.filter {
+            SummaryFilter::Tables => summary_table_columns(tab.database_kind),
+            SummaryFilter::Views => summary_view_columns(tab.database_kind),
+            SummaryFilter::Procedures | SummaryFilter::Functions => summary_routine_columns(tab.database_kind),
+        };
 
         // 仅在输入变化时重新过滤/排序，避免每帧 O(n) 分配
-        let filter_changed = tab.search_filter != tab.cached_filter;
+        let filter_changed = tab.search_filter != tab.cached_filter || tab.filter != tab.cached_summary_filter;
         let sort_changed = tab.sort_column != tab.cached_sort_col || tab.sort_ascending != tab.cached_sort_asc;
-        let data_changed = tab.table_summaries.len() != tab.cached_data_len;
+        let data_changed = match tab.filter {
+            SummaryFilter::Tables | SummaryFilter::Views => tab.table_summaries.len() != tab.cached_data_len,
+            SummaryFilter::Procedures | SummaryFilter::Functions => tab.routine_summaries.len() != tab.cached_data_len,
+        };
         if filter_changed || sort_changed || data_changed {
+            let items = Self::summary_display_items(tab);
+            let type_filtered: Vec<usize> = match tab.filter {
+                SummaryFilter::Tables => items.iter().enumerate()
+                    .filter(|(_, s)| !s.table_type.contains("VIEW"))
+                    .map(|(i, _)| i)
+                    .collect(),
+                SummaryFilter::Views => items.iter().enumerate()
+                    .filter(|(_, s)| s.table_type.contains("VIEW"))
+                    .map(|(i, _)| i)
+                    .collect(),
+                SummaryFilter::Procedures => items.iter().enumerate()
+                    .filter(|(_, s)| s.table_type == "PROCEDURE")
+                    .map(|(i, _)| i)
+                    .collect(),
+                SummaryFilter::Functions => items.iter().enumerate()
+                    .filter(|(_, s)| s.table_type == "FUNCTION")
+                    .map(|(i, _)| i)
+                    .collect(),
+            };
+
             let filtered: Vec<usize> = if tab.search_filter.is_empty() {
-                (0..tab.table_summaries.len()).collect()
+                type_filtered
             } else {
                 let q = tab.search_filter.to_lowercase();
-                tab.table_summaries.iter().enumerate()
-                    .filter(|(_, s)| s.name.to_lowercase().contains(&q))
-                    .map(|(i, _)| i)
+                type_filtered.into_iter()
+                    .filter(|&i| items[i].name.to_lowercase().contains(&q))
                     .collect()
             };
 
@@ -10376,8 +10501,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if let Some(sort_col) = tab.sort_column {
                 let col_name = cols.get(sort_col).map(|c| c.0).unwrap_or_default();
                 sorted.sort_by(|&a, &b| {
-                    let sa = &tab.table_summaries[a];
-                    let sb = &tab.table_summaries[b];
+                    let sa = &items[a];
+                    let sb = &items[b];
                     let (na, nb) = match col_name {
                         "行数" | "文档数" => (sa.row_count.map(|v| v as f64), sb.row_count.map(|v| v as f64)),
                         "总大小" => (sa.total_size.map(|v| v as f64), sb.total_size.map(|v| v as f64)),
@@ -10400,18 +10525,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 });
             } else {
                 sorted.sort_by(|&a, &b| {
-                    tab.table_summaries[a].name.cmp(&tab.table_summaries[b].name)
+                    items[a].name.cmp(&items[b].name)
                 });
             }
             tab.cached_sorted_indices = sorted;
             tab.cached_filter = tab.search_filter.clone();
+            tab.cached_summary_filter = tab.filter.clone();
             tab.cached_sort_col = tab.sort_column;
             tab.cached_sort_asc = tab.sort_ascending;
-            tab.cached_data_len = tab.table_summaries.len();
+            tab.cached_data_len = match tab.filter {
+                SummaryFilter::Tables | SummaryFilter::Views => tab.table_summaries.len(),
+                SummaryFilter::Procedures | SummaryFilter::Functions => tab.routine_summaries.len(),
+            };
         }
         let sorted_indices = tab.cached_sorted_indices.clone();
 
-        let total = tab.table_summaries.len();
+        let total = match tab.filter {
+            SummaryFilter::Tables | SummaryFilter::Views => tab.table_summaries.len(),
+            SummaryFilter::Procedures | SummaryFilter::Functions => tab.routine_summaries.len(),
+        };
         let selected_count = tab.selected_indices.len();
 
         // StripBuilder: toolbar(38) + content(rest) + status(26)
@@ -10435,7 +10567,40 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 );
                                 ui.separator();
 
-                                // 搜索框
+                                // 筛选标签按钮（MongoDB 不显示）
+                                if tab.database_kind != DatabaseKind::MongoDb {
+                                    let filters: Vec<(SummaryFilter, &str)> = match tab.database_kind {
+                                        DatabaseKind::MySql | DatabaseKind::Postgres => vec![
+                                            (SummaryFilter::Tables, tr!("表")),
+                                            (SummaryFilter::Views, tr!("视图")),
+                                            (SummaryFilter::Procedures, tr!("存储过程")),
+                                            (SummaryFilter::Functions, tr!("函数")),
+                                        ],
+                                        _ => vec![
+                                            (SummaryFilter::Tables, tr!("表")),
+                                            (SummaryFilter::Views, tr!("视图")),
+                                        ],
+                                    };
+                                    for (f, label) in filters {
+                                        let is_active = tab.filter == f;
+                                        let style = if is_active { mini_accent_style(colors, fonts.sm) } else { mini_subtle_style(colors, fonts.sm) };
+                                        if mini_button(ui, label, style).clicked() {
+                                            tab.filter = f.clone();
+                                            tab.search_filter.clear();
+                                            tab.cached_filter.clear();
+                                            tab.cached_data_len = 0;
+                                            tab.col_widths.clear();
+                                            tab.sort_column = None;
+                                            tab.selected_indices.clear();
+                                            if matches!(f, SummaryFilter::Procedures | SummaryFilter::Functions)
+                                                && !tab.routines_loaded
+                                            {
+                                                tab.pending_actions.push(SummaryContextAction::LoadRoutines);
+                                            }
+                                        }
+                                    }
+                                    ui.separator();
+                                }
                                 let search_frame = egui::Frame::new()
                                     .fill(palette.search_bg)
                                     .stroke(egui::Stroke::new(1.0, palette.table_grid))
@@ -10447,7 +10612,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             .font(egui::TextStyle::Small)
                                             .desired_width(200.0)
                                             .frame(false)
-                                            .hint_text(if tab.database_kind == DatabaseKind::MongoDb { tr!("搜索集合名...") } else { tr!("搜索表名...") }),
+                                            .hint_text(match (&tab.database_kind, &tab.filter) {
+                                                (_, SummaryFilter::Procedures) => tr!("搜索存储过程名..."),
+                                                (_, SummaryFilter::Functions) => tr!("搜索函数名..."),
+                                                (DatabaseKind::MongoDb, _) => tr!("搜索集合名..."),
+                                                (_, _) => tr!("搜索表名..."),
+                                            }),
                                     );
                                 });
 
@@ -10481,7 +10651,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 return;
                             }
 
-                            if tab.table_summaries.is_empty() {
+                            if Self::summary_display_items(tab).is_empty() {
                                 ui.vertical_centered(|ui| {
                                     ui.add_space(60.0);
                                     ui.label(RichText::new(tr!("暂无数据")).color(palette.weak_text));
@@ -10502,7 +10672,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                             // 初始化列宽（首次使用估算值，之后由拖拽状态保持）
                             if tab.col_widths.len() != cols.len() {
-                                let estimated = estimate_summary_column_widths(&cols, &tab.table_summaries);
+                                let estimated = estimate_summary_column_widths(&cols, Self::summary_display_items(tab));
                                 tab.col_widths = estimated;
                             }
 
@@ -10628,7 +10798,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                                                     let content_rect = rect.shrink2(egui::vec2(4.0, 1.0));
 
-                                                    // 重命名模式：表名单元格渲染 TextEdit（与数据表 editing_cell 一致）
+                                                    // 预提取行数据（仅读取，items 借用立即释放）
+                                                    let row_name = Self::summary_display_items(tab)[ri].name.clone();
+                                                    let row_type = Self::summary_display_items(tab)[ri].table_type.clone();
+                                                    let node = summary_to_node(&Self::summary_display_items(tab)[ri], tab);
+
+                                                    let mut response = ui.allocate_rect(rect, egui::Sense::click());
                                                     if col_idx == 0 && tab.renaming_row == Some(ri) {
                                                         // 编辑态背景色（与数据表一致，不使用选中背景色）
                                                         let editor_fill = table_active_cell_fill(&palette, cell_fill, false, false);
@@ -10656,15 +10831,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
                                                         if enter || (lost && !escape) {
                                                             let new_name = tab.rename_edit.trim().to_string();
-                                                            let old_name = tab.table_summaries[ri].name.clone();
-                                                            if !new_name.is_empty() && new_name != old_name {
-                                                                let is_view = tab.table_summaries[ri].table_type == "VIEW"
-                                                                    || tab.table_summaries[ri].table_type == "MATERIALIZED VIEW";
+                                                            let old_name = &row_name;
+                                                            if !new_name.is_empty() && new_name != *old_name {
+                                                                let is_view = row_type == "VIEW"
+                                                                    || row_type == "MATERIALIZED VIEW";
                                                                 tab.pending_actions.push(SummaryContextAction::RenameTable {
                                                                     connection_id: tab.connection_id.clone(),
                                                                     database: tab.database.clone(),
                                                                     schema: tab.schema.clone(),
-                                                                    old_name,
+                                                                    old_name: old_name.clone(),
                                                                     new_name,
                                                                     is_view,
                                                                     kind: tab.database_kind,
@@ -10674,10 +10849,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         } else if escape {
                                                             tab.renaming_row = None;
                                                         }
-                                                        inner.inner.response.on_hover_cursor(egui::CursorIcon::Text);
+                                                        response = inner.inner.response;
+                                                        response = response.on_hover_cursor(egui::CursorIcon::Text);
                                                     } else {
                                                     // 正常文本绘制
-                                                    let text = summary_cell_value(&tab.table_summaries[ri], col_idx, &cols);
+                                                    let items = Self::summary_display_items(tab);
+                                                    let text = summary_cell_value(&items[ri], col_idx, &cols);
                                                     if text.is_empty() {
                                                         // 空值不绘制
                                                     } else {
@@ -10715,19 +10892,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                     // 首列 tooltip
                                                     let response = if col_idx == 0 {
-                                                        let row_name = tab.table_summaries[ri].name.clone();
                                                         response.on_hover_text(&row_name)
                                                     } else {
                                                         response
                                                     };
                                                     // 所有列都支持右键菜单
                                                     {
-                                                        let row_name = tab.table_summaries[ri].name.clone();
-                                                        let row_type = tab.table_summaries[ri].table_type.clone();
-                                                        let node = summary_to_node(&tab.table_summaries[ri], tab);
                                                         let _ = response.context_menu(|ui| {
                                                             ctx_menu_style(ui);
                                                             let is_view = row_type == "VIEW" || row_type == "MATERIALIZED VIEW";
+                                                            let is_routine = row_type == "PROCEDURE" || row_type == "FUNCTION";
                                                             let kind = tab.database_kind;
 
                                                             // 右键未选中行：选中该行并取消其他选中；已选中则不改变选区
@@ -10755,6 +10929,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             // 查看定义
                                                             let def_label = if is_view {
                                                                 tr!("查看视图定义")
+                                                            } else if is_routine && row_type == "PROCEDURE" {
+                                                                tr!("查看存储过程定义")
+                                                            } else if is_routine {
+                                                                tr!("查看函数定义")
                                                             } else if kind == DatabaseKind::MongoDb {
                                                                 tr!("查看集合定义")
                                                             } else {
@@ -10781,13 +10959,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             // 在表上新建查询
                                                             let query_label = if is_view {
                                                                 tr!("在视图上新建查询")
+                                                            } else if is_routine && row_type == "PROCEDURE" {
+                                                                tr!("在存储过程上新建查询")
+                                                            } else if is_routine {
+                                                                tr!("在函数上新建查询")
                                                             } else if kind == DatabaseKind::MongoDb {
                                                                 tr!("在集合上新建查询")
                                                             } else {
                                                                 tr!("在表上新建查询")
                                                             };
                                                             if menu_button_with_shortcut(ui, query_label, &format!("{}+D", MOD_KEY)) {
-                                                                let sql = if kind == DatabaseKind::MongoDb {
+                                                                let sql = if is_routine && row_type == "PROCEDURE" {
+                                                                    format!("CALL {}();\n", row_name)
+                                                                } else if is_routine {
+                                                                    format!("SELECT {}();\n", row_name)
+                                                                } else if kind == DatabaseKind::MongoDb {
                                                                     format!("db.{}.find({{}}).limit(100);\n", row_name)
                                                                 } else {
                                                                     let from_clause = match kind {
@@ -10808,6 +10994,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             }
                                                             ui.separator();
 
+                                                            if !is_routine {
                                                             // 转储子菜单
                                                             let dump_label = if kind == DatabaseKind::MongoDb {
                                                                 tr!("转储数据 ▸")
@@ -10875,9 +11062,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 tr!("重命名表")
                                                             };
                                                             if ui.button(rename_label).clicked() {
-                                                                let name = tab.table_summaries[ri].name.clone();
                                                                 tab.renaming_row = Some(ri);
-                                                                tab.rename_edit = name;
+                                                                tab.rename_edit = row_name.clone();
                                                                 tab.rename_focus_requested = true;
                                                                 ui.close();
                                                             }
@@ -11013,6 +11199,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 });
                                                                 ui.close();
                                                             }
+                                                            } // end if !is_routine
+
                                                             // 刷新
                                                             if menu_button_with_shortcut(ui, tr!("刷新"), &format!("{}+R", MOD_KEY)) {
                                                                 tab.pending_actions.push(SummaryContextAction::Reload);
@@ -11056,10 +11244,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .inner_margin(egui::Margin::symmetric(10, 4))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                let label = if tab.database_kind == DatabaseKind::MongoDb {
-                                    tr!("共 {} 个集合", total)
-                                } else {
-                                    tr!("共 {} 个表", total)
+                                let label = match (&tab.database_kind, &tab.filter) {
+                                    (_, SummaryFilter::Procedures) => tr!("共 {} 个存储过程", total),
+                                    (_, SummaryFilter::Functions) => tr!("共 {} 个函数", total),
+                                    (DatabaseKind::MongoDb, _) => tr!("共 {} 个集合", total),
+                                    (_, _) => tr!("共 {} 个表", total),
                                 };
                                 ui.label(RichText::new(label).size(fonts.sm).color(palette.weak_text));
                                 if selected_count > 0 {
@@ -22047,6 +22236,44 @@ fn summary_table_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)
     }
 }
 
+/// 视图筛选时的列定义（无行数、大小等统计列）
+fn summary_view_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)> {
+    match db_kind {
+        DatabaseKind::MySql => vec![
+            (tr!("表名"), 150.0, false),
+            (tr!("引擎"), 70.0, false),
+            (tr!("排序规则"), 110.0, false),
+            (tr!("注释"), 150.0, false),
+            (tr!("创建时间"), 140.0, false),
+        ],
+        DatabaseKind::Postgres => vec![
+            (tr!("表名"), 150.0, false),
+            (tr!("注释"), 200.0, false),
+        ],
+        DatabaseKind::MongoDb => vec![
+            (tr!("集合名"), 200.0, false),
+            (tr!("类型"), 100.0, false),
+        ],
+    }
+}
+
+/// 存储过程/函数筛选时的列定义
+fn summary_routine_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)> {
+    match db_kind {
+        DatabaseKind::MySql => vec![
+            (tr!("表名"), 150.0, false),
+            (tr!("类型"), 80.0, false),
+            (tr!("注释"), 150.0, false),
+            (tr!("创建时间"), 140.0, false),
+        ],
+        DatabaseKind::Postgres => vec![
+            (tr!("表名"), 150.0, false),
+            (tr!("类型"), 100.0, false),
+        ],
+        DatabaseKind::MongoDb => vec![],
+    }
+}
+
 fn estimate_summary_column_widths(
     cols: &[(&str, f32, bool)],
     summaries: &[driver_api::TableSummary],
@@ -22091,7 +22318,11 @@ fn summary_to_node(s: &driver_api::TableSummary, tab: &TableSummaryTabState) -> 
         id: format!("{}::{}", tab.connection_id, s.name),
         connection_id: tab.connection_id.clone(),
         name: s.name.clone(),
-        node_type: if s.table_type == "VIEW" || s.table_type == "MATERIALIZED VIEW" {
+        node_type: if s.table_type == "PROCEDURE" {
+            ExplorerNodeType::Procedure
+        } else if s.table_type == "FUNCTION" {
+            ExplorerNodeType::Function
+        } else if s.table_type == "VIEW" || s.table_type == "MATERIALIZED VIEW" {
             ExplorerNodeType::View
         } else {
             ExplorerNodeType::Table

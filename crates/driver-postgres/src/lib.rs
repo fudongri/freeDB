@@ -662,6 +662,49 @@ impl DatabaseDriver for PostgresDriver {
         Ok(summaries)
     }
 
+    async fn load_routines_summary(
+        &self,
+        handle: &mut ConnectionHandle,
+        _database: &str,
+        schema: Option<&str>,
+    ) -> AppResult<Vec<driver_api::TableSummary>> {
+        let client = pg_client(handle)?;
+        let schema_name = schema.unwrap_or("public");
+
+        let sql = format!(
+            "SELECT routine_name, routine_type \
+             FROM information_schema.routines \
+             WHERE routine_schema = '{}' \
+             ORDER BY routine_name",
+            schema_name.replace('\'', "''"),
+        );
+        let pg_rows = client.simple_query(&sql).await.map_err(map_pg_error)?;
+        let mut summaries = Vec::new();
+        for msg in &pg_rows {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let name = row.get(0).unwrap_or_default().to_string();
+                let routine_type = match row.get(1).unwrap_or("FUNCTION") {
+                    "PROCEDURE" => "PROCEDURE",
+                    _ => "FUNCTION",
+                };
+                summaries.push(driver_api::TableSummary {
+                    name,
+                    table_type: routine_type.to_string(),
+                    row_count: None,
+                    total_size: None,
+                    data_size: None,
+                    index_size: None,
+                    engine: None,
+                    collation: None,
+                    primary_keys: Vec::new(),
+                    comment: None,
+                    create_time: None,
+                });
+            }
+        }
+        Ok(summaries)
+    }
+
     async fn load_schemas_summary(
         &self,
         handle: &mut ConnectionHandle,
