@@ -22049,22 +22049,66 @@ fn render_table_editor_cell(
     ui.painter()
         .rect_filled(table_cell_fill_rect(ui.max_rect(), selected), 0.0, editor_fill);
     let outer_rect = ui.max_rect();
+
+    if edit.value.contains('\n') {
+        // 多行：单元格内显示首行预览，下方浮层显示完整编辑器
+        let first_line = edit.value.split('\n').next().unwrap_or("");
+        let preview_response = ui.put(
+            outer_rect,
+            egui::Label::new(RichText::new(first_line).size(palette.fonts.base).color(palette.weak_text)),
+        );
+        let pos = egui::pos2(outer_rect.left(), outer_rect.bottom());
+        let width = outer_rect.width().max(200.0);
+        egui::Area::new(egui::Id::new("multiline_editor"))
+            .fixed_pos(pos)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(width);
+                ui.set_max_height(150.0);
+                egui::Frame::new()
+                    .fill(palette.workspace_bg)
+                    .stroke(Stroke::new(1.0, palette.selection_stroke))
+                    .inner_margin(egui::Margin::symmetric(4, 1))
+                    .rounding(4.0)
+                    .show(ui, |ui| {
+                        ui.set_min_width(width);
+                        egui::ScrollArea::vertical()
+                            .max_height(150.0)
+                            .show(ui, |ui| {
+                                let text_edit_id = ui.make_persistent_id("multiline_editor_text");
+                                let te = TextEdit::multiline(&mut edit.value)
+                                    .frame(false)
+                                    .margin(egui::Margin::symmetric(4, 1))
+                                    .desired_width(ui.available_width().max(24.0))
+                                    .id(text_edit_id);
+                                let mut resp = te.show(ui);
+                                if edit.focus_requested {
+                                    ui.ctx().memory_mut(|m| m.request_focus(text_edit_id));
+                                    let c = egui::text::CCursor::new(edit.value.chars().count());
+                                    resp.state.cursor.set_char_range(Some(egui::text::CCursorRange::one(c)));
+                                    resp.state.store(ui.ctx(), text_edit_id);
+                                    edit.focus_requested = false;
+                                }
+                                if resp.response.changed() {
+                                    edit.is_null = false;
+                                }
+                            });
+                    });
+            });
+        return preview_response.on_hover_cursor(egui::CursorIcon::Text);
+    }
+
     let mut inner = egui::Frame::new()
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0, palette.selection_stroke))
         .inner_margin(egui::Margin::ZERO)
         .show(ui, |ui| {
             ui.set_min_height(28.0);
-            egui::ScrollArea::vertical()
-                .max_height(ui.available_height())
-                .show(ui, |ui| {
-                    TextEdit::multiline(&mut edit.value)
-                        .frame(false)
-                        .margin(egui::Margin::symmetric(4, 1))
-                        .desired_width(ui.available_width().max(24.0))
-                        .show(ui)
-                })
-                .inner
+            TextEdit::singleline(&mut edit.value)
+                .frame(false)
+                .margin(egui::Margin::symmetric(4, 1))
+                .desired_width(ui.available_width().max(24.0))
+                .show(ui)
         });
     if inner.inner.response.changed() {
         edit.is_null = false;
