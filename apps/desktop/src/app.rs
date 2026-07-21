@@ -19883,8 +19883,16 @@ fn render_editable_result_table(
                                                 ui.ctx().request_repaint();
                                             }
                                         }
-                                        // Enter/失焦提交编辑
+                                        // Enter/失焦/ESC提交或取消编辑
                                         if is_editing {
+                                            let multiline_esc = ui.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("multiline_esc_cancel")).unwrap_or(false));
+                                            if multiline_esc {
+                                                if let Some(cell) = edit.editing_cell.take() {
+                                                    if let TableEditTarget::ExistingRow(row_index) = cell.target {
+                                                        edit.pending_cell_changes.remove(&(row_index, cell.column));
+                                                    }
+                                                }
+                                            }
                                             let enter_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                             let old_value = cell_value.as_text().unwrap_or_default().to_string();
                                             let old_is_null = cell_value.is_null();
@@ -21057,6 +21065,14 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 ui.ctx().request_repaint();
                                             }
                                             if is_editing {
+                                                let multiline_esc = ui.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("multiline_esc_cancel")).unwrap_or(false));
+                                                if multiline_esc {
+                                                    if let Some(edit) = tab.editing_cell.take() {
+                                                        if let TableEditTarget::ExistingRow(row_index) = edit.target {
+                                                            tab.pending_cell_changes.remove(&(row_index, edit.column));
+                                                        }
+                                                    }
+                                                }
                                                 let enter_pressed = ui.ctx().input(|input| {
                                                     input.key_pressed(egui::Key::Enter)
                                                 });
@@ -21352,6 +21368,10 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     );
                                                 }
                                                 if is_editing {
+                                                    let multiline_esc = ui.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("multiline_esc_cancel")).unwrap_or(false));
+                                                    if multiline_esc {
+                                                        tab.editing_cell = None;
+                                                    }
                                                     let enter_pressed = ui.ctx().input(|input| {
                                                         input.key_pressed(egui::Key::Enter)
                                                     });
@@ -21962,17 +21982,7 @@ fn render_table_body_interactive_cell(
         if display.monospace { palette.fonts.mono } else { palette.fonts.base },
         if display.monospace { FontFamily::Monospace } else { FontFamily::Proportional },
     );
-    let text_is_truncated = !display.text.is_empty()
-        && (value.as_text().is_some_and(|t| t.contains('\n'))
-            || {
-                let job = egui::text::LayoutJob::simple(
-                    display.text.clone(),
-                    font_id.clone(),
-                    display_color,
-                    f32::INFINITY,
-                );
-                ui.painter().layout_job(job).rect.width() > clipped_rect.width()
-            });
+    let text_is_truncated = false; // 预览功能已禁用
     if !keyword.is_empty() && search_highlight {
         let halign = match display.align {
             TableCellAlign::Left => egui::Align::LEFT,
@@ -22037,6 +22047,7 @@ fn render_table_body_interactive_cell(
             );
         }
     }
+    /* 预览功能已禁用
     // hover 弹出完整内容浮层（鼠标移入浮层后保持显示）
     let hover_text = if text_is_truncated {
         match value {
@@ -22089,6 +22100,8 @@ fn render_table_body_interactive_cell(
     } else if was_preview_active {
         ui.data_mut(|d| d.remove_temp::<bool>(preview_data_key));
     }
+    */
+    let cell_hovered = false; // 预览功能已禁用
     let response = response.on_hover_cursor(egui::CursorIcon::Text);
     (response, cell_hovered, rect)
 }
@@ -22119,6 +22132,10 @@ fn render_table_editor_cell(
             .fixed_pos(pos)
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
+                // 在 TextEdit 处理之前消费 ESC，通过 data 标记通知外层取消编辑
+                if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                    ui.data_mut(|d| d.insert_temp(egui::Id::new("multiline_esc_cancel"), true));
+                }
                 ui.set_min_width(width);
                 ui.set_max_height(150.0);
                 egui::Frame::new()
@@ -25323,17 +25340,7 @@ fn table_body_cell(
         if display.monospace { FontFamily::Monospace } else { FontFamily::Proportional },
     );
     // 提前计算文本是否被截断（font_id 渲染后会被 move）
-    let text_is_truncated = !display.text.is_empty()
-        && (value.as_text().is_some_and(|t| t.contains('\n'))
-            || {
-                let job = egui::text::LayoutJob::simple(
-                    display.text.clone(),
-                    font_id.clone(),
-                    display_color,
-                    f32::INFINITY,
-                );
-                ui.painter().layout_job(job).rect.width() > clipped_rect.width()
-            });
+    let text_is_truncated = false; // 预览功能已禁用
     if !keyword.is_empty() && search_highlight {
         let halign = match display.align {
             TableCellAlign::Left => egui::Align::LEFT,
@@ -25373,6 +25380,7 @@ fn table_body_cell(
             display_color,
         );
     }
+    /* 预览功能已禁用
     // hover 弹出完整内容浮层（鼠标移入浮层后保持显示）
     let response = ui.allocate_rect(rect, egui::Sense::hover());
     let hover_text = if text_is_truncated {
@@ -25428,6 +25436,7 @@ fn table_body_cell(
             ui.data_mut(|d| d.remove_temp::<bool>(preview_data_key));
         }
     }
+    */
 }
 
 fn table_text_cell(
