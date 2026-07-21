@@ -4308,7 +4308,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if let Some(cid) = cid {
             self.services.clear_user_disconnect(&cid);
             self.active_connections.entry(cid.clone()).or_default();
-            if !self.database_cache.contains_key(&cid) {
+            let connected = self.services.connection_status(&cid).state
+                == core_domain::ConnectionState::Connected;
+            if !connected || !self.database_cache.contains_key(&cid) {
                 self.request_list_databases(Some(cid.clone()));
             }
             self.spawn_schema_load(cid.clone());
@@ -7355,7 +7357,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     self.services.clear_user_disconnect(cid);
                     self.active_connections.entry(cid.clone()).or_default();
                     self.ensure_metadata_cache(cid);
-                    if !self.database_cache.contains_key(cid) {
+                    let connected = self.services.connection_status(cid).state
+                        == core_domain::ConnectionState::Connected;
+                    if !connected || !self.database_cache.contains_key(cid) {
                         self.request_list_databases(Some(cid.clone()));
                     }
                     self.spawn_schema_load(cid.clone());
@@ -7711,7 +7715,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.services.clear_user_disconnect(&connection_id);
                 self.active_connections.entry(connection_id.clone()).or_default();
                 self.ensure_metadata_cache(&connection_id);
-                if !self.database_cache.contains_key(&connection_id) {
+                let connected = self.services.connection_status(&connection_id).state
+                    == core_domain::ConnectionState::Connected;
+                if !connected || !self.database_cache.contains_key(&connection_id) {
                     self.request_list_databases(Some(connection_id.clone()));
                 }
                 self.spawn_schema_load(connection_id.clone());
