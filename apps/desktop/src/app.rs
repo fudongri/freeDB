@@ -115,6 +115,7 @@ pub struct DesktopApp {
     pending_table_preview: Option<(String, Receiver<TablePreviewLoadResult>)>,
     pending_table_summary: Option<(String, Receiver<TableSummaryLoadResult>)>,
     pending_schema_summary: Option<(String, Receiver<SchemaSummaryLoadResult>)>,
+    pending_routine_definition: Option<(String, Receiver<RoutineDefinitionLoadResult>)>,
     pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
     pending_file_load: Option<Receiver<FileLoadResult>>,
     generate_data_receiver: Option<Receiver<GenerateDataEvent>>,
@@ -250,6 +251,11 @@ struct SchemaSummaryLoadResult {
     result: Result<Vec<driver_api::SchemaSummary>, String>,
 }
 
+struct RoutineDefinitionLoadResult {
+    tab_id: String,
+    result: Result<core_domain::RoutineDefinition, String>,
+}
+
 #[derive(Clone)]
 struct TableSummaryTabState {
     id: String,
@@ -334,6 +340,7 @@ enum WorkspaceTab {
     CreateTable(CreateTableState),
     TableSummary(TableSummaryTabState),
     SchemaSummary(SchemaSummaryTabState),
+    Routine(RoutineTabState),
     Dashboard,
     SlowQuery(SlowQueryTabState),
 }
@@ -410,6 +417,7 @@ enum RecentTabEntry {
     CreateTable { connection_id: String, database: String, schema: Option<String> },
     TableSummary { connection_id: String, database: String, schema: Option<String>, title: String },
     SchemaSummary { connection_id: String, database: String, title: String },
+    Routine { connection_id: String, database: Option<String>, schema: Option<String>, name: String, is_procedure: bool },
 }
 
 fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
@@ -444,6 +452,13 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
             database: t.database.clone(),
             title: t.title.clone(),
         }),
+        WorkspaceTab::Routine(t) => Some(RecentTabEntry::Routine {
+            connection_id: t.routine.connection_id.clone(),
+            database: t.routine.database.clone(),
+            schema: t.routine.schema.clone(),
+            name: t.routine.name.clone(),
+            is_procedure: t.routine.is_procedure,
+        }),
         WorkspaceTab::Dashboard => None,
         WorkspaceTab::SlowQuery(_) => None,
         _ => None,
@@ -468,6 +483,9 @@ fn recent_tab_matches(a: &RecentTabEntry, b: &RecentTabEntry) -> bool {
         (RecentTabEntry::SchemaSummary { connection_id: a_conn, database: a_db, .. },
          RecentTabEntry::SchemaSummary { connection_id: b_conn, database: b_db, .. }) =>
             a_conn == b_conn && a_db == b_db,
+        (RecentTabEntry::Routine { connection_id: a_conn, database: a_db, schema: a_schema, name: a_name, .. },
+         RecentTabEntry::Routine { connection_id: b_conn, database: b_db, schema: b_schema, name: b_name, .. }) =>
+            a_conn == b_conn && a_db == b_db && a_schema == b_schema && a_name == b_name,
         _ => false,
     }
 }
@@ -798,6 +816,18 @@ struct TableTabState {
     generate_data_expanded_col: Option<String>,
     generate_data_regex_tests: std::collections::HashMap<String, Vec<String>>,
     generate_data_edit_state: Option<(String, ConstraintEditState)>,
+}
+
+#[derive(Clone)]
+struct RoutineTabState {
+    id: String,
+    title: String,
+    connection_id: String,
+    database_kind: DatabaseKind,
+    routine: core_domain::RoutineRef,
+    definition: Option<core_domain::RoutineDefinition>,
+    error: Option<String>,
+    loading: bool,
 }
 
 impl Default for TableSortState {
@@ -1133,6 +1163,7 @@ enum DdlAction {
     TruncateTable { connection_id: String, database: String, schema: Option<String>, name: String, kind: DatabaseKind },
     RenameTable { connection_id: String, database: String, schema: Option<String>, old_name: String, is_view: bool, kind: DatabaseKind },
     CopyTable { connection_id: String, database: String, schema: Option<String>, name: String, new_name: String, include_data: bool, is_view: bool, kind: DatabaseKind },
+    DropRoutine { connection_id: String, database: String, schema: Option<String>, name: String, is_procedure: bool, kind: DatabaseKind },
 }
 
 #[derive(Clone)]
@@ -1460,6 +1491,7 @@ impl DesktopApp {
             pending_table_preview: None,
             pending_table_summary: None,
             pending_schema_summary: None,
+            pending_routine_definition: None,
             pending_processlist: None,
             pending_file_load: None,
             generate_data_receiver: None,
@@ -2652,6 +2684,35 @@ impl DesktopApp {
             }
         }
 
+        // Poll routine definition results (async: OpenRoutine)
+        if let Some((routine_tab_id, receiver)) = self.pending_routine_definition.take() {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    if let Some(WorkspaceTab::Routine(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::Routine(rt) if rt.id == result.tab_id)
+                    }) {
+                        tab.loading = false;
+                        match result.result {
+                            Ok(def) => tab.definition = Some(def),
+                            Err(e) => tab.error = Some(e),
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_routine_definition = Some((routine_tab_id, receiver));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::warn!(tab_id = %routine_tab_id, "存储过程定义异步任务已断开");
+                    if let Some(WorkspaceTab::Routine(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::Routine(rt) if rt.id == routine_tab_id)
+                    }) {
+                        tab.loading = false;
+                        tab.error = Some(tr!("加载失败：任务异常终止").to_string());
+                    }
+                }
+            }
+        }
+
         // 轮询 SHOW PROCESSLIST 异步结果
         if let Some(ref mut rx) = self.pending_processlist {
             if let Ok(result) = rx.try_recv() {
@@ -2812,7 +2873,10 @@ impl DesktopApp {
         /// Build a SQL-qualified name for a tree node (Table/View → "db"."schema"."table" or "db"."table").
 fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     match node.node_type {
-        ExplorerNodeType::Table | ExplorerNodeType::View => {
+        ExplorerNodeType::Table
+        | ExplorerNodeType::View
+        | ExplorerNodeType::Procedure
+        | ExplorerNodeType::Function => {
             match (&node.database, &node.schema) {
                 (Some(db), Some(schema)) => format!("{db}.{schema}.{}", node.name),
                 (Some(db), None) => format!("{db}.{}", node.name),
@@ -2882,6 +2946,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             WorkspaceTab::SchemaSummary(tab) => {
                 tab.selected_indices.clear();
             }
+            WorkspaceTab::Routine(_) => {}
         }
         self.status_message = tr!("已清除选择").into();
     }
@@ -3069,6 +3134,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             WorkspaceTab::SlowQuery(_) => {}
             WorkspaceTab::TableSummary(_) => {}
             WorkspaceTab::SchemaSummary(_) => {}
+            WorkspaceTab::Routine(_) => {}
         }
     }
 
@@ -3076,6 +3142,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if let Some(node) = self.selected_sidebar_node() {
             if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View) {
                 self.open_table_tab(&node, true, false);
+                return true;
+            }
+            if matches!(node.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function) {
+                self.open_routine_tab(&node, false);
                 return true;
             }
         }
@@ -3439,6 +3509,66 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     reloaded_definition: true,
                 });
             }
+        });
+    }
+
+    fn open_routine_tab(&mut self, node: &ExplorerNode, force_new_tab: bool) {
+        let is_procedure = matches!(node.node_type, ExplorerNodeType::Procedure);
+        let routine = core_domain::RoutineRef {
+            connection_id: node.connection_id.clone(),
+            database: node.database.clone(),
+            schema: node.schema.clone(),
+            name: node.name.clone(),
+            is_procedure,
+        };
+        let database_kind = self.database_kind_for_connection(&routine.connection_id);
+
+        if !force_new_tab {
+            if let Some(idx) = self.tabs.iter().position(|t| {
+                matches!(t, WorkspaceTab::Routine(tab) if
+                    tab.routine.connection_id == routine.connection_id
+                    && tab.routine.database == routine.database
+                    && tab.routine.schema == routine.schema
+                    && tab.routine.name == routine.name
+                )
+            }) {
+                let tab = self.tabs.remove(idx);
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len().saturating_sub(1);
+                self.scroll_tabs_to_end = true;
+                self.record_recent_tab();
+                return;
+            }
+        }
+
+        let tab_id = format!("routine-{}", uuid::Uuid::new_v4());
+        let kind_label = if is_procedure { tr!("存储过程") } else { tr!("函数") };
+        let conn_name = self.connections.iter().find(|c| c.id == routine.connection_id).map(|c| c.name.as_str()).unwrap_or(&routine.connection_id);
+        let title = format!("{} {}@{}", kind_label, routine.label(), conn_name);
+        let routine_tab = RoutineTabState {
+            id: tab_id.clone(),
+            title,
+            connection_id: routine.connection_id.clone(),
+            database_kind,
+            routine: routine.clone(),
+            definition: None,
+            error: None,
+            loading: true,
+        };
+        self.tabs.push(WorkspaceTab::Routine(routine_tab));
+        self.active_tab = self.tabs.len() - 1;
+        self.scroll_tabs_to_end = true;
+        self.record_recent_tab();
+
+        let services = self.services.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.pending_routine_definition = Some((tab_id.clone(), receiver));
+        self.runtime.handle().spawn(async move {
+            let result = services.load_routine_definition(&routine).await;
+            let _ = sender.send(RoutineDefinitionLoadResult {
+                tab_id,
+                result: result.map_err(|e| e.to_string()),
+            });
         });
     }
 
@@ -4300,6 +4430,22 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     });
                 });
             }
+            RecentTabEntry::Routine { connection_id, database, schema, name, is_procedure } => {
+                let kind = self.database_kind_for_connection(connection_id);
+                let node_type = if *is_procedure { ExplorerNodeType::Procedure } else { ExplorerNodeType::Function };
+                let node = ExplorerNode {
+                    id: String::new(),
+                    connection_id: connection_id.clone(),
+                    name: name.clone(),
+                    node_type,
+                    parent_id: None,
+                    database: database.clone(),
+                    schema: schema.clone(),
+                    expandable: false,
+                    loaded: false,
+                };
+                self.open_routine_tab(&node, true);
+            }
         }
     }
 
@@ -4556,7 +4702,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let result = match self.tabs.get(self.active_tab) {
             Some(WorkspaceTab::Query(tab)) => tab.result.clone(),
             Some(WorkspaceTab::Table(tab)) => tab.preview.clone(),
-            Some(WorkspaceTab::CreateTable(_)) | Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | Some(WorkspaceTab::TableSummary(_)) | Some(WorkspaceTab::SchemaSummary(_)) => None,
+            Some(WorkspaceTab::CreateTable(_)) | Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | Some(WorkspaceTab::TableSummary(_)) | Some(WorkspaceTab::SchemaSummary(_)) | Some(WorkspaceTab::Routine(_)) => None,
             None => None,
         };
         let Some(result) = result else {
@@ -4738,7 +4884,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 });
                 self.status_message = tr!("正在刷新模式列表...").into();
             }
-            Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | None => {
+            Some(WorkspaceTab::Dashboard) | Some(WorkspaceTab::SlowQuery(_)) | Some(WorkspaceTab::Routine(_)) | None => {
                 self.refresh_connections();
                 self.status_message = tr!("已刷新连接列表").into();
             }
@@ -5372,6 +5518,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                 }
                 SidebarAction::OpenTable { node, load_data, force_new_tab } => self.open_table_tab(&node, load_data, force_new_tab),
+                SidebarAction::OpenRoutine { node, force_new_tab } => self.open_routine_tab(&node, force_new_tab),
                 SidebarAction::OpenTableSummary { connection_id, database, schema, db_label } => {
                     let database_kind = self.database_kind_for_connection(&connection_id);
                     // PostgreSQL 双击数据库（schema=None）→ 打开 schema 列表
@@ -6149,6 +6296,61 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             ui.close();
                         }
                     }
+                    ExplorerNodeType::Procedure | ExplorerNodeType::Function => {
+                        let is_proc = matches!(node.node_type, ExplorerNodeType::Procedure);
+                        let def_label = if is_proc { tr!("查看存储过程定义") } else { tr!("查看函数定义") };
+                        if ui.button(def_label).clicked() {
+                            actions.push(SidebarAction::OpenRoutine { node: node.clone(), force_new_tab: false });
+                            ui.close();
+                        }
+                        if ui.button(tr!("在新标签页中打开")).clicked() {
+                            actions.push(SidebarAction::OpenRoutine { node: node.clone(), force_new_tab: true });
+                            ui.close();
+                        }
+                        ui.separator();
+                        let (label, shortcut) = if is_proc {
+                            (tr!("在存储过程上新建查询"), format!("{}+D", MOD_KEY))
+                        } else {
+                            (tr!("在函数上新建查询"), format!("{}+D", MOD_KEY))
+                        };
+                        if menu_button_with_shortcut(ui, label, &shortcut) {
+                            let db = node.database.clone();
+                            let schema_prefix = match &node.schema {
+                                Some(s) => format!("{s}."),
+                                None => String::new(),
+                            };
+                            let sql = if is_proc {
+                                format!("CALL {}{}();\n", schema_prefix, node.name)
+                            } else {
+                                format!("SELECT {}{}();\n", schema_prefix, node.name)
+                            };
+                            self.create_query_tab(Some(node.connection_id.clone()), db, Some(sql));
+                            self.record_recent_tab();
+                            ui.close();
+                        }
+                        ui.separator();
+                        let del_label = if is_proc { tr!("删除存储过程") } else { tr!("删除函数") };
+                        if ui.button(del_label).clicked() {
+                            let kind = self.database_kind_for_connection(&node.connection_id);
+                            actions.push(SidebarAction::DdlDelete(DdlPendingDelete {
+                                title: del_label.into(),
+                                name: node.name.clone(),
+                                action: DdlAction::DropRoutine {
+                                    connection_id: node.connection_id.clone(),
+                                    database: node.database.clone().unwrap_or_default(),
+                                    schema: node.schema.clone(),
+                                    name: node.name.clone(),
+                                    is_procedure: is_proc,
+                                    kind,
+                                },
+                                confirm_on_enter: false,
+                                is_truncate: false,
+                                batch_count: 1,
+                                names: Vec::new(),
+                            }));
+                            ui.close();
+                        }
+                    }
                     _ => {}
                 }
                 ui.separator();
@@ -6173,6 +6375,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if response.double_clicked() && !is_node_loading {
                 if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View) {
                     actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: true, force_new_tab: false });
+                } else if matches!(node.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function) {
+                    actions.push(SidebarAction::OpenRoutine { node: node.clone(), force_new_tab: false });
                 } else if node.expandable {
                     // Database/Schema 双击同时打开表汇总
                     match node.node_type {
@@ -6366,6 +6570,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     WorkspaceTab::Dashboard => ("Dashboard", "◉"),
                                                     WorkspaceTab::TableSummary(tab) => (tab.title.as_str(), "☰"),
                                                     WorkspaceTab::SchemaSummary(tab) => (tab.title.as_str(), "☷"),
+                                                    WorkspaceTab::Routine(tab) => {
+                                                        let icon = if tab.routine.is_procedure { "λ" } else { "ƒ" };
+                                                        (tab.title.as_str(), icon)
+                                                    },
                                                     WorkspaceTab::SlowQuery(_) => (tr!("MySQL 慢查询分析"), "⏱"),
                                                 };
                                                 let interaction = tab_button(
@@ -6504,6 +6712,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 WorkspaceTab::Dashboard => ("Dashboard".to_string(), "◉"),
                 WorkspaceTab::TableSummary(tab) => (tab.title.clone(), "☰"),
                 WorkspaceTab::SchemaSummary(tab) => (tab.title.clone(), "☷"),
+                WorkspaceTab::Routine(tab) => {
+                    let icon = if tab.routine.is_procedure { "λ" } else { "ƒ" };
+                    (tab.title.clone(), icon)
+                },
                 WorkspaceTab::SlowQuery(_) => (tr!("MySQL 慢查询分析").to_string(), "⏱"),
             };
 
@@ -6616,6 +6828,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                         WorkspaceTab::SchemaSummary(tab) => {
                             Self::render_schema_summary_tab(ui, tab, &self.theme.colors, &self.theme.fonts)
+                        }
+                        WorkspaceTab::Routine(tab) => {
+                            if tab.loading {
+                                ui.vertical_centered(|ui| { ui.label(tr!("正在加载定义...")); });
+                            } else if let Some(definition) = &tab.definition {
+                                if let Some(create_sql) = &definition.create_sql {
+                                    render_definition_sql_view(ui, &tab.title, create_sql, &self.theme.colors, &self.theme.fonts);
+                                } else {
+                                    ui.label(tr!("当前对象没有可展示的 DDL"));
+                                }
+                            } else if let Some(error) = &tab.error {
+                                ui.label(format!("{}: {}", tr!("加载失败"), error));
+                            }
+                            TabUiAction::None
                         }
                         WorkspaceTab::SlowQuery(state) => {
                             render_slow_query_tab(ui, state, &self.theme)
@@ -14503,7 +14729,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             | DdlAction::DropTable { connection_id, .. }
             | DdlAction::TruncateTable { connection_id, .. }
             | DdlAction::RenameTable { connection_id, .. }
-            | DdlAction::CopyTable { connection_id, .. } => connection_id.clone(),
+            | DdlAction::CopyTable { connection_id, .. }
+            | DdlAction::DropRoutine { connection_id, .. } => connection_id.clone(),
         };
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
@@ -14606,6 +14833,24 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let db = Some(database);
                     let results = services.execute_sql_batch(&connection_id, db.as_deref(), statements).await;
                     results.into_iter().collect::<std::result::Result<Vec<_>, _>>().map(|_| ())
+                }
+                DdlAction::DropRoutine { connection_id, database, schema, name, is_procedure, kind } => {
+                    let routine_type = if is_procedure { "PROCEDURE" } else { "FUNCTION" };
+                    let qualified = match kind {
+                        core_domain::DatabaseKind::Postgres => {
+                            match schema {
+                                Some(s) => format!("DROP {} \"{}\".\"{}\"", routine_type, s.replace('"', "\"\""), name.replace('"', "\"\"")),
+                                None => format!("DROP {} \"{}\"", routine_type, name.replace('"', "\"\"")),
+                            }
+                        }
+                        _ => format!("DROP {} `{}`", routine_type, name.replace('`', "``")),
+                    };
+                    let db = Some(database);
+                    services.execute_sql(core_domain::QueryExecution {
+                        connection_id,
+                        database: db,
+                        sql: qualified,
+                    }).await.map(|_| ())
                 }
             };
             let _ = sender.send(result.map_err(|e| e.to_string()));
@@ -14851,6 +15096,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.children_by_node.remove(&format!("pg-db:{}:{}", connection_id, database));
                 self.reload_node_children(&conn_id, &parent_id);
             }
+            DdlAction::DropRoutine { connection_id, database, schema, kind, .. } => {
+                let parent_id = match kind {
+                    core_domain::DatabaseKind::Postgres => {
+                        if let Some(s) = schema {
+                            format!("pg-schema:{}:{}:{}", connection_id, database, s)
+                        } else {
+                            format!("pg-db:{}:{}", connection_id, database)
+                        }
+                    }
+                    _ => format!("mysql-db:{}:{}", connection_id, database),
+                };
+                self.children_by_node.remove(&parent_id);
+                self.reload_node_children(&conn_id, &parent_id);
+            }
             DdlAction::TruncateTable { .. } => {
                 // 清空不影响表结构，无需刷新侧边栏树
             }
@@ -15041,6 +15300,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 RecentTabEntry::SchemaSummary { connection_id, database, title, .. } => {
                     let sub = format!("{} / {}", self.connection_name(connection_id), database);
                     ("S".to_string(), title.clone(), sub)
+                }
+                RecentTabEntry::Routine { connection_id, database, name, is_procedure, .. } => {
+                    let sub = format!("{} / {}", self.connection_name(connection_id), database.as_deref().unwrap_or(""));
+                    let icon = if *is_procedure { "λ" } else { "ƒ" };
+                    (icon.to_string(), name.clone(), sub)
                 }
             };
             display_items.push((idx, icon, title, subtitle));
@@ -16994,6 +17258,7 @@ enum SidebarAction {
     OpenConnection(String),
     ToggleNode(String, ExplorerNode),
     OpenTable { node: ExplorerNode, load_data: bool, force_new_tab: bool },
+    OpenRoutine { node: ExplorerNode, force_new_tab: bool },
     RefreshConnection(String),
     RefreshNode(String, ExplorerNode),
     DdlInput(DdlInputDialog),
@@ -28618,6 +28883,8 @@ fn node_icon_symbol(node_type: ExplorerNodeType) -> &'static str {
         ExplorerNodeType::Schema => "◇",
         ExplorerNodeType::Table => "▦",
         ExplorerNodeType::View => "◪",
+        ExplorerNodeType::Procedure => "λ",
+        ExplorerNodeType::Function => "ƒ",
     }
 }
 

@@ -270,6 +270,15 @@ impl AppServices {
             .map_err(into_anyhow)
     }
 
+    pub async fn load_routine_definition(&self, routine: &core_domain::RoutineRef) -> Result<core_domain::RoutineDefinition> {
+        let profile = self.require_connection(&routine.connection_id)?;
+        let password = self.require_saved_password(&routine.connection_id)?;
+        self.session_manager
+            .load_routine_definition(&profile, &password, routine)
+            .await
+            .map_err(into_anyhow)
+    }
+
     pub async fn open_table_preview(&self, table: &TableRef, limit: u32) -> Result<QueryResult> {
         let profile = self.require_connection(&table.connection_id)?;
         let password = self.require_saved_password(&table.connection_id)?;

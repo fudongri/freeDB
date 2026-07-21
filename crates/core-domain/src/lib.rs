@@ -189,6 +189,8 @@ pub enum ExplorerNodeType {
     Schema,
     Table,
     View,
+    Procedure,
+    Function,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +223,30 @@ impl TableRef {
             _ => self.table.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutineRef {
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub name: String,
+    pub is_procedure: bool,
+}
+
+impl RoutineRef {
+    pub fn label(&self) -> String {
+        match (&self.schema, &self.database) {
+            (Some(schema), _) => format!("{schema}.{}", self.name),
+            (None, Some(database)) => format!("{database}.{}", self.name),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutineDefinition {
+    pub create_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

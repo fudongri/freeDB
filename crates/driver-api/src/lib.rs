@@ -206,4 +206,15 @@ pub trait DatabaseDriver: Send + Sync {
     ) -> AppResult<Vec<core_domain::ProcessInfo>> {
         Err(core_domain::AppError::Unsupported(tr!("该数据库不支持 SHOW PROCESSLIST").to_string()))
     }
+
+    /// 加载存储过程/函数的 CREATE 定义。默认不支持。
+    async fn load_routine_definition(
+        &self,
+        _handle: &mut ConnectionHandle,
+        _routine: &core_domain::RoutineRef,
+    ) -> AppResult<core_domain::RoutineDefinition> {
+        Err(core_domain::AppError::Unsupported(
+            tr!("该数据库不支持查看存储过程/函数定义").to_string(),
+        ))
+    }
 }

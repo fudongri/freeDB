@@ -191,7 +191,7 @@ impl DatabaseDriver for PostgresDriver {
                     )
                     .await
                     .map_err(map_pg_error)?;
-                Ok(rows
+                let mut nodes: Vec<ExplorerNode> = rows
                     .into_iter()
                     .map(|row| {
                         let name: String = row.get(0);
@@ -213,7 +213,36 @@ impl DatabaseDriver for PostgresDriver {
                             loaded: true,
                         }
                     })
-                    .collect())
+                    .collect();
+                // 查询存储过程和函数
+                let routine_rows = client
+                    .query(
+                        "SELECT routine_name, routine_type FROM information_schema.routines WHERE routine_schema = $1 ORDER BY routine_name",
+                        &[&schema],
+                    )
+                    .await
+                    .map_err(map_pg_error)?;
+                for row in routine_rows {
+                    let name: String = row.get(0);
+                    let kind: String = row.get(1);
+                    let is_proc = kind.eq_ignore_ascii_case("PROCEDURE");
+                    nodes.push(ExplorerNode {
+                        id: format!("pg-routine:{connection_id}:{db}:{schema}:{name}:{kind}"),
+                        connection_id: connection_id.to_string(),
+                        name,
+                        node_type: if is_proc {
+                            ExplorerNodeType::Procedure
+                        } else {
+                            ExplorerNodeType::Function
+                        },
+                        parent_id: Some(parent.id.clone()),
+                        database: Some(db.clone()),
+                        schema: Some(schema.clone()),
+                        expandable: false,
+                        loaded: true,
+                    });
+                }
+                Ok(nodes)
             }
             _ => Ok(Vec::new()),
         }
@@ -333,6 +362,24 @@ impl DatabaseDriver for PostgresDriver {
             Some(ddl)
         };
         Ok(TableDefinition { columns, create_sql, table_comment, engine: None, charset: None })
+    }
+
+    async fn load_routine_definition(
+        &self,
+        handle: &mut ConnectionHandle,
+        routine: &core_domain::RoutineRef,
+    ) -> AppResult<core_domain::RoutineDefinition> {
+        let schema = routine.schema.clone().unwrap_or_else(|| "public".into());
+        let client = pg_client(handle)?;
+        let create_sql = client
+            .query_opt(
+                "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = $1 AND p.proname = $2 LIMIT 1",
+                &[&schema, &routine.name],
+            )
+            .await
+            .map_err(map_pg_error)?
+            .and_then(|row| row.get::<_, Option<String>>(0));
+        Ok(core_domain::RoutineDefinition { create_sql })
     }
 
     async fn preview_table(

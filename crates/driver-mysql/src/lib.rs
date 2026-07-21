@@ -90,7 +90,7 @@ impl DatabaseDriver for MySqlDriver {
             .map_err(map_mysql_error)?;
         let sql = format!("SHOW FULL TABLES FROM {}", quote_mysql(db));
         let rows: Vec<Row> = conn.query(sql).await.map_err(map_mysql_error)?;
-        Ok(rows
+        let mut nodes: Vec<ExplorerNode> = rows
             .into_iter()
             .map(|row| {
                 let name = row.get::<String, _>(0).unwrap_or_default();
@@ -114,7 +114,36 @@ impl DatabaseDriver for MySqlDriver {
                     loaded: true,
                 }
             })
-            .collect())
+            .collect();
+        // 查询存储过程和函数
+        let routine_sql = format!(
+            "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = '{}' ORDER BY ROUTINE_NAME",
+            db.replace('\'', "''")
+        );
+        let routine_rows: Vec<Row> = conn.query(routine_sql).await.unwrap_or_default();
+        for row in routine_rows {
+            let name: Option<String> = row.get(0);
+            let name = name.unwrap_or_default();
+            let kind: Option<String> = row.get(1);
+            let kind = kind.unwrap_or_else(|| "PROCEDURE".into());
+            let is_proc = kind.eq_ignore_ascii_case("PROCEDURE");
+            nodes.push(ExplorerNode {
+                id: format!("mysql-routine:{connection_id}:{db}:{name}:{kind}"),
+                connection_id: connection_id.to_string(),
+                name: name.clone(),
+                node_type: if is_proc {
+                    ExplorerNodeType::Procedure
+                } else {
+                    ExplorerNodeType::Function
+                },
+                parent_id: Some(parent.id.clone()),
+                database: Some(db.clone()),
+                schema: None,
+                expandable: false,
+                loaded: true,
+            });
+        }
+        Ok(nodes)
     }
 
     async fn load_table_definition(
@@ -213,6 +242,35 @@ impl DatabaseDriver for MySqlDriver {
                 .and_then(|row| row.get::<Option<String>, _>(1).flatten().or_else(|| row.get::<Option<String>, _>(0).flatten()))
         };
         Ok(TableDefinition { columns, create_sql, table_comment, engine, charset })
+    }
+
+    async fn load_routine_definition(
+        &self,
+        handle: &mut ConnectionHandle,
+        routine: &core_domain::RoutineRef,
+    ) -> AppResult<core_domain::RoutineDefinition> {
+        let db = routine
+            .database
+            .as_ref()
+            .ok_or_else(|| AppError::Validation("mysql routine requires database".into()))?;
+        let conn = mysql_conn_mut(handle)?;
+        conn.query_drop(format!("USE {}", quote_mysql(db)))
+            .await
+            .map_err(map_mysql_error)?;
+        let kind = if routine.is_procedure { "PROCEDURE" } else { "FUNCTION" };
+        let sql = format!(
+            "SHOW CREATE {} {}.{}",
+            kind,
+            quote_mysql(db),
+            quote_mysql(&routine.name),
+        );
+        let create_sql: Option<String> = conn.query(sql)
+            .await
+            .ok()
+            .and_then(|rows: Vec<Row>| rows.into_iter().next())
+            .and_then(|row| row.get::<Option<String>, _>(2))
+            .flatten();
+        Ok(core_domain::RoutineDefinition { create_sql })
     }
 
     async fn preview_table(
@@ -567,6 +625,7 @@ async fn exec_on_conn(conn: &mut Conn, execution: QueryExecution) -> AppResult<Q
         || lower.starts_with("describe")
         || lower.starts_with("explain")
         || lower.starts_with("execute")
+        || lower.starts_with("call")
     {
         query_rows(conn, &sql).await
     } else {

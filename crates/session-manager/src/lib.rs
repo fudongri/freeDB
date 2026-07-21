@@ -187,6 +187,16 @@ impl SessionManager {
         with_pool!(self, profile, password, db, h, d => d.load_table_definition(h, table))
     }
 
+    pub async fn load_routine_definition(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        routine: &core_domain::RoutineRef,
+    ) -> AppResult<core_domain::RoutineDefinition> {
+        let db = routine.database.as_deref().or(profile.default_database.as_deref());
+        with_pool!(self, profile, password, db, h, d => d.load_routine_definition(h, routine))
+    }
+
     pub async fn preview_table(
         &self,
         profile: &ConnectionProfile,
