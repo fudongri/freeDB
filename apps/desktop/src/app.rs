@@ -9594,20 +9594,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 query_batch_dialog_open = true;
                                             }
                                             let editing_active = edit_ctx.editing_cell.is_some();
+                                            let multiline_active = edit_ctx.editing_cell.as_ref().map_or(false, |e| e.value.contains('\n'));
                                             let cell_sel_typing = tab.result_selections.get(tab.selected_result_index).map_or(false, |s| s.cell_selection_anchor.is_some() && s.cell_selection_typing);
-                                            if editing_active && !cell_sel_typing {
+                                            if editing_active && !cell_sel_typing && !multiline_active {
                                                 let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                                 if save_enter {
                                                     edit_ctx.deferred_save_action = true;
-                                                    // 消费 Enter 事件，防止同帧内对话框自动确认
                                                     ui.ctx().input_mut(|input| { input.consume_key(egui::Modifiers::NONE, egui::Key::Enter); });
                                                 }
-                                            } else if !edit_ctx.committed_edit_this_frame {
+                                            } else if !edit_ctx.committed_edit_this_frame && !multiline_active {
                                                 let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                                 if save_enter {
                                                     action = TabUiAction::SaveQueryTabCellChanges;
                                                     query_batch_dialog_open = true;
-                                                    // 消费 Enter 事件，防止同帧内对话框自动确认
                                                     ui.ctx().input_mut(|input| { input.consume_key(egui::Modifiers::NONE, egui::Key::Enter); });
                                                 }
                                             }
@@ -9618,12 +9617,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 action = TabUiAction::SaveQueryTabCellChanges;
                                                 query_batch_dialog_open = true;
                                             }
-                                            let count = edit_ctx.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
-                                            ui.label(
-                                                RichText::new(tr!("● {} 处未保存的修改", count))
-                                                    .size(chrome.fonts.xs)
-                                                    .color(chrome.danger),
-                                            );
+                                            {
+                                                let count = edit_ctx.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
+                                                ui.label(
+                                                    RichText::new(tr!("● {} 处未保存的修改", count))
+                                                        .size(chrome.fonts.xs)
+                                                        .color(chrome.danger),
+                                                );
+                                            }
                                         }
                                         edit_ctx.committed_edit_this_frame = false;
                                     }
@@ -11962,13 +11963,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     action = TabUiAction::SavePendingCellChanges;
                                                 }
                                                 let editing_active = tab.editing_cell.is_some();
-                                                if editing_active {
+                                                let multiline_active = tab.editing_cell.as_ref().map_or(false, |e| e.value.contains('\n'));
+                                                if editing_active && !multiline_active {
                                                     let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                                     if save_enter {
                                                         tab.deferred_save_action = true;
                                                         ui.ctx().input_mut(|input| { input.consume_key(egui::Modifiers::NONE, egui::Key::Enter); });
                                                     }
-                                                    // Esc cancels the current cell edit
                                                     let cancel_esc = ui.ctx().input(|input| input.key_pressed(egui::Key::Escape));
                                                     if cancel_esc {
                                                         if let Some(edit) = tab.editing_cell.take() {
@@ -11977,7 +11978,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             }
                                                         }
                                                     }
-                                                } else if !tab.committed_edit_this_frame {
+                                                } else if !tab.committed_edit_this_frame && !multiline_active {
                                                     let save_enter = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                                     if save_enter {
                                                         action = TabUiAction::SavePendingCellChanges;
@@ -11995,12 +11996,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 if toolbar_button_sized(ui, tr!("💾 保存 (Enter)"), accent_button_style(colors, fonts.md), Some(90.0), true).clicked() {
                                                     action = TabUiAction::SavePendingCellChanges;
                                                 }
-                                                let count = tab.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
-                                                ui.label(
-                                                    RichText::new(tr!("● {} 处未保存的修改", count))
-                                                        .size(palette.fonts.xs)
-                                                        .color(palette.danger),
-                                                );
+                                                {
+                                                    let count = tab.pending_cell_changes.len() + if current_edit_changed { 1 } else { 0 };
+                                                    ui.label(
+                                                        RichText::new(tr!("● {} 处未保存的修改", count))
+                                                            .size(palette.fonts.xs)
+                                                            .color(palette.danger),
+                                                    );
+                                                }
                                             }
                                             if tab.pending_insert_row.is_some() {
                                                 ui.separator();
@@ -19878,17 +19881,23 @@ fn render_editable_result_table(
                                                     }
                                                 }
                                             }
-                                            let enter_pressed = ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
+                                            let multiline_confirm = ui.data_mut(|d| {
+                                                let v = d.get_persisted::<bool>(egui::Id::new("multiline_confirm")).unwrap_or(false);
+                                                if v { d.insert_persisted(egui::Id::new("multiline_confirm"), false); }
+                                                v
+                                            });
+                                            let multiline_cell = edit.editing_cell.as_ref().map_or(false, |e| e.value.contains('\n'));
+                                            let enter_pressed = !multiline_cell && ui.ctx().input(|input| input.key_pressed(egui::Key::Enter));
                                             let old_value = cell_value.as_text().unwrap_or_default().to_string();
                                             let old_is_null = cell_value.is_null();
-                                            if enter_pressed || response.lost_focus() {
+                                            if enter_pressed || multiline_confirm || response.lost_focus() {
                                                 let target = TableEditTarget::ExistingRow(row_index);
                                                 let still_mine = edit.editing_cell.as_ref()
                                                     .map_or(false, |e| e.target == target && e.column == *column);
-                                                if still_mine || enter_pressed {
+                                                if still_mine || enter_pressed || multiline_confirm {
                                                     if let Some(cell) = edit.editing_cell.take() {
-                                                        if enter_pressed {
-                                                            edit.committed_edit_this_frame = true;
+                                                        edit.committed_edit_this_frame = true;
+                                                        if enter_pressed || (!multiline_confirm && response.lost_focus()) {
                                                             edit.deferred_save_action = true;
                                                         }
                                                         if cell.is_null != old_is_null || cell.value != old_value {
@@ -21058,19 +21067,25 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         }
                                                     }
                                                 }
-                                                let enter_pressed = ui.ctx().input(|input| {
+                                                let multiline_confirm = ui.data_mut(|d| {
+                                                let v = d.get_persisted::<bool>(egui::Id::new("multiline_confirm")).unwrap_or(false);
+                                                if v { d.insert_persisted(egui::Id::new("multiline_confirm"), false); }
+                                                v
+                                            });
+                                                let multiline_cell = tab.editing_cell.as_ref().map_or(false, |e| e.value.contains('\n'));
+                                                let enter_pressed = !multiline_cell && ui.ctx().input(|input| {
                                                     input.key_pressed(egui::Key::Enter)
                                                 });
                                                 let old_value = cell_value.as_text().unwrap_or_default().to_string();
                                                 let old_is_null = cell_value.is_null();
-                                                if enter_pressed || response.lost_focus() {
+                                                if enter_pressed || multiline_confirm || response.lost_focus() {
                                                     let target = TableEditTarget::ExistingRow(row_index);
                                                     let still_mine = tab.editing_cell.as_ref()
                                                         .map_or(false, |e| e.target == target && e.column == *column);
-                                                    if still_mine || enter_pressed {
+                                                    if still_mine || enter_pressed || multiline_confirm {
                                                         if let Some(edit) = tab.editing_cell.take() {
-                                                        if enter_pressed {
-                                                            tab.committed_edit_this_frame = true;
+                                                        tab.committed_edit_this_frame = true;
+                                                        if enter_pressed || (!multiline_confirm && response.lost_focus()) {
                                                             tab.deferred_save_action = true;
                                                         }
                                                         if edit.target == TableEditTarget::ExistingRow(row_index) {
@@ -21357,10 +21372,16 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     if multiline_esc {
                                                         tab.editing_cell = None;
                                                     }
-                                                    let enter_pressed = ui.ctx().input(|input| {
+                                                    let multiline_confirm = ui.data_mut(|d| {
+                                                        let v = d.get_persisted::<bool>(egui::Id::new("multiline_confirm")).unwrap_or(false);
+                                                        if v { d.insert_persisted(egui::Id::new("multiline_confirm"), false); }
+                                                        v
+                                                    });
+                                                    let multiline_cell = tab.editing_cell.as_ref().map_or(false, |e| e.value.contains('\n'));
+                                                    let enter_pressed = !multiline_cell && ui.ctx().input(|input| {
                                                         input.key_pressed(egui::Key::Enter)
                                                     });
-                                                    if enter_pressed {
+                                                    if enter_pressed || multiline_confirm {
                                                         if let Some(edit) = tab.editing_cell.take() {
                                                             tab.committed_edit_this_frame = true;
                                                             pending_row.insert(
@@ -22113,7 +22134,7 @@ fn render_table_editor_cell(
         );
         let pos = egui::pos2(outer_rect.left(), outer_rect.bottom());
         let width = outer_rect.width().max(200.0);
-        egui::Area::new(egui::Id::new("multiline_editor"))
+        let area_resp = egui::Area::new(egui::Id::new("multiline_editor"))
             .fixed_pos(pos)
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
@@ -22151,8 +22172,47 @@ fn render_table_editor_cell(
                                     edit.is_null = false;
                                 }
                             });
+                        ui.horizontal(|ui| {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let confirm_style = ButtonStyle {
+                                    fill: palette.primary_button_bg,
+                                    text: palette.primary_button_text,
+                                    stroke: Stroke::new(1.0, palette.primary_button_stroke),
+                                    font_size: palette.fonts.sm,
+                                    min_width: 0.0,
+                                    min_height: 22.0,
+                                    corner_radius: palette.radius_sm,
+                                };
+                                let cancel_style = ButtonStyle {
+                                    fill: Color32::TRANSPARENT,
+                                    text: palette.weak_text,
+                                    stroke: Stroke::new(1.0, palette.soft_border),
+                                    font_size: palette.fonts.sm,
+                                    min_width: 0.0,
+                                    min_height: 22.0,
+                                    corner_radius: palette.radius_sm,
+                                };
+                                if mini_button(ui, tr!("确认"), confirm_style).clicked() {
+                                    ui.data_mut(|d| d.insert_persisted(egui::Id::new("multiline_confirm"), true));
+                                }
+                                if mini_button(ui, tr!("取消"), cancel_style).clicked() {
+                                    ui.data_mut(|d| d.insert_temp(egui::Id::new("multiline_esc_cancel"), true));
+                                }
+                            });
+                        });
                     });
             });
+        // 点击浮层外部区域时取消多行编辑
+        let editor_rect = area_resp.response.rect;
+        let clicked_outside = ui.ctx().input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .map_or(false, |pos| !editor_rect.contains(pos))
+        });
+        if clicked_outside {
+            ui.data_mut(|d| d.insert_temp(egui::Id::new("multiline_esc_cancel"), true));
+        }
         return preview_response.on_hover_cursor(egui::CursorIcon::Text);
     }
 
