@@ -4603,8 +4603,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return;
         }
 
-        // 按分号拆分为多条独立语句
-        let statements = split_sql_statements(&sql);
+        // 按分号拆分为多条独立语句，过滤掉 DELIMITER 命令（客户端指令，非 SQL）
+        let statements: Vec<String> = split_sql_statements(&sql)
+            .into_iter()
+            .filter(|s| parse_delimiter_cmd(s.trim()).is_none())
+            .collect();
         if statements.is_empty() {
             self.status_message = tr!("没有可执行的语句").into();
             return;
@@ -27726,6 +27729,7 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut in_backtick = false;
     let mut in_line_comment = false;
     let mut in_block_comment = false;
+    let mut delimiter: String = ";".to_string();
     let chars: Vec<char> = sql.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -27739,7 +27743,10 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
                 i += 2;
                 continue;
             }
-            if ch == '/' && next == '/' {
+            // 当 current 正在解析 DELIMITER 命令时，不将 // 视为行注释
+            // （DELIMITER // 中的 // 是分隔符值，不是注释）
+            // 同时，当 // 本身就是当前分隔符时，也不视为注释
+            if ch == '/' && next == '/' && delimiter != "//" && !is_delimiter_prefix(&current) {
                 in_line_comment = true;
                 i += 2;
                 continue;
@@ -27831,23 +27838,175 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
             in_backtick = true;
             current.push(ch);
             i += 1;
-        } else if ch == ';' {
+        } else if ch == '\n' {
+            // 换行时检测 DELIMITER 命令（DELIMITER 命令以换行结束，不是以分号结束）
+            if let Some((cmd_end, new_d)) = extract_delimiter_cmd(&current) {
+                delimiter = new_d;
+                let rest = current[cmd_end..].trim().to_string();
+                current.clear();
+                if !rest.is_empty() {
+                    current.push_str(&rest);
+                }
+            } else {
+                current.push(ch);
+            }
+            i += 1;
+        } else if ch == delimiter.chars().next().unwrap()
+            && (delimiter.len() == 1
+                || (i + delimiter.len() <= chars.len()
+                    && chars[i..i + delimiter.len()].iter().collect::<String>() == delimiter))
+        {
             let stmt = current.trim().to_string();
+            // 当 current 正在构建 DELIMITER 命令时（如 "\nDELIMITER "），
+            // 当前分隔符字符（如 ;）是命令值的一部分，不应触发语句拆分
+            if is_delimiter_prefix(&current) {
+                current.push(ch);
+                i += 1;
+                continue;
+            }
+            // DELIMITER 命令也可能在分隔符触发时被检测到
+            // （如 DELIMITER // SELECT 1; 中，; 是原始分隔符，但 current 以 DELIMITER 开头）
+            if let Some((new_d, rest)) = parse_delimiter_cmd_with_rest(&stmt) {
+                delimiter = new_d;
+                current.clear();
+                if !rest.is_empty() {
+                    statements.push(rest);
+                }
+                i += delimiter.len();
+                continue;
+            }
+            // 处理 DELIMITER 出现在行尾的情况（如 END DELIMITER ;）
+            // extract_delimiter_cmd 通常在 \n 时调用，但当 DELIMITER 与前文同行或无前导换行时需要在此检测
+            let delim_in_current = if let Some(last_nl) = current.rfind('\n') {
+                extract_delimiter_cmd(&current[last_nl + 1..])
+                    .map(|(cmd_end, new_d)| (Some(last_nl), cmd_end, new_d))
+            } else {
+                extract_delimiter_cmd(&current)
+                    .map(|(cmd_end, new_d)| (None, cmd_end, new_d))
+            };
+            if let Some((last_nl_opt, cmd_end, new_d)) = delim_in_current {
+                let before = match last_nl_opt {
+                    Some(nl) => current[..nl].trim().to_string(),
+                    None => String::new(),
+                };
+                let after_start = match last_nl_opt {
+                    Some(nl) => nl + 1 + cmd_end,
+                    None => cmd_end,
+                };
+                let rest = current[after_start..].trim().to_string();
+                delimiter = new_d;
+                current.clear();
+                if !before.is_empty() {
+                    statements.push(before);
+                }
+                if !rest.is_empty() {
+                    statements.push(rest);
+                }
+                i += delimiter.len();
+                continue;
+            }
             if !stmt.is_empty() {
                 statements.push(stmt);
             }
             current.clear();
-            i += 1;
+            i += delimiter.len();
         } else {
             current.push(ch);
             i += 1;
         }
     }
-    let stmt = current.trim().to_string();
-    if !stmt.is_empty() {
-        statements.push(stmt);
+    // 处理末尾剩余内容（可能以 DELIMITER 命令结尾但无换行）
+    if let Some((cmd_end, new_d)) = extract_delimiter_cmd(&current) {
+        let rest = current[cmd_end..].trim().to_string();
+        if !rest.is_empty() {
+            statements.push(rest);
+        }
+        let _ = new_d; // DELIMITER 生效但已到末尾
+    } else {
+        let stmt = current.trim().to_string();
+        if !stmt.is_empty() {
+            statements.push(stmt);
+        }
     }
     statements
+}
+
+/// 从已累积文本中检测 DELIMITER 命令，返回 (命令字节结束位置, 新分隔符)
+/// DELIMITER 命令格式：DELIMITER 后跟空格/制表符，再跟新分隔符，直到行尾
+fn extract_delimiter_cmd(text: &str) -> Option<(usize, String)> {
+    let bytes = text.as_bytes();
+    let upper = text.to_uppercase();
+    if !upper.starts_with("DELIMITER") || bytes.len() == 9 {
+        return None;
+    }
+    match bytes[9] {
+        b' ' | b'\t' => {}
+        _ => return None,
+    }
+    // 跳过空白，找到分隔符起始
+    let mut start = 10;
+    while start < bytes.len() && (bytes[start] == b' ' || bytes[start] == b'\t') {
+        start += 1;
+    }
+    if start >= bytes.len() {
+        return None;
+    }
+    // 分隔符到行尾（不含 \r\n）
+    let mut end = start;
+    while end < bytes.len() && bytes[end] != b'\n' && bytes[end] != b'\r' {
+        end += 1;
+    }
+    if end <= start {
+        return None;
+    }
+    Some((end, text[start..end].to_string()))
+}
+
+/// 判断当前已累积文本是否为 DELIMITER 命令的前缀（用于避免将 // 误判为行注释）
+fn is_delimiter_prefix(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let upper = trimmed.to_uppercase();
+    upper == "DELIMITER" || upper.starts_with("DELIMITER ")
+}
+
+/// 检测 DELIMITER 命令，只取第一个非空白词作为新分隔符，其余作为剩余 SQL
+fn parse_delimiter_cmd_with_rest(stmt: &str) -> Option<(String, String)> {
+    let upper = stmt.to_uppercase();
+    if !upper.starts_with("DELIMITER") {
+        return None;
+    }
+    if stmt.len() == 9 {
+        return None;
+    }
+    match stmt.as_bytes()[9] {
+        b' ' | b'\t' => {}
+        _ => return None,
+    }
+    let rest = stmt[9..].trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    // 取第一个非空白词作为新分隔符
+    let delim_end = rest
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(rest.len());
+    let new_d = rest[..delim_end].to_string();
+    let remaining = rest[delim_end..].trim().to_string();
+    Some((new_d, remaining))
+}
+
+/// 检测 DELIMITER 命令，返回新分隔符（若匹配）
+fn parse_delimiter_cmd(stmt: &str) -> Option<String> {
+    let upper = stmt.to_uppercase();
+    if upper.starts_with("DELIMITER")
+        && (stmt.len() == 9 || stmt.as_bytes()[9] == b' ' || stmt.as_bytes()[9] == b'\t')
+    {
+        let new_d = stmt[9..].trim();
+        if !new_d.is_empty() {
+            return Some(new_d.to_string());
+        }
+    }
+    None
 }
 
 fn simple_format_sql(sql: &str) -> String {
