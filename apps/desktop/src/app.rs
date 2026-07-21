@@ -27387,11 +27387,17 @@ impl TableCellDisplay {
     }
 }
 
+fn sanitize_display_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "↵")
+        .replace('\n', "↵")
+}
+
 fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> TableCellDisplay {
     let trimmed = text.trim();
     if weak {
         return TableCellDisplay {
-            text: text.to_string(),
+            text: sanitize_display_text(text),
             tone: TableCellTone::Weak,
             align: TableCellAlign::Center,
             monospace: true,
@@ -27406,7 +27412,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
             (TableCellAlign::Left, false)
         };
         return TableCellDisplay {
-            text: trimmed.to_string(),
+            text: sanitize_display_text(trimmed),
             tone: TableCellTone::Normal,
             align,
             monospace,
@@ -27415,7 +27421,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
 
     if looks_like_number(trimmed) {
         return TableCellDisplay {
-            text: trimmed.to_string(),
+            text: sanitize_display_text(trimmed),
             tone: TableCellTone::Normal,
             align: TableCellAlign::Right,
             monospace: true,
@@ -27424,7 +27430,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
 
     if looks_like_json(trimmed) {
         return TableCellDisplay {
-            text: trimmed.to_string(),
+            text: sanitize_display_text(trimmed),
             tone: TableCellTone::Accent,
             align: TableCellAlign::Left,
             monospace: true,
@@ -27433,7 +27439,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
 
     if looks_like_datetime(trimmed) {
         return TableCellDisplay {
-            text: trimmed.to_string(),
+            text: sanitize_display_text(trimmed),
             tone: TableCellTone::Normal,
             align: TableCellAlign::Left,
             monospace: true,
@@ -27441,7 +27447,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
     }
 
     TableCellDisplay {
-        text: trimmed.to_string(),
+        text: sanitize_display_text(trimmed),
         tone: TableCellTone::Normal,
         align: TableCellAlign::Left,
         monospace: false,
