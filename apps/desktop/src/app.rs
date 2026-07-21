@@ -7337,7 +7337,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     self.services.clear_user_disconnect(cid);
                     self.active_connections.entry(cid.clone()).or_default();
                     self.ensure_metadata_cache(cid);
-                    // 仅在连接已建立时发起网络请求，避免未连接时报错
                     let connected = self.services.connection_status(cid).state
                         == core_domain::ConnectionState::Connected;
                     if connected {
@@ -7345,6 +7344,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             self.request_list_databases(Some(cid.clone()));
                         }
                         self.spawn_schema_load(cid.clone());
+                    } else {
+                        // 连接未建立时，触发连接（复用侧边栏展开连接的逻辑）
+                        if !self.loading_connections.contains(cid) {
+                            self.load_connection_tree(cid);
+                        }
                     }
                 }
                 // Update active query tab
