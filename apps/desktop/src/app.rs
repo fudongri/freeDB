@@ -21962,6 +21962,17 @@ fn render_table_body_interactive_cell(
         if display.monospace { palette.fonts.mono } else { palette.fonts.base },
         if display.monospace { FontFamily::Monospace } else { FontFamily::Proportional },
     );
+    let text_is_truncated = !display.text.is_empty()
+        && (value.as_text().is_some_and(|t| t.contains('\n'))
+            || {
+                let job = egui::text::LayoutJob::simple(
+                    display.text.clone(),
+                    font_id.clone(),
+                    display_color,
+                    f32::INFINITY,
+                );
+                ui.painter().layout_job(job).rect.width() > clipped_rect.width()
+            });
     if !keyword.is_empty() && search_highlight {
         let halign = match display.align {
             TableCellAlign::Left => egui::Align::LEFT,
@@ -22026,15 +22037,60 @@ fn render_table_body_interactive_cell(
             );
         }
     }
-    let hover_text = match value {
-        QueryCellValue::Null => "(NULL)".to_string(),
-        QueryCellValue::Text(text) if text.is_empty() => String::new(),
-        QueryCellValue::Text(text) => text.clone(),
+    // hover 弹出完整内容浮层（鼠标移入浮层后保持显示）
+    let hover_text = if text_is_truncated {
+        match value {
+            QueryCellValue::Null => "(NULL)".to_string(),
+            QueryCellValue::Text(text) => text.clone(),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
     };
-    let pointer_over = response.hovered();
-    let response = response.on_hover_text(hover_text);
+    let preview_data_key = egui::Id::new(("active_preview", response.id));
+    let was_preview_active = text_is_truncated
+        && ui.data_mut(|d| d.get_temp::<bool>(preview_data_key).unwrap_or(false));
+    let cell_hovered = response.hovered();
+    // 浮层覆盖的区域（单元格下方紧贴）
+    let preview_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.bottom()),
+        egui::vec2(rect.width().max(200.0), 150.0),
+    );
+    let pointer_pos = ui.ctx().pointer_latest_pos().unwrap_or(egui::Pos2::ZERO);
+    let pointer_in_preview_area = rect.contains(pointer_pos) || preview_rect.contains(pointer_pos);
+    let show_preview = text_is_truncated && (cell_hovered || (was_preview_active && pointer_in_preview_area));
+    if show_preview {
+        egui::Area::new(egui::Id::new(("cell_hover_preview", response.id)))
+            .fixed_pos(egui::pos2(rect.left(), rect.bottom()))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                let width = rect.width().max(200.0);
+                ui.set_min_width(width);
+                ui.set_max_height(150.0);
+                egui::Frame::new()
+                    .fill(palette.workspace_bg)
+                    .stroke(Stroke::new(1.0, palette.selection_stroke))
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .rounding(4.0)
+                    .show(ui, |ui| {
+                        ui.set_min_width(width);
+                        egui::ScrollArea::vertical()
+                            .max_height(150.0)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(&hover_text)
+                                        .size(palette.fonts.base)
+                                        .color(palette.text),
+                                );
+                            });
+                    });
+            });
+        ui.data_mut(|d| d.insert_temp(preview_data_key, true));
+    } else if was_preview_active {
+        ui.data_mut(|d| d.remove_temp::<bool>(preview_data_key));
+    }
     let response = response.on_hover_cursor(egui::CursorIcon::Text);
-    (response, pointer_over, rect)
+    (response, cell_hovered, rect)
 }
 
 fn render_table_editor_cell(
@@ -25266,6 +25322,18 @@ fn table_body_cell(
         if display.monospace { palette.fonts.mono } else { palette.fonts.base },
         if display.monospace { FontFamily::Monospace } else { FontFamily::Proportional },
     );
+    // 提前计算文本是否被截断（font_id 渲染后会被 move）
+    let text_is_truncated = !display.text.is_empty()
+        && (value.as_text().is_some_and(|t| t.contains('\n'))
+            || {
+                let job = egui::text::LayoutJob::simple(
+                    display.text.clone(),
+                    font_id.clone(),
+                    display_color,
+                    f32::INFINITY,
+                );
+                ui.painter().layout_job(job).rect.width() > clipped_rect.width()
+            });
     if !keyword.is_empty() && search_highlight {
         let halign = match display.align {
             TableCellAlign::Left => egui::Align::LEFT,
@@ -25305,14 +25373,60 @@ fn table_body_cell(
             display_color,
         );
     }
-    // hover 提示完整内容（仅截断时显示，避免每帧分配）
+    // hover 弹出完整内容浮层（鼠标移入浮层后保持显示）
     let response = ui.allocate_rect(rect, egui::Sense::hover());
-    match value {
-        QueryCellValue::Null => { let _ = response.on_hover_text("(NULL)"); }
-        QueryCellValue::Text(text) if !text.is_empty() && text.as_str() != display.text => {
-            let _ = response.on_hover_text(text.as_str());
+    let hover_text = if text_is_truncated {
+        match value {
+            QueryCellValue::Null => Some("(NULL)".to_string()),
+            QueryCellValue::Text(text) => Some(text.clone()),
+            _ => None,
         }
-        _ => {}
+    } else {
+        None
+    };
+    if let Some(hover_text) = hover_text {
+        let preview_data_key = egui::Id::new(("active_preview", response.id));
+        let was_preview_active =
+            ui.data_mut(|d| d.get_temp::<bool>(preview_data_key).unwrap_or(false));
+        let cell_hovered = response.hovered();
+        let preview_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.bottom()),
+            egui::vec2(rect.width().max(200.0), 150.0),
+        );
+        let pointer_pos = ui.ctx().pointer_latest_pos().unwrap_or(egui::Pos2::ZERO);
+        let pointer_in_preview_area =
+            rect.contains(pointer_pos) || preview_rect.contains(pointer_pos);
+        let show_preview = cell_hovered || (was_preview_active && pointer_in_preview_area);
+        if show_preview {
+            egui::Area::new(egui::Id::new(("cell_hover_preview", response.id)))
+                .fixed_pos(egui::pos2(rect.left(), rect.bottom()))
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    let width = rect.width().max(200.0);
+                    ui.set_min_width(width);
+                    ui.set_max_height(150.0);
+                    egui::Frame::new()
+                        .fill(palette.workspace_bg)
+                        .stroke(Stroke::new(1.0, palette.selection_stroke))
+                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .rounding(4.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width(width);
+                            egui::ScrollArea::vertical()
+                                .max_height(150.0)
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(&hover_text)
+                                            .size(palette.fonts.base)
+                                            .color(palette.text),
+                                    );
+                                });
+                        });
+                });
+            ui.data_mut(|d| d.insert_temp(preview_data_key, true));
+        } else if was_preview_active {
+            ui.data_mut(|d| d.remove_temp::<bool>(preview_data_key));
+        }
     }
 }
 
