@@ -22048,17 +22048,23 @@ fn render_table_editor_cell(
     let editor_fill = table_active_cell_fill(palette, fill, pending_insert, selected);
     ui.painter()
         .rect_filled(table_cell_fill_rect(ui.max_rect(), selected), 0.0, editor_fill);
+    let outer_rect = ui.max_rect();
     let mut inner = egui::Frame::new()
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0, palette.selection_stroke))
         .inner_margin(egui::Margin::ZERO)
         .show(ui, |ui| {
             ui.set_min_height(28.0);
-            TextEdit::singleline(&mut edit.value)
-                .frame(false)
-                .margin(egui::Margin::symmetric(4, 1))
-                .desired_width(ui.available_width().max(24.0))
-                .show(ui)
+            egui::ScrollArea::vertical()
+                .max_height(ui.available_height())
+                .show(ui, |ui| {
+                    TextEdit::multiline(&mut edit.value)
+                        .frame(false)
+                        .margin(egui::Margin::symmetric(4, 1))
+                        .desired_width(ui.available_width().max(24.0))
+                        .show(ui)
+                })
+                .inner
         });
     if inner.inner.response.changed() {
         edit.is_null = false;
@@ -22073,7 +22079,7 @@ fn render_table_editor_cell(
             .set_char_range(Some(egui::text::CCursorRange::one(cursor)));
         inner.inner.state.store(ui.ctx(), inner.inner.response.id);
         if matches!(edit.target, TableEditTarget::PendingInsert) {
-            ui.scroll_to_rect(inner.response.rect, Some(egui::Align::Center));
+            ui.scroll_to_rect(outer_rect, Some(egui::Align::Center));
         }
         edit.focus_requested = false;
     }
@@ -27387,17 +27393,12 @@ impl TableCellDisplay {
     }
 }
 
-fn sanitize_display_text(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .replace('\r', "↵")
-        .replace('\n', "↵")
-}
-
 fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> TableCellDisplay {
     let trimmed = text.trim();
+    let first_line = trimmed.split('\n').next().unwrap_or(trimmed);
     if weak {
         return TableCellDisplay {
-            text: sanitize_display_text(text),
+            text: first_line.to_string(),
             tone: TableCellTone::Weak,
             align: TableCellAlign::Center,
             monospace: true,
@@ -27412,34 +27413,34 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
             (TableCellAlign::Left, false)
         };
         return TableCellDisplay {
-            text: sanitize_display_text(trimmed),
+            text: first_line.to_string(),
             tone: TableCellTone::Normal,
             align,
             monospace,
         };
     }
 
-    if looks_like_number(trimmed) {
+    if looks_like_number(first_line) {
         return TableCellDisplay {
-            text: sanitize_display_text(trimmed),
+            text: first_line.to_string(),
             tone: TableCellTone::Normal,
             align: TableCellAlign::Right,
             monospace: true,
         };
     }
 
-    if looks_like_json(trimmed) {
+    if looks_like_json(first_line) {
         return TableCellDisplay {
-            text: sanitize_display_text(trimmed),
+            text: first_line.to_string(),
             tone: TableCellTone::Accent,
             align: TableCellAlign::Left,
             monospace: true,
         };
     }
 
-    if looks_like_datetime(trimmed) {
+    if looks_like_datetime(first_line) {
         return TableCellDisplay {
-            text: sanitize_display_text(trimmed),
+            text: first_line.to_string(),
             tone: TableCellTone::Normal,
             align: TableCellAlign::Left,
             monospace: true,
@@ -27447,7 +27448,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
     }
 
     TableCellDisplay {
-        text: sanitize_display_text(trimmed),
+        text: first_line.to_string(),
         tone: TableCellTone::Normal,
         align: TableCellAlign::Left,
         monospace: false,
