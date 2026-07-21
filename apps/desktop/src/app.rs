@@ -7709,6 +7709,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         self.request_list_databases(Some(connection_id.clone()));
                     }
                     self.spawn_schema_load(connection_id.clone());
+                } else if !self.loading_connections.contains(&connection_id) {
+                    self.load_connection_tree(&connection_id);
                 }
                 // 重新加载该连接的保存查询列表
                 let (history, saved_queries, all_saved_queries) =
