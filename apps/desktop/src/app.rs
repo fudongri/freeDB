@@ -115,7 +115,7 @@ pub struct DesktopApp {
     pending_table_preview: Option<(String, Receiver<TablePreviewLoadResult>)>,
     pending_table_summary: Option<(String, Receiver<TableSummaryLoadResult>)>,
     pending_schema_summary: Option<(String, Receiver<SchemaSummaryLoadResult>)>,
-    pending_routine_definition: Option<(String, Receiver<RoutineDefinitionLoadResult>)>,
+    pending_routine_definition: HashMap<String, Receiver<RoutineDefinitionLoadResult>>,
     pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
     pending_file_load: Option<Receiver<FileLoadResult>>,
     generate_data_receiver: Option<Receiver<GenerateDataEvent>>,
@@ -1491,7 +1491,7 @@ impl DesktopApp {
             pending_table_preview: None,
             pending_table_summary: None,
             pending_schema_summary: None,
-            pending_routine_definition: None,
+            pending_routine_definition: HashMap::new(),
             pending_processlist: None,
             pending_file_load: None,
             generate_data_receiver: None,
@@ -2685,7 +2685,8 @@ impl DesktopApp {
         }
 
         // Poll routine definition results (async: OpenRoutine)
-        if let Some((routine_tab_id, receiver)) = self.pending_routine_definition.take() {
+        let mut finished_tabs = Vec::new();
+        for (tab_id, receiver) in &self.pending_routine_definition {
             match receiver.try_recv() {
                 Ok(result) => {
                     if let Some(WorkspaceTab::Routine(tab)) = self.tabs.iter_mut().find(|t| {
@@ -2697,20 +2698,23 @@ impl DesktopApp {
                             Err(e) => tab.error = Some(e),
                         }
                     }
+                    finished_tabs.push(tab_id.clone());
                 }
-                Err(TryRecvError::Empty) => {
-                    self.pending_routine_definition = Some((routine_tab_id, receiver));
-                }
+                Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
-                    tracing::warn!(tab_id = %routine_tab_id, "存储过程定义异步任务已断开");
+                    tracing::warn!(tab_id = %tab_id, "存储过程定义异步任务已断开");
                     if let Some(WorkspaceTab::Routine(tab)) = self.tabs.iter_mut().find(|t| {
-                        matches!(t, WorkspaceTab::Routine(rt) if rt.id == routine_tab_id)
+                        matches!(t, WorkspaceTab::Routine(rt) if rt.id == *tab_id)
                     }) {
                         tab.loading = false;
                         tab.error = Some(tr!("加载失败：任务异常终止").to_string());
                     }
+                    finished_tabs.push(tab_id.clone());
                 }
             }
+        }
+        for tab_id in finished_tabs {
+            self.pending_routine_definition.remove(&tab_id);
         }
 
         // 轮询 SHOW PROCESSLIST 异步结果
@@ -3562,12 +3566,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         let services = self.services.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
-        self.pending_routine_definition = Some((tab_id.clone(), receiver));
+        self.pending_routine_definition.insert(tab_id.clone(), receiver);
+        let routine_label = routine.name.clone();
+        let routine_is_proc = routine.is_procedure;
         self.runtime.handle().spawn(async move {
-            let result = services.load_routine_definition(&routine).await;
+            tracing::info!(routine = %routine_label, is_procedure = routine_is_proc, "开始加载routine定义");
+            let result = tokio::task::spawn_blocking(move || {
+                // 在独立线程上执行阻塞操作，避免阻塞tokio worker和UI线程
+                tokio::runtime::Handle::current().block_on(services.load_routine_definition(&routine))
+            }).await;
+            let load_result = match result {
+                Ok(inner) => inner.map_err(|e| e.to_string()),
+                Err(join_err) => Err(format!("任务执行失败: {}", join_err)),
+            };
+            tracing::info!(routine = %routine_label, ok = load_result.is_ok(), "routine定义加载完成");
             let _ = sender.send(RoutineDefinitionLoadResult {
                 tab_id,
-                result: result.map_err(|e| e.to_string()),
+                result: load_result,
             });
         });
     }
@@ -22273,7 +22288,13 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
     let palette = mac_ui_palette_from_ui(ui);
     let editor = editor_palette_from_ui(ui);
     let code_font_size = 13.0;
-    let formatted_sql = format_definition_sql(create_sql);
+    let formatted_sql = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| format_definition_sql(create_sql))) {
+        Ok(sql) => sql,
+        Err(_) => {
+            tracing::error!("format_definition_sql panic, 使用原始SQL");
+            create_sql.to_string()
+        }
+    };
     let line_count = formatted_sql.lines().count().max(1);
     let viewport_width = ui.available_width().max(0.0);
     let viewport_height = ui.available_height().max(220.0);
@@ -22343,6 +22364,9 @@ fn format_definition_sql(sql: &str) -> String {
             .collect();
         return formatted.join(";\n");
     }
+    if let Some(formatted) = format_create_routine_sql(trimmed) {
+        return formatted;
+    }
     ensure_sql_statement_semicolon(
         &format_create_table_ddl(sql).unwrap_or_else(|| simple_format_sql(sql)),
     )
@@ -22392,6 +22416,305 @@ fn format_create_table_ddl(sql: &str) -> Option<String> {
         lines.push(")".to_string());
     }
     Some(lines.join("\n"))
+}
+
+fn format_create_routine_sql(sql: &str) -> Option<String> {
+    let upper = sql.to_ascii_uppercase();
+    let is_routine = upper.starts_with("CREATE DEFINER=")
+        || upper.starts_with("CREATE PROCEDURE")
+        || upper.starts_with("CREATE FUNCTION")
+        || upper.starts_with("CREATE OR REPLACE PROCEDURE")
+        || upper.starts_with("CREATE OR REPLACE FUNCTION");
+    if !is_routine {
+        return None;
+    }
+
+    let begin_pos = find_keyword_pos(sql, "BEGIN")?;
+    let end_pos = find_matching_end(sql, begin_pos + 5)?;
+
+    let header = sql[..begin_pos].trim();
+    let body = sql[begin_pos + 5..end_pos].trim();
+    let after_end = sql[end_pos + 3..].trim();
+
+    let mut lines: Vec<String> = Vec::new();
+
+    let header_lines = format_routine_header(header);
+    lines.extend(header_lines);
+
+    lines.push("BEGIN".to_string());
+
+    let formatted_body = format_routine_body(body);
+    lines.extend(formatted_body.lines().map(|l| l.to_string()));
+
+    if after_end.is_empty() {
+        lines.push("END;".to_string());
+    } else {
+        lines.push(format!("END {}", after_end));
+    }
+
+    Some(lines.join("\n"))
+}
+
+/// 在 sql 中查找独立关键字的位置（忽略引号内和标识符内的匹配）
+fn find_keyword_pos(sql: &str, keyword: &str) -> Option<usize> {
+    let kw_upper = keyword.to_ascii_uppercase();
+    let kw_bytes = kw_upper.as_bytes();
+    let bytes = sql.as_bytes();
+    let upper_sql = sql.to_ascii_uppercase();
+    let upper_bytes = upper_sql.as_bytes();
+    let mut i = 0;
+    while i + kw_bytes.len() <= bytes.len() {
+        let b = bytes[i];
+        // 跳过单引号字符串
+        if b == b'\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' { i += 2; continue; }
+                    i += 1; break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // 跳过双引号字符串
+        if b == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' { i += 2; continue; }
+                    i += 1; break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // 跳过行注释
+        if b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            continue;
+        }
+        // 跳过块注释
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' { i += 2; break; }
+                i += 1;
+            }
+            continue;
+        }
+        if upper_bytes[i..].starts_with(kw_bytes) {
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            let after_pos = i + kw_bytes.len();
+            let after_ok = after_pos >= bytes.len() || !bytes[after_pos].is_ascii_alphanumeric() && bytes[after_pos] != b'_';
+            if before_ok && after_ok {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 从指定位置之后找到与第一个 BEGIN 匹配的 END（支持嵌套 BEGIN...END）
+fn find_matching_end(sql: &str, search_from: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let upper_sql = sql.to_ascii_uppercase();
+    let upper_bytes = upper_sql.as_bytes();
+    let mut depth = 1i32;
+    let mut i = search_from;
+    let max_iter = bytes.len().min(100_000); // 安全限制，防止无限循环
+    let mut iter_count = 0usize;
+    while i + 2 < bytes.len() && iter_count < max_iter {
+        iter_count += 1;
+        let b = bytes[i];
+        // 跳过单引号字符串
+        if b == b'\'' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' { i += 2; continue; }
+                    i += 1; break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // 跳过双引号字符串
+        if b == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' { i += 2; continue; }
+                    i += 1; break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        // 跳过行注释
+        if b == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            continue;
+        }
+        // 跳过块注释
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' { i += 2; break; }
+                i += 1;
+            }
+            continue;
+        }
+        if upper_bytes[i..].starts_with(b"BEGIN") {
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            let after = i + 5;
+            if before_ok && (after >= bytes.len() || !bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_') {
+                depth += 1;
+                i += 5;
+                continue;
+            }
+        }
+        if upper_bytes[i..].starts_with(b"END") {
+            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+            let after = i + 3;
+            if before_ok && (after >= bytes.len() || !bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_') {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 3;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 格式化存储过程/函数体，支持嵌套 BEGIN...END 的缩进
+fn format_routine_body(body: &str) -> String {
+    let stmts: Vec<&str> = body
+        .split(';')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut indent = 1; // BEGIN 块内默认缩进 1 级（4 空格）
+
+    for stmt in &stmts {
+        let upper = stmt.to_ascii_uppercase();
+        let trimmed_stmt = stmt.trim();
+
+        // 遇到 END 时先减缩进
+        let ends_block = upper.starts_with("END")
+            && (trimmed_stmt.len() == 3
+                || !trimmed_stmt.as_bytes()[3].is_ascii_alphanumeric()
+                    && trimmed_stmt.as_bytes()[3] != b'_');
+
+        if ends_block && indent > 0 {
+            indent -= 1;
+        }
+
+        let prefix = "    ".repeat(indent);
+        lines.push(format!("{}{};", prefix, trimmed_stmt));
+
+        // 遇到 BEGIN / THEN / ELSE 时加缩进（THEN/ELSE 后的语句块）
+        let begins_block = upper.starts_with("BEGIN")
+            && (trimmed_stmt.len() == 5
+                || !trimmed_stmt.as_bytes()[5].is_ascii_alphanumeric()
+                    && trimmed_stmt.as_bytes()[5] != b'_');
+
+        if begins_block {
+            indent += 1;
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// 格式化 CREATE PROCEDURE/FUNCTION 头部，在 RETURNS / READS / MODIFIES / DETERMINISTIC / NOT DETERMINISTIC / COMMENT / LANGUAGE 前换行
+fn format_routine_header(header: &str) -> Vec<String> {
+    let clause_starts = [
+        "RETURNS ", "RETURNS\t",
+        "LANGUAGE ", "LANGUAGE\t",
+        "DETERMINISTIC",
+        "NOT DETERMINISTIC",
+        "READS SQL DATA",
+        "MODIFIES SQL DATA",
+        "NO SQL",
+        "CONTAINS SQL",
+        "SQL SECURITY ",
+        "SQL SECURITY\t",
+        "COMMENT ",
+    ];
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut remaining = header;
+
+    // 提取 CREATE ... PROCEDURE/FUNCTION `name`(params) 部分
+    // 找到参数列表结束的右括号
+    let bytes = remaining.as_bytes();
+    let mut depth = 0i32;
+    let mut split_pos = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                split_pos = Some(i + 1);
+                break;
+            }
+        }
+    }
+
+    if let Some(pos) = split_pos {
+        let sig = remaining[..pos].trim();
+        lines.push(sig.to_string());
+        remaining = remaining[pos..].trim();
+    } else {
+        // 无参数列表，直接取第一行
+        lines.push(remaining.to_string());
+        return lines;
+    }
+
+    // 按特征子句分割剩余部分
+    let mut boundaries: Vec<usize> = Vec::new();
+    for clause in &clause_starts {
+        let mut search_from = 0;
+        while let Some(idx) = remaining[search_from..].find(clause) {
+            let abs_idx = search_from + idx;
+            let before_ok = abs_idx == 0
+                || !remaining.as_bytes()[abs_idx - 1].is_ascii_alphanumeric()
+                    && remaining.as_bytes()[abs_idx - 1] != b'_';
+            if before_ok {
+                boundaries.push(abs_idx);
+            }
+            search_from = abs_idx + clause.len();
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    if boundaries.is_empty() {
+        if !remaining.is_empty() {
+            lines.push(format!("    {}", remaining));
+        }
+    } else {
+        for (i, &pos) in boundaries.iter().enumerate() {
+            let end = boundaries.get(i + 1).copied().unwrap_or(remaining.len());
+            let chunk = remaining[pos..end].trim();
+            if !chunk.is_empty() {
+                lines.push(format!("    {}", chunk));
+            }
+        }
+    }
+
+    lines
 }
 
 fn find_top_level_char(sql: &str, target: char) -> Option<usize> {
@@ -29081,6 +29404,19 @@ fn sql_highlight_job_with_font_size(
         "AS", "AND", "OR", "NOT", "NULL", "IS", "IN", "EXISTS", "CREATE", "ALTER", "DROP",
         "TABLE", "VIEW", "DATABASE", "SCHEMA", "INDEX", "PRIMARY", "KEY", "DISTINCT", "UNION",
         "ALL", "CASE", "WHEN", "THEN", "ELSE", "END", "LIKE", "DESC", "ASC", "OFFSET",
+        // 存储过程/函数
+        "BEGIN", "DECLARE", "IF", "WHILE", "LOOP", "REPEAT", "RETURN", "LEAVE", "ITERATE",
+        "CALL", "PROCEDURE", "FUNCTION", "RETURNS", "DETERMINISTIC", "LANGUAGE", "COMMENT",
+        "MODIFIES", "READS", "CONTAINS", "NO", "SQL", "DATA", "SECURITY",
+        // 数据类型
+        "VARCHAR", "CHAR", "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
+        "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "TEXT", "BLOB", "LONGBLOB", "LONGTEXT",
+        "DATE", "DATETIME", "TIMESTAMP", "TIME", "BOOLEAN", "BOOL", "JSON", "ENUM", "SET",
+        "UNSIGNED", "SIGNED", "ZEROFILL", "CHARSET", "COLLATE",
+        // 其他常用
+        "AUTO_INCREMENT", "DEFAULT", "CONSTRAINT", "UNIQUE", "CHECK", "REFERENCES",
+        "CASCADE", "RESTRICT", "GRANT", "REVOKE", "TRIGGER", "EVENT", "REPLACE",
+        "TEMPORARY", "RENAME", "TRUNCATE", "EXPLAIN", "DESCRIBE", "SHOW", "USE",
     ];
 
     let mut i = 0;

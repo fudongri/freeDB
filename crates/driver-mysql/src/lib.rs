@@ -259,17 +259,23 @@ impl DatabaseDriver for MySqlDriver {
             .map_err(map_mysql_error)?;
         let kind = if routine.is_procedure { "PROCEDURE" } else { "FUNCTION" };
         let sql = format!(
-            "SHOW CREATE {} {}.{}",
+            "SHOW CREATE {} {}",
             kind,
-            quote_mysql(db),
             quote_mysql(&routine.name),
         );
-        let create_sql: Option<String> = conn.query(sql)
-            .await
-            .ok()
-            .and_then(|rows: Vec<Row>| rows.into_iter().next())
-            .and_then(|row| row.get::<Option<String>, _>(2))
-            .flatten();
+        let create_sql: Option<String> = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async {
+                conn.query(sql)
+                    .await
+                    .ok()
+                    .and_then(|rows: Vec<Row>| rows.into_iter().next())
+                    .and_then(|row| row.get::<Option<String>, _>(2))
+                    .flatten()
+            },
+        )
+        .await
+        .unwrap_or(None);
         Ok(core_domain::RoutineDefinition { create_sql })
     }
 
