@@ -5493,7 +5493,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.close();
                                 }
                             });
-                            if response.clicked() {
+                            if response.clicked() || response.secondary_clicked() {
                                 self.sidebar_has_focus = true;
                                 self.selected_connection = Some(connection.id.clone());
                                 self.selected_tree_item = Some(connection.id.clone());
@@ -6458,7 +6458,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.close();
                 }
             });
-            if response.clicked() {
+            if response.clicked() || response.secondary_clicked() {
                 self.sidebar_has_focus = true;
                 self.selected_connection = Some(node.connection_id.clone());
                 self.selected_tree_item = Some(node.id.clone());
