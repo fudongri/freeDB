@@ -4306,6 +4306,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             | RecentTabEntry::Routine { connection_id, .. } => Some(connection_id.clone()),
         };
         if let Some(cid) = cid {
+            self.services.clear_user_disconnect(&cid);
             self.active_connections.entry(cid.clone()).or_default();
             if !self.database_cache.contains_key(&cid) {
                 self.request_list_databases(Some(cid.clone()));
