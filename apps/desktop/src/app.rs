@@ -4306,11 +4306,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             | RecentTabEntry::Routine { connection_id, .. } => Some(connection_id.clone()),
         };
         if let Some(cid) = cid {
-            let connected = self.services.connection_status(&cid).state
-                == core_domain::ConnectionState::Connected;
-            if !connected && !self.loading_connections.contains(&cid) {
-                self.load_connection_tree(&cid);
+            self.active_connections.entry(cid.clone()).or_default();
+            if !self.database_cache.contains_key(&cid) {
+                self.request_list_databases(Some(cid.clone()));
             }
+            self.spawn_schema_load(cid.clone());
         }
         match entry {
             RecentTabEntry::Query { connection_id, database, sql, title, saved_query_id, .. } => {
@@ -7354,19 +7354,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     self.services.clear_user_disconnect(cid);
                     self.active_connections.entry(cid.clone()).or_default();
                     self.ensure_metadata_cache(cid);
-                    let connected = self.services.connection_status(cid).state
-                        == core_domain::ConnectionState::Connected;
-                    if connected {
-                        if !self.database_cache.contains_key(cid) {
-                            self.request_list_databases(Some(cid.clone()));
-                        }
-                        self.spawn_schema_load(cid.clone());
-                    } else {
-                        // 连接未建立时，触发连接（复用侧边栏展开连接的逻辑）
-                        if !self.loading_connections.contains(cid) {
-                            self.load_connection_tree(cid);
-                        }
+                    if !self.database_cache.contains_key(cid) {
+                        self.request_list_databases(Some(cid.clone()));
                     }
+                    self.spawn_schema_load(cid.clone());
                 }
                 // Update active query tab
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
@@ -7719,16 +7710,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.services.clear_user_disconnect(&connection_id);
                 self.active_connections.entry(connection_id.clone()).or_default();
                 self.ensure_metadata_cache(&connection_id);
-                let connected = self.services.connection_status(&connection_id).state
-                    == core_domain::ConnectionState::Connected;
-                if connected {
-                    if !self.database_cache.contains_key(&connection_id) {
-                        self.request_list_databases(Some(connection_id.clone()));
-                    }
-                    self.spawn_schema_load(connection_id.clone());
-                } else if !self.loading_connections.contains(&connection_id) {
-                    self.load_connection_tree(&connection_id);
+                if !self.database_cache.contains_key(&connection_id) {
+                    self.request_list_databases(Some(connection_id.clone()));
                 }
+                self.spawn_schema_load(connection_id.clone());
                 // 重新加载该连接的保存查询列表
                 let (history, saved_queries, all_saved_queries) =
                     load_query_library(&self.services, &connection_id);
