@@ -621,7 +621,6 @@ struct QueryResultSelectionState {
     cell_selection_drag_started: bool,
 }
 
-#[derive(Clone)]
 struct QueryTabState {
     id: String,
     title: String,
@@ -693,6 +692,76 @@ struct QueryTabState {
     /// 手动编辑模式：等待用户输入表名
     manual_edit_prompt: bool,
     pending_ai_generate: bool,
+    /// Generate 模式的 AI 响应接收器（非流式）
+    pending_ai_generate_rx: Option<std::sync::mpsc::Receiver<Result<String, ai_service::AiError>>>,
+    /// 流式模式的 AI 响应接收器
+    ai_stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    /// 流式模式下当前待发送的用户提示词
+    ai_pending_prompt: Option<String>,
+}
+
+impl Clone for QueryTabState {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            connection_id: self.connection_id.clone(),
+            database: self.database.clone(),
+            sql: self.sql.clone(),
+            cursor_range: self.cursor_range,
+            column_block: self.column_block.clone(),
+            extra_cursors: self.extra_cursors.clone(),
+            option_drag_start: self.option_drag_start.clone(),
+            result: self.result.clone(),
+            history: self.history.clone(),
+            saved_queries: self.saved_queries.clone(),
+            all_saved_queries: self.all_saved_queries.clone(),
+            messages: self.messages.clone(),
+            error: self.error.clone(),
+            active_bottom_tab: self.active_bottom_tab,
+            last_executed_sql: self.last_executed_sql.clone(),
+            result_sort: self.result_sort.clone(),
+            result_selections: self.result_selections.clone(),
+            column_order: self.column_order.clone(),
+            column_drag: self.column_drag.clone(),
+            result_column_widths: self.result_column_widths.clone(),
+            result_column_resize_drag: self.result_column_resize_drag,
+            result_row_number_width: self.result_row_number_width,
+            result_row_num_resize_drag: self.result_row_num_resize_drag,
+            multi_results: self.multi_results.clone(),
+            multi_statements: self.multi_statements.clone(),
+            executed_statements: self.executed_statements.clone(),
+            selected_result_index: self.selected_result_index,
+            editor_focus_requested: self.editor_focus_requested,
+            editor_height: self.editor_height,
+            bottom_panel_collapsed: self.bottom_panel_collapsed,
+            saved_queries_panel_visible: self.saved_queries_panel_visible,
+            saved_queries_panel_width: self.saved_queries_panel_width,
+            saved_queries_filter_mode: self.saved_queries_filter_mode.clone(),
+            saved_query_drag_source: self.saved_query_drag_source.clone(),
+            saved_query_drag_target: self.saved_query_drag_target,
+            selected_saved_query_id: self.selected_saved_query_id.clone(),
+            selected_saved_query_sql: self.selected_saved_query_sql.clone(),
+            selected_saved_query_connection_id: self.selected_saved_query_connection_id.clone(),
+            selected_saved_query_database: self.selected_saved_query_database.clone(),
+            autocomplete: self.autocomplete.clone(),
+            autocomplete_cursor_target: self.autocomplete_cursor_target,
+            abort_sender: self.abort_sender.clone(),
+            explain_tree: self.explain_tree.clone(),
+            is_explain: self.is_explain,
+            explain_view_mode: self.explain_view_mode.clone(),
+            query_explain_json: self.query_explain_json.clone(),
+            search: self.search.clone(),
+            find: self.find.clone(),
+            edit_context: self.edit_context.clone(),
+            pending_edit_context_analysis: self.pending_edit_context_analysis,
+            manual_edit_prompt: self.manual_edit_prompt,
+            pending_ai_generate: self.pending_ai_generate,
+            pending_ai_generate_rx: None,
+            ai_stream_rx: None,
+            ai_pending_prompt: None,
+        }
+    }
 }
 
 /// SQL 查询页的内联编辑上下文。当检测到简单单表 SELECT 时创建。
@@ -6977,6 +7046,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             pending_query_batch_save,
                             &self.theme.colors,
                             &self.theme.fonts,
+                            &self.ai_config,
                         ),
                         WorkspaceTab::Table(tab) => Self::render_table_tab(ui, tab, self.pending_batch_save, &self.theme.colors, &self.theme.fonts),
                         WorkspaceTab::CreateTable(tab) => Self::render_create_table_tab(ui, tab, &self.theme.colors, &self.theme.fonts),
@@ -7415,6 +7485,131 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 });
             }
         });
+    }
+
+    fn execute_ai_action(&mut self, action: ai_service::prompt::AiAction) {
+        // 阶段一：收集所需数据（读取 self，不保持借用）
+        let config = match self.ai_config.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                self.is_ai_settings_open = true;
+                return;
+            }
+        };
+
+        let (sql, last_executed_sql, db_type_str) = {
+            let tab = match self.tabs.get(self.active_tab) {
+                Some(WorkspaceTab::Query(t)) => t,
+                _ => return,
+            };
+            let db_type = tab.connection_id.as_ref()
+                .and_then(|cid| self.connections.iter().find(|c| &c.id == cid))
+                .map(|c| match c.kind {
+                    DatabaseKind::MySql => "MySQL",
+                    DatabaseKind::Postgres => "PostgreSQL",
+                    DatabaseKind::MongoDb => "MongoDB",
+                })
+                .unwrap_or("SQL");
+            (tab.sql.clone(), tab.last_executed_sql.clone(), db_type)
+        };
+
+        // 数据检查/分析需要结果数据，在 tab 借用外获取
+        let data_sample = match action {
+            ai_service::prompt::AiAction::DataQuality | ai_service::prompt::AiAction::DataAnalysis => {
+                self.get_result_data_sample(100)
+            }
+            _ => String::new(),
+        };
+
+        // 阶段二：构造提示词（不再持有 tab 引用）
+        let user_prompt = match action {
+            ai_service::prompt::AiAction::Optimize => ai_service::prompt::optimize_prompt(&sql),
+            ai_service::prompt::AiAction::Generate => ai_service::prompt::generate_prompt(&sql),
+            ai_service::prompt::AiAction::Explain => ai_service::prompt::explain_prompt(&sql),
+            ai_service::prompt::AiAction::DataQuality | ai_service::prompt::AiAction::DataAnalysis => {
+                if data_sample.is_empty() {
+                    if let Some(WorkspaceTab::Query(t)) = self.tabs.get_mut(self.active_tab) {
+                        t.messages.push(tr!("请先执行查询后再使用数据检查/分析功能").to_string());
+                        t.active_bottom_tab = QueryBottomTab::Messages;
+                    }
+                    return;
+                }
+                let statement = last_executed_sql.unwrap_or_default();
+                match action {
+                    ai_service::prompt::AiAction::DataQuality => ai_service::prompt::data_quality_prompt(&statement, 100, &data_sample),
+                    ai_service::prompt::AiAction::DataAnalysis => ai_service::prompt::data_analysis_prompt(&statement, 100, &data_sample),
+                    _ => unreachable!(),
+                }
+            }
+        };
+
+        let schema_info = "";
+        let system = ai_service::prompt::system_prompt(db_type_str, schema_info);
+        let messages = ai_service::prompt::build_messages(&system, &user_prompt);
+
+        // 阶段三：执行并更新 tab
+        let tab = match self.tabs.get_mut(self.active_tab) {
+            Some(WorkspaceTab::Query(t)) => t,
+            _ => return,
+        };
+
+        // 生成模式：结果替换编辑器内容，使用非流式
+        if action == ai_service::prompt::AiAction::Generate {
+            let provider = ai_service::create_provider(&config.provider);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let handle = self.runtime.handle().clone();
+            handle.spawn(async move {
+                let result = provider.chat(messages).await;
+                let _ = tx.send(result);
+            });
+            tab.pending_ai_generate = true;
+            tab.pending_ai_generate_rx = Some(rx);
+            return;
+        }
+
+        // 其他模式：流式输出到 AI 面板
+        let provider = ai_service::create_provider(&config.provider);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tab.bottom_panel_collapsed = false;
+        tab.active_bottom_tab = QueryBottomTab::Messages;
+        tab.ai_stream_rx = Some(rx);
+        tab.ai_pending_prompt = Some(user_prompt);
+
+        let handle = self.runtime.handle().clone();
+        handle.spawn(async move {
+            let _ = provider.chat_stream(messages, tx).await;
+        });
+    }
+
+    fn get_result_data_sample(&self, max_rows: usize) -> String {
+        let tab = match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Query(tab)) => tab,
+            _ => return String::new(),
+        };
+        let result = match tab.multi_results.get(tab.selected_result_index) {
+            Some(r) => r,
+            None => return String::new(),
+        };
+        let mut output = String::new();
+        // 表头
+        for (i, col) in result.columns.iter().enumerate() {
+            if i > 0 { output.push('\t'); }
+            output.push_str(col);
+        }
+        output.push('\n');
+        // 数据行
+        for (row_idx, row) in result.rows.iter().enumerate() {
+            if row_idx >= max_rows { break; }
+            for (i, col) in result.columns.iter().enumerate() {
+                if i > 0 { output.push('\t'); }
+                if let Some(cell) = row.get(col) {
+                    output.push_str(cell.display_text());
+                }
+            }
+            output.push('\n');
+        }
+        output
     }
 
     fn handle_tab_action(&mut self, ctx: &egui::Context, action: TabUiAction) {
@@ -7872,6 +8067,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let _ = sender.send(result);
                 });
             }
+            TabUiAction::AiOptimize => self.execute_ai_action(ai_service::prompt::AiAction::Optimize),
+            TabUiAction::AiGenerate => self.execute_ai_action(ai_service::prompt::AiAction::Generate),
+            TabUiAction::AiExplain => self.execute_ai_action(ai_service::prompt::AiAction::Explain),
+            TabUiAction::AiDataQuality => self.execute_ai_action(ai_service::prompt::AiAction::DataQuality),
+            TabUiAction::AiDataAnalysis => self.execute_ai_action(ai_service::prompt::AiAction::DataAnalysis),
         }
     }
 
@@ -9157,6 +9357,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         pending_query_batch_save: bool,
         colors: &ui_theme::ThemeColors,
         fonts: &ui_theme::FontSizes,
+        ai_config: &Option<AiConfig>,
     ) -> TabUiAction {
         let mut action = TabUiAction::None;
         let chrome = mac_ui_palette_from_ui(ui);
@@ -9289,6 +9490,29 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             _ => ExecuteMode::Whole,
                                         });
                                     }
+                                }
+                                // AI 助手下拉按钮
+                                if ai_config.is_some() {
+                                    egui::ComboBox::from_id_salt(format!("ai_menu_{}", tab.id))
+                                        .selected_text(tr!("AI"))
+                                        .width(60.0)
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_label(false, tr!("优化语句")).clicked() {
+                                                action = TabUiAction::AiOptimize;
+                                            }
+                                            if ui.selectable_label(false, tr!("根据注释生成语句")).clicked() {
+                                                action = TabUiAction::AiGenerate;
+                                            }
+                                            if ui.selectable_label(false, tr!("解释语句")).clicked() {
+                                                action = TabUiAction::AiExplain;
+                                            }
+                                            if ui.selectable_label(false, tr!("数据质量检查")).clicked() {
+                                                action = TabUiAction::AiDataQuality;
+                                            }
+                                            if ui.selectable_label(false, tr!("数据分析")).clicked() {
+                                                action = TabUiAction::AiDataAnalysis;
+                                            }
+                                        });
                                 }
                             });
                             ui.add_space(10.0);
@@ -17544,6 +17768,9 @@ impl QueryTabState {
             pending_edit_context_analysis: false,
             manual_edit_prompt: false,
             pending_ai_generate: false,
+            pending_ai_generate_rx: None,
+            ai_stream_rx: None,
+            ai_pending_prompt: None,
         }
     }
 
@@ -17749,6 +17976,11 @@ enum TabUiAction {
     ReorderSavedQueries(Vec<(String, i32)>),
     RefreshProcesslist,
     LoadFile(std::path::PathBuf),
+    AiOptimize,
+    AiGenerate,
+    AiExplain,
+    AiDataQuality,
+    AiDataAnalysis,
 }
 
 #[derive(Clone)]
