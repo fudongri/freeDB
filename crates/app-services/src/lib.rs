@@ -758,6 +758,11 @@ impl AppServices {
         self.secure_store.load_password(connection_id)
     }
 
+    pub fn save_password(&self, id: &str, password: &str) -> Result<()> {
+        self.secure_store.save_password(id, password)?;
+        Ok(())
+    }
+
     fn require_connection(&self, connection_id: &str) -> Result<ConnectionProfile> {
         self.connection_store
             .get_connection(connection_id)?

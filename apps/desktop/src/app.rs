@@ -710,8 +710,6 @@ struct QueryTabState {
     pending_ai_generate_rx: Option<std::sync::mpsc::Receiver<Result<String, ai_service::AiError>>>,
     /// 流式模式的 AI 响应接收器
     ai_stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
-    /// 流式模式下当前待发送的用户提示词
-    ai_pending_prompt: Option<String>,
     /// AI 对话历史
     ai_conversation: Vec<AiMessage>,
     /// 流式模式下当前正在接收的文本片段
@@ -722,10 +720,6 @@ struct QueryTabState {
     ai_done_rx: Option<tokio::sync::oneshot::Receiver<Result<(), ai_service::AiError>>>,
     /// AI 对话输入框内容
     ai_input: String,
-    /// AI 面板高度（像素）
-    ai_panel_height: f32,
-    /// AI 面板是否展开
-    ai_panel_expanded: bool,
 }
 
 impl Clone for QueryTabState {
@@ -787,14 +781,11 @@ impl Clone for QueryTabState {
             pending_ai_generate: self.pending_ai_generate,
             pending_ai_generate_rx: None,
             ai_stream_rx: None,
-            ai_pending_prompt: None,
             ai_conversation: self.ai_conversation.clone(),
             ai_streaming_text: self.ai_streaming_text.clone(),
             ai_is_streaming: self.ai_is_streaming,
             ai_done_rx: None,
             ai_input: self.ai_input.clone(),
-            ai_panel_height: self.ai_panel_height,
-            ai_panel_expanded: self.ai_panel_expanded,
         }
     }
 }
@@ -1590,19 +1581,21 @@ impl DesktopApp {
         let ai_config = AiConfig::from_json(
             &services.load_ui_state("ai_config").ok().flatten().unwrap_or_default(),
         );
+        // 优先从加密存储加载 API Key
+        let secure_ai_key = services.load_password("freedb_ai_api_key").ok().flatten();
         let ai_settings_form = {
             let mut form = AiSettingsForm::default();
             if let Some(ref config) = ai_config {
                 match &config.provider {
                     AiProviderKind::OpenAI { api_key, base_url, model } => {
                         form.provider_type = AiSettingsProviderType::OpenAI;
-                        form.api_key = api_key.clone();
+                        form.api_key = secure_ai_key.clone().unwrap_or_else(|| api_key.clone());
                         form.base_url = base_url.clone();
                         form.model = model.clone();
                     }
                     AiProviderKind::Claude { api_key, base_url, model } => {
                         form.provider_type = AiSettingsProviderType::Claude;
-                        form.api_key = api_key.clone();
+                        form.api_key = secure_ai_key.unwrap_or_else(|| api_key.clone());
                         form.base_url = base_url.clone();
                         form.model = model.clone();
                     }
@@ -7610,7 +7603,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         tab.bottom_panel_collapsed = false;
         tab.active_bottom_tab = QueryBottomTab::AiChat;
         tab.ai_stream_rx = Some(rx);
-        tab.ai_pending_prompt = Some(user_prompt.clone());
         tab.ai_is_streaming = true;
         tab.ai_streaming_text.clear();
         tab.ai_conversation.push(AiMessage {
@@ -16328,6 +16320,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             },
                         };
                         let config = AiConfig { provider: kind };
+                        // API Key 加密存储
+                        let api_key = match &config.provider {
+                            AiProviderKind::OpenAI { api_key, .. } => api_key.clone(),
+                            AiProviderKind::Claude { api_key, .. } => api_key.clone(),
+                        };
+                        let _ = self.services.save_password("freedb_ai_api_key", &api_key);
                         let _ = self.services.save_ui_state("ai_config", &config.to_json());
                         self.ai_config = Some(config);
                         self.is_ai_settings_open = false;
@@ -18077,14 +18075,11 @@ impl QueryTabState {
             pending_ai_generate: false,
             pending_ai_generate_rx: None,
             ai_stream_rx: None,
-            ai_pending_prompt: None,
             ai_conversation: Vec::new(),
             ai_streaming_text: String::new(),
             ai_is_streaming: false,
             ai_done_rx: None,
             ai_input: String::new(),
-            ai_panel_height: 200.0,
-            ai_panel_expanded: false,
         }
     }
 
