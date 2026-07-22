@@ -862,6 +862,7 @@ fn en(key: &'static str) -> &'static str {
         "Claude" => "Claude",
         "AI 设置..." => "AI Settings...",
         "AI助手" => "AI Assistant",
+        "停止生成" => "Stop",
         "正在测试连接..." => "Testing connection...",
         "连接成功" => "Connection successful",
         "连接失败: {}" => "Connection failed: {}",

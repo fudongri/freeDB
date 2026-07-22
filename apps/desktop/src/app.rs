@@ -9624,16 +9624,28 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             .corner_radius(chrome.radius_lg)
                                             .inner_margin(egui::Margin::symmetric(4, 4))
                                             .show(ui, |ui| {
-                                                ui.set_width(112.0);
+                                                let item_w = 104.0_f32;
+                                                let item_h = 26.0_f32;
+                                                ui.set_width(item_w + 8.0);
                                                 for (i, (item, _)) in ai_item_refs.iter().enumerate() {
-                                                    let r = ui.add(
-                                                        egui::Button::new(RichText::new(*item).size(chrome.fonts.sm).color(chrome.text))
-                                                            .fill(Color32::TRANSPARENT)
-                                                            .stroke(Stroke::NONE)
-                                                            .corner_radius(chrome.radius_sm)
-                                                            .min_size(Vec2::new(104.0, 26.0)),
+                                                    let (rect, response) = ui.allocate_exact_size(
+                                                        egui::vec2(ui.available_width(), item_h),
+                                                        egui::Sense::click(),
                                                     );
-                                                    if r.clicked() {
+                                                    let (bg, text_color) = if response.hovered() {
+                                                        (chrome.selection_bg, chrome.selection_text)
+                                                    } else {
+                                                        (Color32::TRANSPARENT, chrome.text)
+                                                    };
+                                                    ui.painter().rect_filled(rect, chrome.radius_md, bg);
+                                                    ui.painter().text(
+                                                        egui::pos2(rect.left() + 10.0, rect.center().y),
+                                                        egui::Align2::LEFT_CENTER,
+                                                        *item,
+                                                        FontId::new(chrome.fonts.sm, FontFamily::Proportional),
+                                                        text_color,
+                                                    );
+                                                    if response.clicked() {
                                                         action = match i {
                                                             0 => TabUiAction::AiOptimize,
                                                             1 => TabUiAction::AiGenerate,
@@ -10342,7 +10354,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                                     ui.vertical(|ui| {
                                         // 消息列表（滚动区域）
-                                        egui::ScrollArea::vertical()
+                                        let sa_resp = egui::ScrollArea::vertical()
                                             .id_salt(format!("query-ai-chat-{}", tab.id))
                                             .auto_shrink([false, false])
                                             .stick_to_bottom(true)
@@ -10387,22 +10399,57 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     );
                                                 }
                                             });
+                                        // 流式生成时主动滚动到底部
+                                        if tab.ai_is_streaming {
+                                            let content_h = sa_resp.content_size.y;
+                                            let viewport_h = sa_resp.inner_rect.height();
+                                            if content_h > viewport_h {
+                                                let mut state = sa_resp.state;
+                                                state.offset.y = content_h - viewport_h;
+                                                state.store(ui.ctx(), sa_resp.id);
+                                            }
+                                        }
 
                                         ui.add_space(4.0);
 
-                                        // 输入框（Enter 发送，Shift+Enter 换行）
+                                        // 输入框（Enter 发送，Shift+Enter 换行）+ 停止按钮
                                         let enter_send = ui.input(|i| {
                                             i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
                                         });
                                         if enter_send {
                                             ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                                         }
-                                        let response = ui.add(
-                                            egui::TextEdit::multiline(&mut tab.ai_input)
-                                                .desired_rows(2)
-                                                .desired_width(ui.available_width())
-                                                .hint_text(tr!("继续提问...")),
-                                        );
+                                        let mut stop_clicked = false;
+                                        ui.horizontal(|ui| {
+                                            if tab.ai_is_streaming {
+                                                ui.spacing_mut().item_spacing.x = 8.0;
+                                            }
+                                            let text_w = if tab.ai_is_streaming {
+                                                ui.available_width() - 108.0
+                                            } else {
+                                                ui.available_width()
+                                            };
+                                            ui.add(
+                                                egui::TextEdit::multiline(&mut tab.ai_input)
+                                                    .desired_rows(2)
+                                                    .desired_width(text_w)
+                                                    .hint_text(tr!("继续提问...")),
+                                            );
+                                            if tab.ai_is_streaming {
+                                                let stop_btn = ui.add(
+                                                    egui::Button::new(
+                                                        RichText::new(tr!("停止生成"))
+                                                            .size(chrome.fonts.sm)
+                                                            .color(chrome.danger),
+                                                    )
+                                                    .fill(Color32::TRANSPARENT)
+                                                    .stroke(Stroke::new(1.0, chrome.danger))
+                                                    .corner_radius(chrome.radius_md)
+                                                    .min_size(Vec2::new(80.0, 38.0)),
+                                                );
+                                                stop_clicked = stop_btn.clicked();
+                                            }
+                                        });
                                         let should_send = enter_send && !tab.ai_input.is_empty() && !tab.ai_is_streaming;
                                         if should_send {
                                                     let user_input = tab.ai_input.clone();
@@ -10464,6 +10511,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             let _ = done_tx.send(result);
                                                         });
                                                     }
+                                        }
+                                        // 停止生成
+                                        if stop_clicked && tab.ai_is_streaming {
+                                            tab.ai_is_streaming = false;
+                                            tab.ai_stream_rx = None;
+                                            tab.ai_done_rx = None;
                                         }
                                     });
                                 }
