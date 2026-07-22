@@ -9,16 +9,25 @@ use crate::{AiError, AiProvider, ChatMessage, Role};
 pub struct ClaudeProvider {
     client: Client,
     api_key: String,
+    base_url: String,
     model: String,
 }
 
 impl ClaudeProvider {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, base_url: String, model: String) -> Self {
         Self {
             client: Client::new(),
             api_key,
+            base_url,
             model,
         }
+    }
+
+    fn request_url(&self) -> String {
+        format!(
+            "{}/v1/messages",
+            self.base_url.trim_end_matches('/')
+        )
     }
 
     fn build_request_body(messages: &[ChatMessage]) -> Value {
@@ -57,8 +66,6 @@ impl ClaudeProvider {
     }
 }
 
-const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages";
-
 /// 通用的 HTTP 状态码错误处理
 fn map_status_error(status: StatusCode, body: String) -> AiError {
     if status == StatusCode::UNAUTHORIZED {
@@ -82,7 +89,7 @@ impl AiProvider for ClaudeProvider {
 
         let response = self
             .client
-            .post(CLAUDE_API_URL)
+            .post(&self.request_url())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
@@ -142,7 +149,7 @@ impl AiProvider for ClaudeProvider {
 
         let response = self
             .client
-            .post(CLAUDE_API_URL)
+            .post(&self.request_url())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
@@ -175,6 +182,11 @@ impl AiProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn make_provider(base_url: &str) -> ClaudeProvider {
+        ClaudeProvider::new("test-key".into(), base_url.into(), "claude-sonnet-4-20250514".into())
+    }
 
     #[test]
     fn build_request_body_separates_system() {
@@ -247,6 +259,18 @@ mod tests {
     }
 
     #[test]
+    fn request_url_strips_trailing_slash() {
+        let p = make_provider("https://api.anthropic.com/");
+        assert_eq!(p.request_url(), "https://api.anthropic.com/v1/messages");
+    }
+
+    #[test]
+    fn request_url_no_trailing_slash() {
+        let p = make_provider("https://api.anthropic.com");
+        assert_eq!(p.request_url(), "https://api.anthropic.com/v1/messages");
+    }
+
+    #[test]
     fn map_status_auth_error() {
         let err = map_status_error(StatusCode::UNAUTHORIZED, "unauthorized".into());
         assert!(matches!(err, AiError::AuthError));
@@ -265,5 +289,118 @@ mod tests {
             "internal error".into(),
         );
         assert!(matches!(err, AiError::ProviderError(_)));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_sends_chunks() {
+        let sse_body = "\
+event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n\
+event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n\
+event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body)
+            .create_async()
+            .await;
+
+        let provider = make_provider(&server.url());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let result = provider
+            .chat_stream(
+                vec![ChatMessage {
+                    role: Role::User,
+                    content: "Hi".into(),
+                }],
+                tx,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            chunks.push(chunk);
+        }
+        assert_eq!(chunks, vec!["Hello", " world"]);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn chat_returns_content() {
+        let response_body = json!({
+            "content": [{
+                "type": "text",
+                "text": "I am fine, thanks!"
+            }]
+        });
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let provider = make_provider(&server.url());
+        let result = provider
+            .chat(vec![ChatMessage {
+                role: Role::User,
+                content: "How are you?".into(),
+            }])
+            .await;
+
+        assert_eq!(result.unwrap(), "I am fine, thanks!");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn chat_auth_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(401)
+            .with_body("unauthorized")
+            .create_async()
+            .await;
+
+        let provider = make_provider(&server.url());
+        let result = provider
+            .chat(vec![ChatMessage {
+                role: Role::User,
+                content: "test".into(),
+            }])
+            .await;
+
+        assert!(matches!(result.unwrap_err(), AiError::AuthError));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn chat_rate_limit() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(429)
+            .with_body("rate limited")
+            .create_async()
+            .await;
+
+        let provider = make_provider(&server.url());
+        let result = provider
+            .chat(vec![ChatMessage {
+                role: Role::User,
+                content: "test".into(),
+            }])
+            .await;
+
+        assert!(matches!(result.unwrap_err(), AiError::RateLimitExceeded));
+        mock.assert_async().await;
     }
 }

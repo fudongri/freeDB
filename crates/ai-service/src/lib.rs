@@ -41,6 +41,7 @@ pub enum AiProviderKind {
     },
     Claude {
         api_key: String,
+        base_url: String,
         model: String,
     },
 }
@@ -70,8 +71,14 @@ pub fn create_provider(kind: &AiProviderKind) -> Box<dyn AiProvider> {
             base_url.clone(),
             model.clone(),
         )),
-        AiProviderKind::Claude { api_key, model } => {
-            Box::new(claude::ClaudeProvider::new(api_key.clone(), model.clone()))
-        }
+        AiProviderKind::Claude {
+            api_key,
+            base_url,
+            model,
+        } => Box::new(claude::ClaudeProvider::new(
+            api_key.clone(),
+            base_url.clone(),
+            model.clone(),
+        )),
     }
 }
