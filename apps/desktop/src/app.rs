@@ -10361,10 +10361,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             .max_height(ui.available_height() - 40.0)
                                             .show(ui, |ui| {
                                                 if tab.ai_conversation.is_empty() {
-                                                    ui.centered_and_justified(|ui| {
+                                                    ui.vertical_centered(|ui| {
+                                                        ui.add_space(40.0);
                                                         ui.label(
                                                             RichText::new(tr!("输入问题开始对话..."))
                                                                 .size(chrome.fonts.sm)
+                                                                .color(chrome.weak_text),
+                                                        );
+                                                        ui.add_space(4.0);
+                                                        ui.label(
+                                                            RichText::new(tr!("输入 /clear 清空对话"))
+                                                                .size(chrome.fonts.xs)
                                                                 .color(chrome.weak_text),
                                                         );
                                                     });
@@ -10433,7 +10440,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 egui::TextEdit::multiline(&mut tab.ai_input)
                                                     .desired_rows(2)
                                                     .desired_width(text_w)
-                                                    .hint_text(tr!("继续提问...")),
+                                                    .hint_text(tr!("继续提问… (/clear 清空)")),
                                             );
                                             if tab.ai_is_streaming {
                                                 let stop_btn = ui.add(
@@ -10455,7 +10462,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     let user_input = tab.ai_input.clone();
                                                     tab.ai_input.clear();
 
-                                                    tab.ai_conversation.push(AiMessage {
+                                                    // /clear 命令：清空对话
+                                                    if user_input.trim() == "/clear" {
+                                                        tab.ai_conversation.clear();
+                                                        tab.ai_streaming_text.clear();
+                                                    } else {
+                                                        tab.ai_conversation.push(AiMessage {
                                                         role: AiRole::User,
                                                         content: user_input.clone(),
                                                     });
@@ -10511,6 +10523,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             let _ = done_tx.send(result);
                                                         });
                                                     }
+                                                    } // else（非 /clear 路径）
                                         }
                                         // 停止生成
                                         if stop_clicked && tab.ai_is_streaming {
