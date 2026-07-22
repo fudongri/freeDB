@@ -1,4 +1,5 @@
 use app_services::AppServices;
+use ai_service::config::AiConfig;
 use i18n::{self, tr, Locale, get_locale, set_locale};
 use metadata_cache::CachedEntry;
 use core_domain::{
@@ -171,6 +172,10 @@ pub struct DesktopApp {
     menu_tab_back: Option<muda::MenuItem>,
     menu_tab_forward: Option<muda::MenuItem>,
     menu_recent_tabs: Option<muda::MenuItem>,
+    menu_ai: Option<muda::Submenu>,
+    menu_ai_settings: Option<muda::MenuItem>,
+    is_ai_settings_open: bool,
+    ai_config: Option<AiConfig>,
     locale: Locale,
     /// 帧计数器：延迟最大化到窗口完全显示后执行
     frame_count: usize,
@@ -656,6 +661,7 @@ struct QueryTabState {
     pending_edit_context_analysis: bool,
     /// 手动编辑模式：等待用户输入表名
     manual_edit_prompt: bool,
+    pending_ai_generate: bool,
 }
 
 /// SQL 查询页的内联编辑上下文。当检测到简单单表 SELECT 时创建。
@@ -1399,6 +1405,8 @@ impl DesktopApp {
         menu_tab_back: Option<muda::MenuItem>,
         menu_tab_forward: Option<muda::MenuItem>,
         menu_recent_tabs: Option<muda::MenuItem>,
+        menu_ai: Option<muda::Submenu>,
+        menu_ai_settings: Option<muda::MenuItem>,
         locale: Locale,
     ) -> Self {
         // 加载已保存的语言，优先于系统检测
@@ -1444,6 +1452,9 @@ impl DesktopApp {
             .and_then(|value| value.parse::<f32>().ok())
             .unwrap_or(default_scroll_speed)
             .clamp(0.1, 100.0);
+        let ai_config = AiConfig::from_json(
+            &services.load_ui_state("ai_config").ok().flatten().unwrap_or_default(),
+        );
         let mut app = Self {
             runtime,
             services,
@@ -1556,6 +1567,10 @@ impl DesktopApp {
             menu_tab_back,
             menu_tab_forward,
             menu_recent_tabs,
+            menu_ai,
+            menu_ai_settings,
+            is_ai_settings_open: false,
+            ai_config,
             locale,
             frame_count: 0,
         };
@@ -2106,6 +2121,8 @@ impl DesktopApp {
                         }
                     }
                 }
+            } else if event.id == "AI 设置" {
+                self.is_ai_settings_open = true;
             } else if event.id == "慢查询分析" {
                 self.tabs.push(WorkspaceTab::SlowQuery(SlowQueryTabState::default()));
                 self.active_tab = self.tabs.len() - 1;
@@ -17332,6 +17349,7 @@ impl QueryTabState {
             edit_context: None,
             pending_edit_context_analysis: false,
             manual_edit_prompt: false,
+            pending_ai_generate: false,
         }
     }
 
