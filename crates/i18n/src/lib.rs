@@ -872,6 +872,11 @@ fn en(key: &'static str) -> &'static str {
         "{} 条对话" => "{} messages",
         "输入问题开始对话..." => "Type a question to start chatting...",
         "请先执行查询后再使用数据检查/分析功能" => "Please execute a query before using data check/analysis",
+        "模型列表" => "Model List",
+        "已切换模型" => "Model switched",
+        "默认模型" => "Default Model",
+        "配置 AI 模型与密钥" => "Configure AI models and API keys",
+        "自定义 URL" => "Custom URL",
 
         _ => key,
     }

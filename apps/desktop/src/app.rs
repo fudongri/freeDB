@@ -1,5 +1,5 @@
 use app_services::AppServices;
-use ai_service::config::{AiConfig, OPENAI_PRESETS};
+use ai_service::config::{AiConfig, AiModelStore, CLAUDE_BASE_URL, OPENAI_PRESETS, PROVIDER_MODELS};
 use ai_service::AiProviderKind;
 use i18n::{self, tr, Locale, get_locale, set_locale};
 use metadata_cache::CachedEntry;
@@ -30,6 +30,7 @@ use crate::autocomplete::{
 };
 
 struct AiSettingsForm {
+    name: String,
     provider_type: AiSettingsProviderType,
     api_key: String,
     base_url: String,
@@ -47,6 +48,7 @@ enum AiSettingsProviderType {
 impl Default for AiSettingsForm {
     fn default() -> Self {
         Self {
+            name: String::new(),
             provider_type: AiSettingsProviderType::OpenAI,
             api_key: String::new(),
             base_url: "https://api.openai.com/v1".into(),
@@ -204,8 +206,9 @@ pub struct DesktopApp {
     menu_ai: Option<muda::Submenu>,
     menu_ai_settings: Option<muda::MenuItem>,
     is_ai_settings_open: bool,
-    ai_config: Option<AiConfig>,
+    ai_model_store: AiModelStore,
     ai_settings_form: AiSettingsForm,
+    ai_settings_editing_index: usize,
     pending_ai_test: Option<Receiver<Result<String, ai_service::AiError>>>,
     locale: Locale,
     /// 帧计数器：延迟最大化到窗口完全显示后执行
@@ -1578,24 +1581,50 @@ impl DesktopApp {
             .and_then(|value| value.parse::<f32>().ok())
             .unwrap_or(default_scroll_speed)
             .clamp(0.1, 100.0);
-        let ai_config = AiConfig::from_json(
-            &services.load_ui_state("ai_config").ok().flatten().unwrap_or_default(),
-        );
-        // 优先从加密存储加载 API Key
-        let secure_ai_key = services.load_password("freedb_ai_api_key").ok().flatten();
+        // 加载多模型配置（兼容旧单配置格式）
+        let ai_model_store = {
+            let store_json = services.load_ui_state("ai_model_store").ok().flatten().unwrap_or_default();
+            let mut store = if store_json.is_empty() {
+                // 尝试从旧格式迁移
+                if let Some(old_config) = AiConfig::from_json(
+                    &services.load_ui_state("ai_config").ok().flatten().unwrap_or_default(),
+                ) {
+                    let mut s = AiModelStore::default();
+                    s.add(tr!("默认模型").to_string(), old_config);
+                    s
+                } else {
+                    AiModelStore::default()
+                }
+            } else {
+                AiModelStore::from_json(&store_json)
+            };
+            // 从加密存储加载各模型的 API Key
+            for (i, entry) in store.models.iter_mut().enumerate() {
+                let key_id = format!("freedb_ai_api_key_{}", i);
+                if let Ok(Some(key)) = services.load_password(&key_id) {
+                    match &mut entry.config.provider {
+                        ai_service::AiProviderKind::OpenAI { api_key, .. } => *api_key = key,
+                        ai_service::AiProviderKind::Claude { api_key, .. } => *api_key = key,
+                    }
+                }
+            }
+            store
+        };
         let ai_settings_form = {
             let mut form = AiSettingsForm::default();
-            if let Some(ref config) = ai_config {
+            if let Some(config) = ai_model_store.active() {
+                form.name = ai_model_store.models.get(ai_model_store.active_index)
+                    .map(|e| e.name.clone()).unwrap_or_default();
                 match &config.provider {
-                    AiProviderKind::OpenAI { api_key, base_url, model } => {
+                    ai_service::AiProviderKind::OpenAI { api_key, base_url, model } => {
                         form.provider_type = AiSettingsProviderType::OpenAI;
-                        form.api_key = secure_ai_key.clone().unwrap_or_else(|| api_key.clone());
+                        form.api_key = api_key.clone();
                         form.base_url = base_url.clone();
                         form.model = model.clone();
                     }
-                    AiProviderKind::Claude { api_key, base_url, model } => {
+                    ai_service::AiProviderKind::Claude { api_key, base_url, model } => {
                         form.provider_type = AiSettingsProviderType::Claude;
-                        form.api_key = secure_ai_key.unwrap_or_else(|| api_key.clone());
+                        form.api_key = api_key.clone();
                         form.base_url = base_url.clone();
                         form.model = model.clone();
                     }
@@ -1719,7 +1748,8 @@ impl DesktopApp {
             menu_ai_settings,
             is_ai_settings_open: false,
             ai_settings_form,
-            ai_config,
+            ai_model_store,
+            ai_settings_editing_index: 0,
             pending_ai_test: None,
             locale,
             frame_count: 0,
@@ -2272,6 +2302,7 @@ impl DesktopApp {
                     }
                 }
             } else if event.id == "AI 设置" {
+                self.ai_settings_editing_index = self.ai_model_store.active_index;
                 self.is_ai_settings_open = true;
             } else if event.id == "慢查询分析" {
                 self.tabs.push(WorkspaceTab::SlowQuery(SlowQueryTabState::default()));
@@ -7074,7 +7105,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             pending_query_batch_save,
                             &self.theme.colors,
                             &self.theme.fonts,
-                            &self.ai_config,
+                            &self.ai_model_store,
                             &self.runtime,
                         ),
                         WorkspaceTab::Table(tab) => Self::render_table_tab(ui, tab, self.pending_batch_save, &self.theme.colors, &self.theme.fonts),
@@ -7518,9 +7549,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
     fn execute_ai_action(&mut self, action: ai_service::prompt::AiAction) {
         // 阶段一：收集所需数据（读取 self，不保持借用）
-        let config = match self.ai_config.as_ref() {
+        let config = match self.ai_model_store.active() {
             Some(c) => c.clone(),
             None => {
+                self.ai_settings_editing_index = self.ai_model_store.active_index;
                 self.is_ai_settings_open = true;
                 return;
             }
@@ -8114,6 +8146,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::AiExplain => self.execute_ai_action(ai_service::prompt::AiAction::Explain),
             TabUiAction::AiDataQuality => self.execute_ai_action(ai_service::prompt::AiAction::DataQuality),
             TabUiAction::AiDataAnalysis => self.execute_ai_action(ai_service::prompt::AiAction::DataAnalysis),
+            TabUiAction::SwitchAiModel(index) => {
+                self.ai_model_store.set_active(index);
+                let _ = self.services.save_ui_state("ai_model_store", &self.ai_model_store.to_json());
+                self.status_message = tr!("已切换模型").to_string();
+            }
+            TabUiAction::OpenAiSettings => {
+                self.ai_settings_editing_index = self.ai_model_store.active_index;
+                self.is_ai_settings_open = true;
+            }
         }
     }
 
@@ -9399,7 +9440,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         pending_query_batch_save: bool,
         colors: &ui_theme::ThemeColors,
         fonts: &ui_theme::FontSizes,
-        ai_config: &Option<AiConfig>,
+        ai_model_store: &AiModelStore,
         runtime: &Runtime,
     ) -> TabUiAction {
         let mut action = TabUiAction::None;
@@ -9535,27 +9576,39 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }
                                 }
                                 // AI 助手下拉按钮
-                                if ai_config.is_some() {
-                                    egui::ComboBox::from_id_salt(format!("ai_menu_{}", tab.id))
-                                        .selected_text(tr!("AI"))
-                                        .width(60.0)
-                                        .show_ui(ui, |ui| {
-                                            if ui.selectable_label(false, tr!("优化语句")).clicked() {
-                                                action = TabUiAction::AiOptimize;
-                                            }
-                                            if ui.selectable_label(false, tr!("根据注释生成语句")).clicked() {
-                                                action = TabUiAction::AiGenerate;
-                                            }
-                                            if ui.selectable_label(false, tr!("解释语句")).clicked() {
-                                                action = TabUiAction::AiExplain;
-                                            }
-                                            if ui.selectable_label(false, tr!("数据质量检查")).clicked() {
-                                                action = TabUiAction::AiDataQuality;
-                                            }
-                                            if ui.selectable_label(false, tr!("数据分析")).clicked() {
-                                                action = TabUiAction::AiDataAnalysis;
-                                            }
-                                        });
+                                let ai_label = ai_model_store.active()
+                                    .and_then(|_| ai_model_store.models.get(ai_model_store.active_index))
+                                    .map(|e| e.name.clone())
+                                    .unwrap_or_else(|| tr!("AI").to_string());
+                                let mut ai_items: Vec<String> = Vec::new();
+                                if ai_model_store.models.len() > 1 {
+                                    for (i, entry) in ai_model_store.models.iter().enumerate() {
+                                        let prefix = if i == ai_model_store.active_index { "\u{2713} " } else { "  " };
+                                        ai_items.push(format!("{}{}", prefix, entry.name));
+                                    }
+                                }
+                                ai_items.push(tr!("优化语句").to_string());
+                                ai_items.push(tr!("根据注释生成语句").to_string());
+                                ai_items.push(tr!("解释语句").to_string());
+                                ai_items.push(tr!("数据质量检查").to_string());
+                                ai_items.push(tr!("数据分析").to_string());
+                                ai_items.push(tr!("AI 设置...").to_string());
+                                let ai_item_refs: Vec<(&str, bool)> = ai_items.iter().map(|s| (s.as_str(), false)).collect();
+                                let model_count = if ai_model_store.models.len() > 1 { ai_model_store.models.len() } else { 0 };
+                                if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("ai_menu").with(&tab.id), &ai_label, 120.0, &ai_item_refs) {
+                                    if sel < model_count {
+                                        action = TabUiAction::SwitchAiModel(sel);
+                                    } else {
+                                        let action_idx = sel - model_count;
+                                        action = match action_idx {
+                                            0 => TabUiAction::AiOptimize,
+                                            1 => TabUiAction::AiGenerate,
+                                            2 => TabUiAction::AiExplain,
+                                            3 => TabUiAction::AiDataQuality,
+                                            4 => TabUiAction::AiDataAnalysis,
+                                            _ => TabUiAction::OpenAiSettings,
+                                        };
+                                    }
                                 }
                             });
                             ui.add_space(10.0);
@@ -9850,12 +9903,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 if has_result {
                     strip.cell(|ui| {
                         egui::Frame::new()
-                            .fill(chrome.card_bg)
-                            .stroke(Stroke::NONE)
-                            .corner_radius(chrome.radius_sm)
-                            .inner_margin(egui::Margin::symmetric(8, 8))
+                            .fill(chrome.workspace_bg)
+                            .stroke(Stroke::new(1.0, chrome.soft_border))
+                            .corner_radius(chrome.radius_lg)
+                            .inner_margin(egui::Margin::symmetric(10, 6))
                             .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
                                 // 只有存在查询结果时才显示结果 tab
                                 if !tab.multi_results.is_empty() {
                                     let label = QueryBottomTab::Results.label();
@@ -9999,9 +10053,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.label(RichText::new(summary).size(chrome.fonts.sm).color(chrome.weak_text));
                                 });
                             });
-                            ui.add_space(8.0);
-                            ui.separator();
-                            ui.add_space(8.0);
+                            ui.add_space(4.0);
+                            // 分割线
+                            let sep_rect = ui.available_rect_before_wrap();
+                            let sep_y = sep_rect.top();
+                            ui.painter().line_segment(
+                                [egui::pos2(sep_rect.left(), sep_y), egui::pos2(sep_rect.right(), sep_y)],
+                                Stroke::new(1.0, chrome.soft_border),
+                            );
+                            ui.add_space(6.0);
 
                             match tab.active_bottom_tab {
                                 QueryBottomTab::Results => {
@@ -10229,7 +10289,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         .unwrap_or("SQL")
                                         .to_string();
 
-                                    let config = ai_config.clone();
+                                    let config = ai_model_store.active().cloned();
 
                                     ui.vertical(|ui| {
                                         // 消息列表（滚动区域）
@@ -10249,63 +10309,70 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     });
                                                 }
                                                 for msg in &tab.ai_conversation {
-                                                    let (prefix, bg_color) = match msg.role {
-                                                        AiRole::User => ("U:", chrome.selection_bg),
-                                                        AiRole::Assistant => ("AI:", chrome.search_bg),
+                                                    let is_user = matches!(msg.role, AiRole::User);
+                                                    let (prefix, prefix_color) = match msg.role {
+                                                        AiRole::User => ("You", chrome.accent_button_text),
+                                                        AiRole::Assistant => ("AI", chrome.weak_text),
+                                                    };
+                                                    let (bg_color, stroke) = if is_user {
+                                                        (Color32::TRANSPARENT, Stroke::new(1.0, chrome.border))
+                                                    } else {
+                                                        (chrome.search_bg, Stroke::NONE)
                                                     };
                                                     egui::Frame::new()
                                                         .fill(bg_color)
-                                                        .stroke(Stroke::NONE)
+                                                        .stroke(stroke)
                                                         .corner_radius(chrome.radius_sm)
-                                                        .inner_margin(egui::Margin::symmetric(8, 6))
+                                                        .inner_margin(egui::Margin::symmetric(10, 6))
                                                         .show(ui, |ui| {
                                                             ui.horizontal_top(|ui| {
                                                                 ui.label(
                                                                     RichText::new(prefix)
                                                                         .size(chrome.fonts.sm)
-                                                                        .color(chrome.weak_text),
+                                                                        .strong()
+                                                                        .color(prefix_color),
                                                                 );
-                                                                ui.add_space(4.0);
-                                                                let content = &msg.content;
-                                                                let mono_font = FontId::new(chrome.fonts.mono, FontFamily::Monospace);
-                                                                let parts: Vec<&str> = content.split("```").collect();
-                                                                if parts.len() > 1 {
-                                                                    for (i, part) in parts.iter().enumerate() {
-                                                                        if i % 2 == 0 {
-                                                                            if !part.trim().is_empty() {
-                                                                                ui.label(RichText::new(*part).size(chrome.fonts.base).color(chrome.text));
-                                                                            }
-                                                                        } else {
-                                                                            ui.add_space(4.0);
-                                                                            egui::Frame::new()
-                                                                                .fill(chrome.search_bg)
-                                                                                .stroke(Stroke::NONE)
-                                                                                .corner_radius(chrome.radius_sm)
-                                                                                .inner_margin(egui::Margin::symmetric(8, 6))
-                                                                                .show(ui, |ui| {
-                                                                                    ui.horizontal_top(|ui| {
-                                                                                        ui.label(
-                                                                                            RichText::new(*part)
-                                                                                                .font(mono_font.clone())
-                                                                                                .size(chrome.fonts.sm)
-                                                                                                .color(chrome.text),
-                                                                                        );
-                                                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                                                                                            if mini_button(ui, tr!("复制"), subtle_button_style(colors, chrome.fonts.sm)).clicked() {
-                                                                                                ui.ctx().copy_text(part.to_string());
-                                                                                            }
+                                                                ui.add_space(6.0);
+                                                                    let content = &msg.content;
+                                                                    let mono_font = FontId::new(chrome.fonts.mono, FontFamily::Monospace);
+                                                                    let parts: Vec<&str> = content.split("```").collect();
+                                                                    if parts.len() > 1 {
+                                                                        for (i, part) in parts.iter().enumerate() {
+                                                                            if i % 2 == 0 {
+                                                                                if !part.trim().is_empty() {
+                                                                                    ui.label(RichText::new(*part).size(chrome.fonts.base).color(chrome.text));
+                                                                                }
+                                                                            } else {
+                                                                                ui.add_space(4.0);
+                                                                                egui::Frame::new()
+                                                                                    .fill(chrome.search_bg)
+                                                                                    .stroke(Stroke::NONE)
+                                                                                    .corner_radius(chrome.radius_sm)
+                                                                                    .inner_margin(egui::Margin::symmetric(8, 6))
+                                                                                    .show(ui, |ui| {
+                                                                                        ui.horizontal_top(|ui| {
+                                                                                            ui.label(
+                                                                                                RichText::new(*part)
+                                                                                                    .font(mono_font.clone())
+                                                                                                    .size(chrome.fonts.sm)
+                                                                                                    .color(chrome.text),
+                                                                                            );
+                                                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                                                                                if mini_button(ui, tr!("复制"), subtle_button_style(colors, chrome.fonts.sm)).clicked() {
+                                                                                                    ui.ctx().copy_text(part.to_string());
+                                                                                                }
+                                                                                            });
                                                                                         });
                                                                                     });
-                                                                                });
-                                                                            ui.add_space(4.0);
+                                                                                ui.add_space(4.0);
+                                                                            }
                                                                         }
+                                                                    } else {
+                                                                        ui.label(RichText::new(content.as_str()).size(chrome.fonts.base).color(chrome.text));
                                                                     }
-                                                                } else {
-                                                                    ui.label(RichText::new(content.as_str()).size(chrome.fonts.base).color(chrome.text));
-                                                                }
+                                                                });
                                                             });
-                                                        });
-                                                    ui.add_space(2.0);
+                                                    ui.add_space(4.0);
                                                 }
                                                 if tab.ai_is_streaming {
                                                     ui.label(
@@ -10318,24 +10385,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                                         ui.add_space(4.0);
 
-                                        // 输入框 + 发送按钮
-                                        ui.horizontal(|ui| {
-                                            let response = ui.add(
-                                                egui::TextEdit::singleline(&mut tab.ai_input)
-                                                    .desired_width(ui.available_width() - 60.0)
-                                                    .hint_text(tr!("继续提问...")),
-                                            );
-                                            let send_clicked = toolbar_button(
-                                                ui,
-                                                tr!("发送"),
-                                                accent_button_style(colors, fonts.md),
-                                            )
-                                            .clicked();
-                                            if (response.lost_focus()
-                                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                                                || send_clicked
-                                            {
-                                                if !tab.ai_input.is_empty() && !tab.ai_is_streaming {
+                                        // 输入框（Enter 发送，Shift+Enter 换行）
+                                        let enter_send = ui.input(|i| {
+                                            i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
+                                        });
+                                        if enter_send {
+                                            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                                        }
+                                        let response = ui.add(
+                                            egui::TextEdit::multiline(&mut tab.ai_input)
+                                                .desired_rows(2)
+                                                .desired_width(ui.available_width())
+                                                .hint_text(tr!("继续提问...")),
+                                        );
+                                        let should_send = enter_send && !tab.ai_input.is_empty() && !tab.ai_is_streaming;
+                                        if should_send {
                                                     let user_input = tab.ai_input.clone();
                                                     tab.ai_input.clear();
 
@@ -10395,9 +10459,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             let _ = done_tx.send(result);
                                                         });
                                                     }
-                                                }
-                                            }
-                                        });
+                                        }
                                     });
                                 }
                             }
@@ -16206,134 +16268,336 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return;
         }
         let mut open = self.is_ai_settings_open;
+        let mut should_close = false;
+        let palette = MacDialogPalette::from(&self.theme.colors);
         egui::Window::new(tr!("AI 设置"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
-            .fixed_size([380.0, 320.0])
+            .movable(false)
+            .title_bar(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_width(620.0)
+            .min_width(620.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette.window_bg)
+                    .stroke(Stroke::new(1.0, palette.border))
+                    .corner_radius(self.theme.colors.radius_xxl)
+                    .inner_margin(egui::Margin::symmetric(22, 20)),
+            )
             .show(ctx, |ui| {
-                let form = &mut self.ai_settings_form;
-                let colors = &self.theme.colors;
-                let fonts = &self.theme.fonts;
+                ui.scope(|ui| {
+                    apply_mac_dialog_style(ui, palette);
+                    ui.set_width(620.0);
+                    ui.spacing_mut().item_spacing = egui::vec2(14.0, 12.0);
 
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
-
-                // 提供商选择
-                ui.horizontal(|ui| {
-                    ui.label(tr!("提供商"));
-                    egui::ComboBox::from_id_salt("ai_provider_type")
-                        .selected_text(match form.provider_type {
-                            AiSettingsProviderType::OpenAI => tr!("OpenAI 兼容"),
-                            AiSettingsProviderType::Claude => tr!("Claude"),
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut form.provider_type, AiSettingsProviderType::OpenAI, tr!("OpenAI 兼容"));
-                            ui.selectable_value(&mut form.provider_type, AiSettingsProviderType::Claude, tr!("Claude"));
-                        });
-                });
-
-                // API Key
-                ui.horizontal(|ui| {
-                    ui.label(tr!("API Key"));
-                    let api_key_field = if form.show_api_key {
-                        egui::TextEdit::singleline(&mut form.api_key)
-                    } else {
-                        egui::TextEdit::singleline(&mut form.api_key).password(true)
-                    };
-                    ui.add(api_key_field.desired_width(200.0));
-                    if mini_button(ui, if form.show_api_key { "\u{1f648}" } else { "\u{1f441}" }, mini_subtle_style(colors, fonts.md)).clicked() {
-                        form.show_api_key = !form.show_api_key;
-                    }
-                });
-
-                // Base URL（仅 OpenAI 模式）
-                if form.provider_type == AiSettingsProviderType::OpenAI {
+                    // ── 标题栏 ──
                     ui.horizontal(|ui| {
-                        ui.label(tr!("Base URL"));
-                        egui::ComboBox::from_id_salt("ai_base_url_preset")
-                            .selected_text(if OPENAI_PRESETS.iter().any(|(_, url)| *url == form.base_url) {
-                                OPENAI_PRESETS.iter().find(|(_, url)| *url == form.base_url).unwrap().0
-                            } else {
-                                &form.base_url
-                            })
-                            .show_ui(ui, |ui| {
-                                for (name, url) in OPENAI_PRESETS {
-                                    ui.selectable_value(&mut form.base_url, url.to_string(), *name);
-                                }
+                        ui.label(RichText::new(tr!("AI 设置")).size(self.theme.fonts.title).strong().color(palette.title));
+                        ui.add_space(14.0);
+                        ui.small(RichText::new(tr!("配置 AI 模型与密钥")).color(palette.subtitle));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if mini_button(ui, tr!("关闭"), mini_hide_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                should_close = true;
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+
+                    // ── 左右分栏：模型列表 + 编辑表单 ──
+                    ui.horizontal_top(|ui| {
+                        // 左侧：模型列表
+                        let form_height = 260.0_f32; // 与右侧表单高度匹配
+                        egui::Frame::new()
+                            .fill(palette.section_bg)
+                            .stroke(Stroke::new(1.0, palette.section_border))
+                            .corner_radius(self.theme.colors.radius_lg)
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.set_width(150.0);
+                                ui.set_min_height(form_height);
+                                ui.set_max_height(form_height);
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(tr!("模型列表")).size(self.theme.fonts.sm).strong().color(palette.text));
+                                    ui.add_space(4.0);
+
+                                    // 列表区域：占据剩余空间，超出滚动
+                                    let list_h = (form_height - 70.0).max(60.0); // 减去标题和按钮
+                                    egui::ScrollArea::vertical()
+                                        .max_height(list_h)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            let store = &self.ai_model_store;
+                                            let editing = self.ai_settings_editing_index;
+                                        let mut clicked_index = None;
+                                        for (i, entry) in store.models.iter().enumerate() {
+                                            let is_active = i == store.active_index;
+                                            let label = if is_active {
+                                                format!("{} \u{2713}", entry.name)
+                                            } else {
+                                                entry.name.clone()
+                                            };
+                                            let resp = ui.selectable_label(i == editing, label);
+                                            if resp.clicked() {
+                                                clicked_index = Some(i);
+                                            }
+                                        }
+                                        if let Some(idx) = clicked_index {
+                                            self.ai_settings_editing_index = idx;
+                                            self.ai_model_store.set_active(idx);
+                                            let _ = self.services.save_ui_state("ai_model_store", &self.ai_model_store.to_json());
+                                            Self::sync_ai_form_from_store(&mut self.ai_settings_form, &self.ai_model_store, idx);
+                                        }
+                                    });
+
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    if mini_button(ui, tr!("新增"), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                        let new_name = format!("{} {}", tr!("模型"), self.ai_model_store.models.len() + 1);
+                                        let config = AiConfig {
+                                            provider: AiProviderKind::OpenAI {
+                                                api_key: String::new(),
+                                                base_url: "https://api.openai.com/v1".into(),
+                                                model: "gpt-4.1".into(),
+                                            },
+                                        };
+                                        self.ai_model_store.add(new_name.clone(), config);
+                                        let idx = self.ai_model_store.models.len() - 1;
+                                        self.ai_settings_editing_index = idx;
+                                        Self::sync_ai_form_from_store(&mut self.ai_settings_form, &self.ai_model_store, idx);
+                                    }
+                                    if self.ai_model_store.models.len() > 1
+                                        && mini_button(ui, tr!("删除"), mini_danger_style(&self.theme.colors, self.theme.fonts.sm)).clicked()
+                                    {
+                                        let idx = self.ai_settings_editing_index;
+                                        self.ai_model_store.remove(idx);
+                                        let new_idx = self.ai_settings_editing_index.min(self.ai_model_store.models.len() - 1);
+                                        self.ai_settings_editing_index = new_idx;
+                                        Self::sync_ai_form_from_store(&mut self.ai_settings_form, &self.ai_model_store, new_idx);
+                                    }
+                                });
+                                }); // end of ui.vertical
+                            }); // end of Frame
+
+                        ui.add_space(8.0);
+
+                        // 右侧：编辑表单
+                        let form = &mut self.ai_settings_form;
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin::symmetric(18, 16))
+                            .show(ui, |ui| {
+                                ui.set_width(400.0);
+                                egui::Grid::new("ai-settings-form-grid")
+                                    .num_columns(2)
+                                    .spacing([16.0, 12.0])
+                                    .min_col_width(80.0)
+                                    .show(ui, |ui| {
+                                        form_grid_row(ui, tr!("名称"), |ui| {
+                                            ui.add_sized([280.0, 30.0], egui::TextEdit::singleline(&mut form.name).char_limit(20));
+                                        });
+                                        form_grid_row(ui, tr!("提供商"), |ui| {
+                                            // 统一提供商列表：所有预设 + Claude
+                                            let all_providers: Vec<(&str, &str, &str, bool)> = OPENAI_PRESETS.iter()
+                                                .map(|(name, url, model)| (*name, *url, *model, false))
+                                                .chain(std::iter::once(("Claude", CLAUDE_BASE_URL, "claude-sonnet-4-20250514", true)))
+                                                .collect();
+                                            // 检测当前选中项
+                                            let selected_idx = all_providers.iter().position(|(_, url, _, is_claude)| {
+                                                if *is_claude { form.provider_type == AiSettingsProviderType::Claude }
+                                                else { form.provider_type == AiSettingsProviderType::OpenAI && form.base_url == *url }
+                                            });
+                                            let is_custom = selected_idx.is_none();
+                                            let current_label = selected_idx
+                                                .and_then(|i| all_providers.get(i).map(|(n, _, _, _)| *n))
+                                                .unwrap_or(tr!("自定义"));
+                                            let items: Vec<(&str, bool)> = all_providers.iter()
+                                                .map(|(name, _, _, _)| (*name, false))
+                                                .chain(std::iter::once((tr!("自定义"), is_custom)))
+                                                .collect();
+                                            if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("ai-provider"), current_label, 200.0, &items) {
+                                                if let Some((_, url, model, is_claude)) = all_providers.get(sel) {
+                                                    form.base_url = url.to_string();
+                                                    form.model = model.to_string();
+                                                    form.provider_type = if *is_claude { AiSettingsProviderType::Claude } else { AiSettingsProviderType::OpenAI };
+                                                }
+                                            }
+                                        });
+                                        form_grid_row(ui, "API Key", |ui| {
+                                            let api_key_field = if form.show_api_key {
+                                                egui::TextEdit::singleline(&mut form.api_key)
+                                            } else {
+                                                egui::TextEdit::singleline(&mut form.api_key).password(true)
+                                            };
+                                            ui.add_sized([240.0, 30.0], api_key_field);
+                                            if mini_button(ui, if form.show_api_key { "\u{1f648}" } else { "\u{1f441}" }, mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                                form.show_api_key = !form.show_api_key;
+                                            }
+                                        });
+                                        // Base URL 始终显示（预设时只读）
+                                        let is_preset = OPENAI_PRESETS.iter().any(|(_, url, _)| form.base_url == *url)
+                                            || form.provider_type == AiSettingsProviderType::Claude;
+                                        form_grid_row(ui, "Base URL", |ui| {
+                                            if is_preset {
+                                                ui.add_sized([280.0, 30.0], egui::TextEdit::singleline(&mut form.base_url).interactive(false));
+                                            } else {
+                                                ui.add_sized([280.0, 30.0], egui::TextEdit::singleline(&mut form.base_url));
+                                            }
+                                        });
+                                        form_grid_row(ui, tr!("模型"), |ui| {
+                                            // 根据当前提供商查找推荐模型列表
+                                            let current_url = &form.base_url;
+                                            let is_claude = form.provider_type == AiSettingsProviderType::Claude;
+                                            let preset_models: &[&str] = PROVIDER_MODELS.iter()
+                                                .find(|(_, url, _)| {
+                                                    if is_claude { url.is_empty() } else { *url == current_url.as_str() }
+                                                })
+                                                .map(|(_, _, models)| *models)
+                                                .unwrap_or(&[]);
+                                            let mut model_items: Vec<String> = Vec::new();
+                                            if !preset_models.is_empty() {
+                                                for &m in preset_models {
+                                                    model_items.push(m.to_string());
+                                                }
+                                            }
+                                            // 当前模型不在推荐列表中时追加
+                                            if !model_items.contains(&form.model) {
+                                                model_items.insert(0, form.model.clone());
+                                            }
+                                            let model_refs: Vec<(&str, bool)> = model_items.iter()
+                                                .map(|s| (s.as_str(), s.as_str() == form.model.as_str()))
+                                                .collect();
+                                            if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("ai-model-select"), &form.model, 280.0, &model_refs) {
+                                                form.model = model_items[sel].clone();
+                                            }
+                                        });
+                                    });
                             });
-                        ui.add(egui::TextEdit::singleline(&mut form.base_url).desired_width(200.0));
                     });
-                }
 
-                // 模型
-                ui.horizontal(|ui| {
-                    ui.label(tr!("模型"));
-                    ui.add(egui::TextEdit::singleline(&mut form.model).desired_width(200.0));
-                });
+                    ui.add_space(8.0);
 
-                // 测试连接
-                if toolbar_button(ui, tr!("测试连接"), accent_button_style(colors, fonts.md)).clicked() {
-                    let kind = match form.provider_type {
-                        AiSettingsProviderType::OpenAI => AiProviderKind::OpenAI {
-                            api_key: form.api_key.clone(),
-                            base_url: form.base_url.clone(),
-                            model: form.model.clone(),
-                        },
-                        AiSettingsProviderType::Claude => AiProviderKind::Claude {
-                            api_key: form.api_key.clone(),
-                            base_url: form.base_url.clone(),
-                            model: form.model.clone(),
-                        },
-                    };
-                    form.test_status = Some(tr!("正在测试连接...").to_string());
-                    let provider = ai_service::create_provider(&kind);
-                    let messages = ai_service::prompt::test_connection_prompt();
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    self.runtime.spawn(async move {
-                        let result = provider.chat(messages).await;
-                        let _ = tx.send(result);
+                    // 测试连接状态
+                    let test_status = self.ai_settings_form.test_status.clone();
+                    if let Some(rx) = self.pending_ai_test.take() {
+                        match rx.try_recv() {
+                            Ok(Ok(msg)) => {
+                                self.ai_settings_form.test_status = Some(tr!("连接成功").to_string());
+                                self.pending_ai_test = None;
+                            }
+                            Ok(Err(e)) => {
+                                self.ai_settings_form.test_status = Some(format!("{}: {}", tr!("连接失败"), e));
+                                self.pending_ai_test = None;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                self.pending_ai_test = Some(rx);
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(tr!("正在测试连接..."));
+                                });
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                self.pending_ai_test = None;
+                            }
+                        }
+                    }
+                    if let Some(ref status) = self.ai_settings_form.test_status {
+                        if !status.contains(&tr!("正在测试连接...").to_string()) {
+                            ui.label(RichText::new(status).color(palette.weak_text));
+                        }
+                    }
+
+                    // ── 底部按钮行 ──
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if mini_button(ui, tr!("保存"), mini_primary_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                let idx = self.ai_settings_editing_index;
+                                let form = &self.ai_settings_form;
+                                let kind = match form.provider_type {
+                                    AiSettingsProviderType::OpenAI => AiProviderKind::OpenAI {
+                                        api_key: form.api_key.clone(),
+                                        base_url: form.base_url.clone(),
+                                        model: form.model.clone(),
+                                    },
+                                    AiSettingsProviderType::Claude => AiProviderKind::Claude {
+                                        api_key: form.api_key.clone(),
+                                        base_url: form.base_url.clone(),
+                                        model: form.model.clone(),
+                                    },
+                                };
+                                let config = AiConfig { provider: kind };
+                                if let Some(entry) = self.ai_model_store.models.get_mut(idx) {
+                                    entry.name = form.name.clone();
+                                    entry.config = config;
+                                }
+                                for (i, entry) in self.ai_model_store.models.iter().enumerate() {
+                                    let api_key = match &entry.config.provider {
+                                        AiProviderKind::OpenAI { api_key, .. } => api_key.clone(),
+                                        AiProviderKind::Claude { api_key, .. } => api_key.clone(),
+                                    };
+                                    let key_id = format!("freedb_ai_api_key_{}", i);
+                                    let _ = self.services.save_password(&key_id, &api_key);
+                                }
+                                let _ = self.services.save_ui_state("ai_model_store", &self.ai_model_store.to_json());
+                                should_close = true;
+                                self.status_message = tr!("AI 配置已保存").to_string();
+                            }
+                            ui.add_space(8.0);
+                            if mini_button(ui, tr!("测试连接"), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                let form = &self.ai_settings_form;
+                                let kind = match form.provider_type {
+                                    AiSettingsProviderType::OpenAI => AiProviderKind::OpenAI {
+                                        api_key: form.api_key.clone(),
+                                        base_url: form.base_url.clone(),
+                                        model: form.model.clone(),
+                                    },
+                                    AiSettingsProviderType::Claude => AiProviderKind::Claude {
+                                        api_key: form.api_key.clone(),
+                                        base_url: form.base_url.clone(),
+                                        model: form.model.clone(),
+                                    },
+                                };
+                                self.ai_settings_form.test_status = None;
+                                let provider = ai_service::create_provider(&kind);
+                                let messages = ai_service::prompt::test_connection_prompt();
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                self.runtime.spawn(async move {
+                                    let result = provider.chat(messages).await;
+                                    let _ = tx.send(result);
+                                });
+                                self.pending_ai_test = Some(rx);
+                            }
+                        });
                     });
-                    // 结果在下一帧通过 self.pending_ai_test 处理
-                    self.pending_ai_test = Some(rx);
-                }
-
-                if let Some(ref status) = form.test_status {
-                    ui.label(status.as_str());
-                }
-
-                // 按钮行
-                ui.horizontal(|ui| {
-                    if toolbar_button(ui, tr!("取消"), subtle_button_style(colors, fonts.md)).clicked() {
-                        self.is_ai_settings_open = false;
-                    }
-                    if toolbar_button(ui, tr!("保存"), primary_button_style(colors, fonts.md)).clicked() {
-                        let kind = match form.provider_type {
-                            AiSettingsProviderType::OpenAI => AiProviderKind::OpenAI {
-                                api_key: form.api_key.clone(),
-                                base_url: form.base_url.clone(),
-                                model: form.model.clone(),
-                            },
-                            AiSettingsProviderType::Claude => AiProviderKind::Claude {
-                                api_key: form.api_key.clone(),
-                                base_url: form.base_url.clone(),
-                                model: form.model.clone(),
-                            },
-                        };
-                        let config = AiConfig { provider: kind };
-                        // API Key 加密存储
-                        let api_key = match &config.provider {
-                            AiProviderKind::OpenAI { api_key, .. } => api_key.clone(),
-                            AiProviderKind::Claude { api_key, .. } => api_key.clone(),
-                        };
-                        let _ = self.services.save_password("freedb_ai_api_key", &api_key);
-                        let _ = self.services.save_ui_state("ai_config", &config.to_json());
-                        self.ai_config = Some(config);
-                        self.is_ai_settings_open = false;
-                        self.status_message = tr!("AI 配置已保存").to_string();
-                    }
                 });
             });
-        self.is_ai_settings_open = open;
+        if should_close {
+            self.is_ai_settings_open = false;
+        } else {
+            self.is_ai_settings_open = open;
+        }
+    }
+
+    fn sync_ai_form_from_store(form: &mut AiSettingsForm, store: &AiModelStore, idx: usize) {
+        if let Some(entry) = store.models.get(idx) {
+            form.name = entry.name.clone();
+            form.test_status = None;
+            match &entry.config.provider {
+                AiProviderKind::OpenAI { api_key, base_url, model } => {
+                    form.provider_type = AiSettingsProviderType::OpenAI;
+                    form.api_key = api_key.clone();
+                    form.base_url = base_url.clone();
+                    form.model = model.clone();
+                }
+                AiProviderKind::Claude { api_key, base_url, model } => {
+                    form.provider_type = AiSettingsProviderType::Claude;
+                    form.api_key = api_key.clone();
+                    form.base_url = base_url.clone();
+                    form.model = model.clone();
+                }
+            }
+        }
     }
 
     fn start_update_download(&mut self, info: &UpdateInfo) {
@@ -18290,6 +18554,8 @@ enum TabUiAction {
     AiExplain,
     AiDataQuality,
     AiDataAnalysis,
+    SwitchAiModel(usize),
+    OpenAiSettings,
 }
 
 #[derive(Clone)]
@@ -29941,24 +30207,39 @@ fn segment_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respo
 
 fn segment_button_color(ui: &mut egui::Ui, label: &str, selected: bool, _accent: Option<Color32>) -> egui::Response {
     let palette = mac_ui_palette_from_ui(ui);
-    let (fill, text_color, stroke_color) = if selected {
-        // 选中：与已保存 SQL "全部" 按钮一致的 selection 风格
-        (palette.selection_bg, palette.selection_text, palette.selection_stroke)
+    let text_color = if selected {
+        palette.selection_text
     } else {
-        // 未选中：与 subtle 按钮一致
-        (palette.subtle_button_bg, palette.subtle_button_text, palette.subtle_button_stroke)
+        palette.weak_text
     };
-    ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .size(palette.fonts.base)
-                .color(text_color),
-        )
-        .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, stroke_color))
-        .corner_radius(palette.radius_lg)
-        .min_size(Vec2::new(0.0, 24.0)),
-    )
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        FontId::new(palette.fonts.md, FontFamily::Proportional),
+        text_color,
+    );
+    let text_w = galley.size().x;
+    let pad_h = 10.0;
+    let pad_v = 4.0;
+    let desired = Vec2::new(text_w + pad_h * 2.0, 26.0);
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let text_pos = egui::pos2(
+        rect.center().x - galley.size().x / 2.0,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    ui.painter().galley(text_pos, galley, text_color);
+    // 选中态底部下划线
+    if selected {
+        let line_y = rect.bottom() - 1.0;
+        let line_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + pad_h, line_y),
+            egui::pos2(rect.right() - pad_h, line_y + 2.0),
+        );
+        ui.painter().rect_filled(line_rect, 1.0, palette.selection_bg);
+    }
+    response
 }
 
 /// 单元格文本框样式：深色模式透明底，浅色模式白底 + 边框
