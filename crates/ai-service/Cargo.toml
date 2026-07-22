@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[dev-dependencies]
+mockito = "1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
