@@ -621,6 +621,20 @@ struct QueryResultSelectionState {
     cell_selection_drag_started: bool,
 }
 
+/// AI 对话中的角色
+#[derive(Clone, PartialEq)]
+enum AiRole {
+    User,
+    Assistant,
+}
+
+/// AI 对话中的一条消息
+#[derive(Clone)]
+struct AiMessage {
+    role: AiRole,
+    content: String,
+}
+
 struct QueryTabState {
     id: String,
     title: String,
@@ -698,6 +712,20 @@ struct QueryTabState {
     ai_stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     /// 流式模式下当前待发送的用户提示词
     ai_pending_prompt: Option<String>,
+    /// AI 对话历史
+    ai_conversation: Vec<AiMessage>,
+    /// 流式模式下当前正在接收的文本片段
+    ai_streaming_text: String,
+    /// AI 是否正在流式输出
+    ai_is_streaming: bool,
+    /// 流式完成通知接收器
+    ai_done_rx: Option<tokio::sync::oneshot::Receiver<Result<(), ai_service::AiError>>>,
+    /// AI 对话输入框内容
+    ai_input: String,
+    /// AI 面板高度（像素）
+    ai_panel_height: f32,
+    /// AI 面板是否展开
+    ai_panel_expanded: bool,
 }
 
 impl Clone for QueryTabState {
@@ -760,6 +788,13 @@ impl Clone for QueryTabState {
             pending_ai_generate_rx: None,
             ai_stream_rx: None,
             ai_pending_prompt: None,
+            ai_conversation: self.ai_conversation.clone(),
+            ai_streaming_text: self.ai_streaming_text.clone(),
+            ai_is_streaming: self.ai_is_streaming,
+            ai_done_rx: None,
+            ai_input: self.ai_input.clone(),
+            ai_panel_height: self.ai_panel_height,
+            ai_panel_expanded: self.ai_panel_expanded,
         }
     }
 }
@@ -7047,6 +7082,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             &self.theme.colors,
                             &self.theme.fonts,
                             &self.ai_config,
+                            &self.runtime,
                         ),
                         WorkspaceTab::Table(tab) => Self::render_table_tab(ui, tab, self.pending_batch_save, &self.theme.colors, &self.theme.fonts),
                         WorkspaceTab::CreateTable(tab) => Self::render_create_table_tab(ui, tab, &self.theme.colors, &self.theme.fonts),
@@ -7572,13 +7608,27 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         tab.bottom_panel_collapsed = false;
-        tab.active_bottom_tab = QueryBottomTab::Messages;
+        tab.active_bottom_tab = QueryBottomTab::AiChat;
         tab.ai_stream_rx = Some(rx);
-        tab.ai_pending_prompt = Some(user_prompt);
+        tab.ai_pending_prompt = Some(user_prompt.clone());
+        tab.ai_is_streaming = true;
+        tab.ai_streaming_text.clear();
+        tab.ai_conversation.push(AiMessage {
+            role: AiRole::User,
+            content: user_prompt,
+        });
+        tab.ai_conversation.push(AiMessage {
+            role: AiRole::Assistant,
+            content: String::new(),
+        });
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        tab.ai_done_rx = Some(done_rx);
 
         let handle = self.runtime.handle().clone();
         handle.spawn(async move {
-            let _ = provider.chat_stream(messages, tx).await;
+            let result = provider.chat_stream(messages, tx).await;
+            let _ = done_tx.send(result);
         });
     }
 
@@ -9358,6 +9408,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         colors: &ui_theme::ThemeColors,
         fonts: &ui_theme::FontSizes,
         ai_config: &Option<AiConfig>,
+        runtime: &Runtime,
     ) -> TabUiAction {
         let mut action = TabUiAction::None;
         let chrome = mac_ui_palette_from_ui(ui);
@@ -9370,10 +9421,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let tab_db_kind = tab.connection_id.as_deref()
             .and_then(|cid| connections.iter().find(|c| c.id == cid).map(|c| c.kind));
         let has_result = (tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
-            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan))
+            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan | QueryBottomTab::AiChat))
             && !tab.bottom_panel_collapsed;
         let has_result_data = tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
-            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan);
+            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan | QueryBottomTab::AiChat);
         // 首次打开编辑器高度取默认值
         let editor_height = tab.editor_height.unwrap_or(200.0);
         let mut query_batch_dialog_open = pending_query_batch_save;
@@ -9830,6 +9881,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 for pane in [
                                     QueryBottomTab::Messages,
                                     QueryBottomTab::History,
+                                    QueryBottomTab::AiChat,
                                 ] {
                                     let label = pane.label();
                                     if segment_button(ui, label, tab.active_bottom_tab == pane).clicked() {
@@ -9944,6 +9996,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         QueryBottomTab::Messages => tr!("{} 条消息", tab.messages.len() + usize::from(tab.error.is_some())),
                                         QueryBottomTab::History => tr!("{} 条历史", tab.history.len()),
                                         QueryBottomTab::ExplainPlan => tr!("执行计划").into(),
+                                        QueryBottomTab::AiChat => {
+                                            if tab.ai_is_streaming {
+                                                tr!("AI 正在回复...").into()
+                                            } else {
+                                                tr!("{} 条对话", tab.ai_conversation.len()).into()
+                                            }
+                                        }
                                     };
                                     ui.label(RichText::new(summary).size(chrome.fonts.sm).color(chrome.weak_text));
                                 });
@@ -10165,6 +10224,189 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     });
                                             });
                                     }
+                                }
+                                QueryBottomTab::AiChat => {
+                                    // 预提取 db_type
+                                    let db_type = tab.connection_id.as_ref()
+                                        .and_then(|cid| connections.iter().find(|c| &c.id == cid))
+                                        .map(|c| match c.kind {
+                                            DatabaseKind::MySql => "MySQL",
+                                            DatabaseKind::Postgres => "PostgreSQL",
+                                            DatabaseKind::MongoDb => "MongoDB",
+                                        })
+                                        .unwrap_or("SQL")
+                                        .to_string();
+
+                                    let config = ai_config.clone();
+
+                                    ui.vertical(|ui| {
+                                        // 消息列表（滚动区域）
+                                        egui::ScrollArea::vertical()
+                                            .id_salt(format!("query-ai-chat-{}", tab.id))
+                                            .auto_shrink([false, false])
+                                            .stick_to_bottom(true)
+                                            .max_height(ui.available_height() - 40.0)
+                                            .show(ui, |ui| {
+                                                if tab.ai_conversation.is_empty() {
+                                                    ui.centered_and_justified(|ui| {
+                                                        ui.label(
+                                                            RichText::new(tr!("输入问题开始对话..."))
+                                                                .size(chrome.fonts.sm)
+                                                                .color(chrome.weak_text),
+                                                        );
+                                                    });
+                                                }
+                                                for msg in &tab.ai_conversation {
+                                                    let (prefix, bg_color) = match msg.role {
+                                                        AiRole::User => ("U:", chrome.selection_bg),
+                                                        AiRole::Assistant => ("AI:", chrome.search_bg),
+                                                    };
+                                                    egui::Frame::new()
+                                                        .fill(bg_color)
+                                                        .stroke(Stroke::NONE)
+                                                        .corner_radius(chrome.radius_sm)
+                                                        .inner_margin(egui::Margin::symmetric(8, 6))
+                                                        .show(ui, |ui| {
+                                                            ui.horizontal_top(|ui| {
+                                                                ui.label(
+                                                                    RichText::new(prefix)
+                                                                        .size(chrome.fonts.sm)
+                                                                        .color(chrome.weak_text),
+                                                                );
+                                                                ui.add_space(4.0);
+                                                                let content = &msg.content;
+                                                                let mono_font = FontId::new(chrome.fonts.mono, FontFamily::Monospace);
+                                                                let parts: Vec<&str> = content.split("```").collect();
+                                                                if parts.len() > 1 {
+                                                                    for (i, part) in parts.iter().enumerate() {
+                                                                        if i % 2 == 0 {
+                                                                            if !part.trim().is_empty() {
+                                                                                ui.label(RichText::new(*part).size(chrome.fonts.base).color(chrome.text));
+                                                                            }
+                                                                        } else {
+                                                                            ui.add_space(4.0);
+                                                                            egui::Frame::new()
+                                                                                .fill(chrome.search_bg)
+                                                                                .stroke(Stroke::NONE)
+                                                                                .corner_radius(chrome.radius_sm)
+                                                                                .inner_margin(egui::Margin::symmetric(8, 6))
+                                                                                .show(ui, |ui| {
+                                                                                    ui.horizontal_top(|ui| {
+                                                                                        ui.label(
+                                                                                            RichText::new(*part)
+                                                                                                .font(mono_font.clone())
+                                                                                                .size(chrome.fonts.sm)
+                                                                                                .color(chrome.text),
+                                                                                        );
+                                                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                                                                            if mini_button(ui, tr!("复制"), subtle_button_style(colors, chrome.fonts.sm)).clicked() {
+                                                                                                ui.ctx().copy_text(part.to_string());
+                                                                                            }
+                                                                                        });
+                                                                                    });
+                                                                                });
+                                                                            ui.add_space(4.0);
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    ui.label(RichText::new(content.as_str()).size(chrome.fonts.base).color(chrome.text));
+                                                                }
+                                                            });
+                                                        });
+                                                    ui.add_space(2.0);
+                                                }
+                                                if tab.ai_is_streaming {
+                                                    ui.label(
+                                                        RichText::new("▌")
+                                                            .size(chrome.fonts.base)
+                                                            .color(chrome.accent_button_text),
+                                                    );
+                                                }
+                                            });
+
+                                        ui.add_space(4.0);
+
+                                        // 输入框 + 发送按钮
+                                        ui.horizontal(|ui| {
+                                            let response = ui.add(
+                                                egui::TextEdit::singleline(&mut tab.ai_input)
+                                                    .desired_width(ui.available_width() - 60.0)
+                                                    .hint_text(tr!("继续提问...")),
+                                            );
+                                            let send_clicked = toolbar_button(
+                                                ui,
+                                                tr!("发送"),
+                                                accent_button_style(colors, fonts.md),
+                                            )
+                                            .clicked();
+                                            if (response.lost_focus()
+                                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                                || send_clicked
+                                            {
+                                                if !tab.ai_input.is_empty() && !tab.ai_is_streaming {
+                                                    let user_input = tab.ai_input.clone();
+                                                    tab.ai_input.clear();
+
+                                                    tab.ai_conversation.push(AiMessage {
+                                                        role: AiRole::User,
+                                                        content: user_input.clone(),
+                                                    });
+                                                    tab.ai_conversation.push(AiMessage {
+                                                        role: AiRole::Assistant,
+                                                        content: String::new(),
+                                                    });
+                                                    tab.ai_streaming_text.clear();
+
+                                                    if let Some(ref config) = config {
+                                                        let system =
+                                                            ai_service::prompt::system_prompt(&db_type, "");
+                                                        let mut messages: Vec<ai_service::ChatMessage> =
+                                                            vec![ai_service::ChatMessage {
+                                                                role: ai_service::Role::System,
+                                                                content: system,
+                                                            }];
+                                                        let conversation: Vec<_> =
+                                                            tab.ai_conversation.iter().collect();
+                                                        let start = if conversation.len() > 20 {
+                                                            conversation.len() - 20
+                                                        } else {
+                                                            0
+                                                        };
+                                                        for msg in &conversation[start..] {
+                                                            let role = match msg.role {
+                                                                AiRole::User => ai_service::Role::User,
+                                                                AiRole::Assistant => {
+                                                                    ai_service::Role::Assistant
+                                                                }
+                                                            };
+                                                            messages.push(ai_service::ChatMessage {
+                                                                role,
+                                                                content: msg.content.clone(),
+                                                            });
+                                                        }
+
+                                                        let provider =
+                                                            ai_service::create_provider(&config.provider);
+                                                        let (tx, rx) =
+                                                            tokio::sync::mpsc::unbounded_channel();
+                                                        tab.ai_stream_rx = Some(rx);
+                                                        tab.ai_is_streaming = true;
+
+                                                        let (done_tx, done_rx) =
+                                                            tokio::sync::oneshot::channel();
+                                                        tab.ai_done_rx = Some(done_rx);
+
+                                                        let handle = runtime.handle().clone();
+                                                        handle.spawn(async move {
+                                                            let result =
+                                                                provider.chat_stream(messages, tx).await;
+                                                            let _ = done_tx.send(result);
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    });
                                 }
                             }
                         });
@@ -15534,6 +15776,69 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
+    /// 每帧轮询 AI 流式响应和完成状态
+    fn poll_ai_streaming(&mut self) {
+        let tab = match self.tabs.get_mut(self.active_tab) {
+            Some(WorkspaceTab::Query(t)) => t,
+            _ => return,
+        };
+
+        // 1. 接收流式片段
+        if let Some(rx) = tab.ai_stream_rx.as_mut() {
+            let mut received = false;
+            while let Ok(chunk) = rx.try_recv() {
+                tab.ai_streaming_text.push_str(&chunk);
+                received = true;
+            }
+            if received {
+                if let Some(last) = tab.ai_conversation.last_mut() {
+                    if matches!(last.role, AiRole::Assistant) {
+                        last.content = tab.ai_streaming_text.clone();
+                    }
+                }
+            }
+        }
+
+        // 2. 检测流式完成（oneshot channel）
+        if tab.ai_is_streaming {
+            if let Some(done_rx) = tab.ai_done_rx.as_mut() {
+                if let Ok(result) = done_rx.try_recv() {
+                    tab.ai_is_streaming = false;
+                    tab.ai_stream_rx = None;
+                    tab.ai_done_rx = None;
+                    if let Err(e) = result {
+                        if let Some(last) = tab.ai_conversation.last_mut() {
+                            if matches!(last.role, AiRole::Assistant) {
+                                last.content = format!("错误: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. 处理 AI Generate 非流式结果
+        if let Some(rx) = tab.pending_ai_generate_rx.take() {
+            match rx.try_recv() {
+                Ok(result) => match result {
+                    Ok(text) => {
+                        tab.sql = text;
+                    }
+                    Err(e) => {
+                        tab.messages.push(tr!("AI 错误: {}", e).to_string());
+                        tab.active_bottom_tab = QueryBottomTab::Messages;
+                    }
+                },
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tab.pending_ai_generate_rx = Some(rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    tab.pending_ai_generate = false;
+                }
+            }
+        }
+    }
+
     fn poll_ddl_pending_action(&mut self) {
         let Some(ref rx) = self.ddl_pending_action else { return };
         match rx.2.try_recv() {
@@ -16819,6 +17124,7 @@ impl eframe::App for DesktopApp {
         self.poll_tree_rename();
         self.poll_create_table();
         self.poll_generate_data();
+        self.poll_ai_streaming();
         self.maybe_request_autocomplete_columns_for_active_query();
 
         // Two-phase refresh: first frame shows "正在刷新", next frame does the work
@@ -16838,6 +17144,7 @@ impl eframe::App for DesktopApp {
             || !self.pending_autocomplete_columns.is_empty()
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Table(t) if t.generate_data_running))
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::TableSummary(ts) if ts.stats_loading))
+            || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Query(t) if t.ai_is_streaming || t.pending_ai_generate))
         {
             // 后台任务进行中时主动请求后续帧，避免必须等鼠标再次移动才显示结果。
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -17771,6 +18078,13 @@ impl QueryTabState {
             pending_ai_generate_rx: None,
             ai_stream_rx: None,
             ai_pending_prompt: None,
+            ai_conversation: Vec::new(),
+            ai_streaming_text: String::new(),
+            ai_is_streaming: false,
+            ai_done_rx: None,
+            ai_input: String::new(),
+            ai_panel_height: 200.0,
+            ai_panel_expanded: false,
         }
     }
 
@@ -17996,6 +18310,7 @@ enum QueryBottomTab {
     Messages,
     History,
     ExplainPlan,
+    AiChat,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -18315,6 +18630,7 @@ impl QueryBottomTab {
             Self::Messages => tr!("消息"),
             Self::History => tr!("历史"),
             Self::ExplainPlan => tr!("执行计划"),
+            Self::AiChat => tr!("AI 助手"),
         }
     }
 }

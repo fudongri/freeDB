@@ -876,6 +876,9 @@ fn en(key: &'static str) -> &'static str {
         "继续提问..." => "Ask a follow-up...",
         "正在生成..." => "Generating...",
         "AI 错误: {}" => "AI Error: {}",
+        "AI 正在回复..." => "AI is responding...",
+        "{} 条对话" => "{} messages",
+        "输入问题开始对话..." => "Type a question to start chatting...",
         "请选择一个连接后再使用 AI 功能" => "Please select a connection before using AI",
         "请先执行查询后再使用数据检查/分析功能" => "Please execute a query before using data check/analysis",
 
