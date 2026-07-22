@@ -13,13 +13,14 @@ name = "export-icon"
 path = "src/bin/export_icon.rs"
 
 [dependencies]
+ai-service = { path = "../../crates/ai-service" }
 app-services = { path = "../../crates/app-services" }
 arboard = "3"
 chrono.workspace = true
 core-domain = { path = "../../crates/core-domain" }
 driver-api = { path = "../../crates/driver-api" }
 eframe.workspace = true
-futures-util = "0.3"
+futures-util.workspace = true
 egui.workspace = true
 egui_dock.workspace = true
 egui_extras.workspace = true
@@ -31,7 +32,7 @@ open = "5"
 raw-window-handle.workspace = true
 regex.workspace = true
 regex-syntax.workspace = true
-reqwest = { version = "0.12", features = ["json", "native-tls", "stream"], default-features = false }
+reqwest = { workspace = true, features = ["native-tls"] }
 rfd.workspace = true
 semver = "1"
 serde.workspace = true

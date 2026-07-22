@@ -17,6 +17,7 @@ members = [
     "crates/session-manager",
     "crates/slowlog-parser",
     "crates/ui-theme",
+    "crates/ai-service",
 ]
 resolver = "2"
 
@@ -34,6 +35,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1.4"
 dirs = "6.0"
+futures-util = "0.3"
 eframe = "0.33"
 getrandom = "0.3"
 hex = "0.4"
@@ -50,6 +52,7 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 native-tls = "0.2"
 regex = "1"
 regex-syntax = "0.8"
+reqwest = { version = "0.12", features = ["json", "stream"], default-features = false }
 rfd = "0.15"
 rust_xlsxwriter = "0.84"
 rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
