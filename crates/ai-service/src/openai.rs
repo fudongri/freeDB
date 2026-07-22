@@ -4,7 +4,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::{AiError, AiProvider, ChatMessage, Role};
+use crate::{AiError, AiProvider, ChatMessage, Role, map_status_error};
 
 pub struct OpenAiProvider {
     client: Client,
@@ -57,17 +57,6 @@ fn build_request(
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(body)
-}
-
-/// 通用的 HTTP 状态码错误处理
-fn map_status_error(status: StatusCode, body: String) -> AiError {
-    if status == StatusCode::UNAUTHORIZED {
-        AiError::AuthError
-    } else if status == StatusCode::TOO_MANY_REQUESTS {
-        AiError::RateLimitExceeded
-    } else {
-        AiError::ProviderError(format!("HTTP {}: {}", status, body))
-    }
 }
 
 #[async_trait]

@@ -5,6 +5,17 @@ pub mod prompt;
 
 use tokio::sync::mpsc;
 
+/// 将 HTTP 状态码映射为 AiError
+pub fn map_status_error(status: reqwest::StatusCode, body: String) -> AiError {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        AiError::AuthError
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        AiError::RateLimitExceeded
+    } else {
+        AiError::ProviderError(format!("HTTP {}: {}", status, body))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
     System,
