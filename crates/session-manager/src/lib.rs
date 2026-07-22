@@ -23,7 +23,7 @@ macro_rules! with_pool {
     ($self:expr, $profile:expr, $password:expr, $db:expr, $h:ident, $d:ident => $call:expr) => {{
         let mut last_err: Option<AppError> = None;
         #[allow(unused_assignments)]
-        let mut result = Err(AppError::Connection("retry exhausted".into()));
+        let mut result = Err(AppError::connection("retry exhausted"));
         for attempt in 0..=$self.retry.max_retries {
             if attempt > 0 {
                 let backoff = $self.backoff_ms(attempt);
@@ -68,7 +68,7 @@ macro_rules! with_pool {
             }
         }
         if result.is_err() {
-            let err = last_err.unwrap_or_else(|| AppError::Connection("retry exhausted".into()));
+            let err = last_err.unwrap_or_else(|| AppError::connection("retry exhausted"));
             tracing::error!(connection_id = %$profile.id, error = %err, "重试耗尽，操作最终失败");
             $self.set_failed(&$profile.id, &err);
         }
@@ -236,7 +236,7 @@ impl SessionManager {
             Ok(h) => h,
             Err(e) => {
                 // 所有语句都返回同一个错误
-                return statements.into_iter().map(|_| Err(AppError::Connection(e.to_string()))).collect();
+                return statements.into_iter().map(|_| Err(e.clone_error())).collect();
             }
         };
         let mut guard = handle.lock().await;
@@ -282,7 +282,7 @@ impl SessionManager {
             Ok(h) => h,
             Err(e) => {
                 for stmt in statements {
-                    if !on_result(stmt, Err(AppError::Connection(e.to_string()))) { break; }
+                    if !on_result(stmt, Err(e.clone_error())) { break; }
                 }
                 return;
             }

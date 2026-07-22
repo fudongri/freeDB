@@ -447,8 +447,8 @@ pub struct UiStateValue {
 pub enum AppError {
     #[error("validation error: {0}")]
     Validation(String),
-    #[error("connection error: {0}")]
-    Connection(String),
+    #[error("connection error: {message}")]
+    Connection { message: String, transient: bool },
     #[error("query error: {0}")]
     Query(String),
     #[error("storage error: {0}")]
@@ -463,27 +463,25 @@ impl AppError {
     /// 判断错误是否为临时性错误（适合重试，如连接断开、超时）
     pub fn is_transient(&self) -> bool {
         match self {
-            AppError::Connection(msg) => {
-                let lower = msg.to_ascii_lowercase();
-                lower.contains("timeout")
-                    || lower.contains("connection closed")
-                    || lower.contains("connection refused")
-                    || lower.contains("broken pipe")
-                    || lower.contains("connection reset")
-                    || lower.contains("tls")
-                    || lower.contains("dns")
-                    || lower.contains("server terminated")
-                    || lower.contains("unexpectedly")
-                    || lower.contains("lost connection")
-            }
+            AppError::Connection { transient, .. } => *transient,
             _ => false,
         }
+    }
+
+    /// 不可重试的连接错误（配置错误、TLS 初始化等）
+    pub fn connection(message: impl Into<String>) -> Self {
+        Self::Connection { message: message.into(), transient: false }
+    }
+
+    /// 可重试的临时连接错误（连接断开、超时、IO 错误等）
+    pub fn transient_connection(message: impl Into<String>) -> Self {
+        Self::Connection { message: message.into(), transient: true }
     }
 
     pub fn clone_error(&self) -> Self {
         match self {
             Self::Validation(s) => Self::Validation(s.clone()),
-            Self::Connection(s) => Self::Connection(s.clone()),
+            Self::Connection { message, transient } => Self::Connection { message: message.clone(), transient: *transient },
             Self::Query(s) => Self::Query(s.clone()),
             Self::Storage(s) => Self::Storage(s.clone()),
             Self::Unsupported(s) => Self::Unsupported(s.clone()),

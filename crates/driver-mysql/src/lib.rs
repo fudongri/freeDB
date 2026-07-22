@@ -763,7 +763,8 @@ fn escape_mysql_literal(s: &str) -> String {
 fn map_mysql_error(e: mysql_async::Error) -> AppError {
     match &e {
         mysql_async::Error::Server(_) => AppError::Query(e.to_string()),
-        _ => AppError::Connection(e.to_string()),
+        mysql_async::Error::Url(_) => AppError::connection(e.to_string()),
+        _ => AppError::transient_connection(e.to_string()),
     }
 }
 

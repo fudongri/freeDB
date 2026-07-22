@@ -1646,13 +1646,14 @@ fn bson_type_name(b: &Bson) -> String {
 }
 
 fn map_mongo_error(e: mongodb::error::Error) -> AppError {
+    use mongodb::error::ErrorKind;
     let err_str = e.to_string();
-    if err_str.contains("not connected") || err_str.contains("connection pool")
-        || err_str.contains("Server selection") || err_str.contains("network")
-    {
-        AppError::Connection(err_str)
-    } else {
-        AppError::Query(err_str)
+    match e.kind.as_ref() {
+        ErrorKind::Io(_)
+        | ErrorKind::ConnectionPoolCleared { .. }
+        | ErrorKind::ServerSelection { .. }
+        | ErrorKind::DnsResolve { .. } => AppError::transient_connection(err_str),
+        _ => AppError::Query(err_str),
     }
 }
 

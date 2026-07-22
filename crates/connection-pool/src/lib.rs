@@ -1,4 +1,4 @@
-use core_domain::{AppError, AppResult, ConnectionProfile, DatabaseKind};
+use core_domain::{AppResult, ConnectionProfile, DatabaseKind};
 use driver_api::{ConnectionHandle, ConnectionProvider};
 use driver_mongodb::MongoDbDriver;
 use driver_mysql::MySqlDriver;
