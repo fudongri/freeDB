@@ -1,5 +1,6 @@
 use app_services::AppServices;
-use ai_service::config::AiConfig;
+use ai_service::config::{AiConfig, OPENAI_PRESETS};
+use ai_service::AiProviderKind;
 use i18n::{self, tr, Locale, get_locale, set_locale};
 use metadata_cache::CachedEntry;
 use core_domain::{
@@ -27,6 +28,34 @@ use crate::autocomplete::{
     AutocompleteState, AutocompleteSuggestion, AutocompleteUsageMemory, SchemaCache, SqlContext, SqlContextParser,
     SuggestionKind,
 };
+
+struct AiSettingsForm {
+    provider_type: AiSettingsProviderType,
+    api_key: String,
+    base_url: String,
+    model: String,
+    show_api_key: bool,
+    test_status: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum AiSettingsProviderType {
+    OpenAI,
+    Claude,
+}
+
+impl Default for AiSettingsForm {
+    fn default() -> Self {
+        Self {
+            provider_type: AiSettingsProviderType::OpenAI,
+            api_key: String::new(),
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-4o".into(),
+            show_api_key: false,
+            test_status: None,
+        }
+    }
+}
 
 struct ReleaseAsset {
     name: String,
@@ -176,6 +205,8 @@ pub struct DesktopApp {
     menu_ai_settings: Option<muda::MenuItem>,
     is_ai_settings_open: bool,
     ai_config: Option<AiConfig>,
+    ai_settings_form: AiSettingsForm,
+    pending_ai_test: Option<Receiver<Result<String, ai_service::AiError>>>,
     locale: Locale,
     /// 帧计数器：延迟最大化到窗口完全显示后执行
     frame_count: usize,
@@ -1455,6 +1486,26 @@ impl DesktopApp {
         let ai_config = AiConfig::from_json(
             &services.load_ui_state("ai_config").ok().flatten().unwrap_or_default(),
         );
+        let ai_settings_form = {
+            let mut form = AiSettingsForm::default();
+            if let Some(ref config) = ai_config {
+                match &config.provider {
+                    AiProviderKind::OpenAI { api_key, base_url, model } => {
+                        form.provider_type = AiSettingsProviderType::OpenAI;
+                        form.api_key = api_key.clone();
+                        form.base_url = base_url.clone();
+                        form.model = model.clone();
+                    }
+                    AiProviderKind::Claude { api_key, base_url, model } => {
+                        form.provider_type = AiSettingsProviderType::Claude;
+                        form.api_key = api_key.clone();
+                        form.base_url = base_url.clone();
+                        form.model = model.clone();
+                    }
+                }
+            }
+            form
+        };
         let mut app = Self {
             runtime,
             services,
@@ -1570,7 +1621,9 @@ impl DesktopApp {
             menu_ai,
             menu_ai_settings,
             is_ai_settings_open: false,
+            ai_settings_form,
             ai_config,
+            pending_ai_test: None,
             locale,
             frame_count: 0,
         };
@@ -15627,6 +15680,135 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
+    fn render_ai_settings_dialog(&mut self, ctx: &egui::Context) {
+        if !self.is_ai_settings_open {
+            return;
+        }
+        let mut open = self.is_ai_settings_open;
+        egui::Window::new(tr!("AI 设置"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .fixed_size([380.0, 320.0])
+            .show(ctx, |ui| {
+                let form = &mut self.ai_settings_form;
+                let colors = &self.theme.colors;
+                let fonts = &self.theme.fonts;
+
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
+
+                // 提供商选择
+                ui.horizontal(|ui| {
+                    ui.label(tr!("提供商"));
+                    egui::ComboBox::from_id_salt("ai_provider_type")
+                        .selected_text(match form.provider_type {
+                            AiSettingsProviderType::OpenAI => tr!("OpenAI 兼容"),
+                            AiSettingsProviderType::Claude => tr!("Claude"),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut form.provider_type, AiSettingsProviderType::OpenAI, tr!("OpenAI 兼容"));
+                            ui.selectable_value(&mut form.provider_type, AiSettingsProviderType::Claude, tr!("Claude"));
+                        });
+                });
+
+                // API Key
+                ui.horizontal(|ui| {
+                    ui.label(tr!("API Key"));
+                    let api_key_field = if form.show_api_key {
+                        egui::TextEdit::singleline(&mut form.api_key)
+                    } else {
+                        egui::TextEdit::singleline(&mut form.api_key).password(true)
+                    };
+                    ui.add(api_key_field.desired_width(200.0));
+                    if mini_button(ui, if form.show_api_key { "\u{1f648}" } else { "\u{1f441}" }, mini_subtle_style(colors, fonts.md)).clicked() {
+                        form.show_api_key = !form.show_api_key;
+                    }
+                });
+
+                // Base URL（仅 OpenAI 模式）
+                if form.provider_type == AiSettingsProviderType::OpenAI {
+                    ui.horizontal(|ui| {
+                        ui.label(tr!("Base URL"));
+                        egui::ComboBox::from_id_salt("ai_base_url_preset")
+                            .selected_text(if OPENAI_PRESETS.iter().any(|(_, url)| *url == form.base_url) {
+                                OPENAI_PRESETS.iter().find(|(_, url)| *url == form.base_url).unwrap().0
+                            } else {
+                                &form.base_url
+                            })
+                            .show_ui(ui, |ui| {
+                                for (name, url) in OPENAI_PRESETS {
+                                    ui.selectable_value(&mut form.base_url, url.to_string(), *name);
+                                }
+                            });
+                        ui.add(egui::TextEdit::singleline(&mut form.base_url).desired_width(200.0));
+                    });
+                }
+
+                // 模型
+                ui.horizontal(|ui| {
+                    ui.label(tr!("模型"));
+                    ui.add(egui::TextEdit::singleline(&mut form.model).desired_width(200.0));
+                });
+
+                // 测试连接
+                if toolbar_button(ui, tr!("测试连接"), accent_button_style(colors, fonts.md)).clicked() {
+                    let kind = match form.provider_type {
+                        AiSettingsProviderType::OpenAI => AiProviderKind::OpenAI {
+                            api_key: form.api_key.clone(),
+                            base_url: form.base_url.clone(),
+                            model: form.model.clone(),
+                        },
+                        AiSettingsProviderType::Claude => AiProviderKind::Claude {
+                            api_key: form.api_key.clone(),
+                            base_url: form.base_url.clone(),
+                            model: form.model.clone(),
+                        },
+                    };
+                    form.test_status = Some(tr!("正在测试连接...").to_string());
+                    let provider = ai_service::create_provider(&kind);
+                    let messages = ai_service::prompt::test_connection_prompt();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.runtime.spawn(async move {
+                        let result = provider.chat(messages).await;
+                        let _ = tx.send(result);
+                    });
+                    // 结果在下一帧通过 self.pending_ai_test 处理
+                    self.pending_ai_test = Some(rx);
+                }
+
+                if let Some(ref status) = form.test_status {
+                    ui.label(status.as_str());
+                }
+
+                // 按钮行
+                ui.horizontal(|ui| {
+                    if toolbar_button(ui, tr!("取消"), subtle_button_style(colors, fonts.md)).clicked() {
+                        self.is_ai_settings_open = false;
+                    }
+                    if toolbar_button(ui, tr!("保存"), primary_button_style(colors, fonts.md)).clicked() {
+                        let kind = match form.provider_type {
+                            AiSettingsProviderType::OpenAI => AiProviderKind::OpenAI {
+                                api_key: form.api_key.clone(),
+                                base_url: form.base_url.clone(),
+                                model: form.model.clone(),
+                            },
+                            AiSettingsProviderType::Claude => AiProviderKind::Claude {
+                                api_key: form.api_key.clone(),
+                                base_url: form.base_url.clone(),
+                                model: form.model.clone(),
+                            },
+                        };
+                        let config = AiConfig { provider: kind };
+                        let _ = self.services.save_ui_state("ai_config", &config.to_json());
+                        self.ai_config = Some(config);
+                        self.is_ai_settings_open = false;
+                        self.status_message = tr!("AI 配置已保存").to_string();
+                    }
+                });
+            });
+        self.is_ai_settings_open = open;
+    }
+
     fn start_update_download(&mut self, info: &UpdateInfo) {
         let Some(asset) = select_update_asset(info) else {
             tracing::warn!("未找到适合当前平台的更新资源，回退到浏览器下载");
@@ -17153,6 +17335,17 @@ impl eframe::App for DesktopApp {
             }
             ctx.request_repaint();
         }
+        // 处理 AI 连接测试结果
+        if let Some(rx) = self.pending_ai_test.take() {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(_) => self.ai_settings_form.test_status = Some(tr!("连接成功").to_string()),
+                    Err(e) => self.ai_settings_form.test_status = Some(tr!("连接失败: {}", e).to_string()),
+                }
+            } else {
+                self.pending_ai_test = Some(rx);
+            }
+        }
         self.render_connection_dialog(ctx);
         self.render_delete_confirm_dialog(ctx);
         self.render_saved_query_dialog(ctx);
@@ -17165,6 +17358,7 @@ impl eframe::App for DesktopApp {
         self.render_log_window(ctx);
         self.render_scroll_speed_dialog(ctx);
         self.render_recent_tabs_dialog(ctx);
+        self.render_ai_settings_dialog(ctx);
 
         // Cmd+D: new query tab (优先使用侧栏选中节点的上下文)
         let new_query = ctx.input_mut(|input| {
