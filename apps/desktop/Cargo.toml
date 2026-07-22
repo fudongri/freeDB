@@ -44,6 +44,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 unicode-width = "0.2"
 ui-theme = { path = "../../crates/ui-theme" }
+egui_commonmark = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"

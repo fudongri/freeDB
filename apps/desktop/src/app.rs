@@ -1,6 +1,7 @@
 use app_services::AppServices;
 use ai_service::config::{AiConfig, AiModelStore, CLAUDE_BASE_URL, OPENAI_PRESETS, PROVIDER_MODELS};
 use ai_service::AiProviderKind;
+use egui_commonmark::{CommonMarkViewer, CommonMarkCache};
 use i18n::{self, tr, Locale, get_locale, set_locale};
 use metadata_cache::CachedEntry;
 use core_domain::{
@@ -723,6 +724,8 @@ struct QueryTabState {
     ai_done_rx: Option<tokio::sync::oneshot::Receiver<Result<(), ai_service::AiError>>>,
     /// AI 对话输入框内容
     ai_input: String,
+    /// Markdown 渲染缓存
+    md_cache: CommonMarkCache,
 }
 
 impl Clone for QueryTabState {
@@ -789,6 +792,7 @@ impl Clone for QueryTabState {
             ai_is_streaming: self.ai_is_streaming,
             ai_done_rx: None,
             ai_input: self.ai_input.clone(),
+            md_cache: CommonMarkCache::default(),
         }
     }
 }
@@ -10353,71 +10357,27 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         );
                                                     });
                                                 }
-                                                for msg in &tab.ai_conversation {
+                                                for (row_idx, msg) in tab.ai_conversation.iter().enumerate() {
                                                     let is_user = matches!(msg.role, AiRole::User);
                                                     let (prefix, prefix_color) = match msg.role {
                                                         AiRole::User => ("You", chrome.accent_button_text),
                                                         AiRole::Assistant => ("AI", chrome.weak_text),
                                                     };
-                                                    let (bg_color, stroke) = if is_user {
-                                                        (Color32::TRANSPARENT, Stroke::new(1.0, chrome.border))
-                                                    } else {
-                                                        (chrome.search_bg, Stroke::NONE)
-                                                    };
+                                                    let bg_color = if row_idx % 2 == 1 { chrome.table_alt_bg } else { Color32::TRANSPARENT };
                                                     egui::Frame::new()
                                                         .fill(bg_color)
-                                                        .stroke(stroke)
-                                                        .corner_radius(chrome.radius_sm)
+                                                        .stroke(Stroke::NONE)
                                                         .inner_margin(egui::Margin::symmetric(10, 6))
                                                         .show(ui, |ui| {
-                                                            ui.horizontal_top(|ui| {
-                                                                ui.label(
-                                                                    RichText::new(prefix)
-                                                                        .size(chrome.fonts.sm)
-                                                                        .strong()
-                                                                        .color(prefix_color),
-                                                                );
-                                                                ui.add_space(6.0);
-                                                                    let content = &msg.content;
-                                                                    let mono_font = FontId::new(chrome.fonts.mono, FontFamily::Monospace);
-                                                                    let parts: Vec<&str> = content.split("```").collect();
-                                                                    if parts.len() > 1 {
-                                                                        for (i, part) in parts.iter().enumerate() {
-                                                                            if i % 2 == 0 {
-                                                                                if !part.trim().is_empty() {
-                                                                                    ui.label(RichText::new(*part).size(chrome.fonts.base).color(chrome.text));
-                                                                                }
-                                                                            } else {
-                                                                                ui.add_space(4.0);
-                                                                                egui::Frame::new()
-                                                                                    .fill(chrome.search_bg)
-                                                                                    .stroke(Stroke::NONE)
-                                                                                    .corner_radius(chrome.radius_sm)
-                                                                                    .inner_margin(egui::Margin::symmetric(8, 6))
-                                                                                    .show(ui, |ui| {
-                                                                                        ui.horizontal_top(|ui| {
-                                                                                            ui.label(
-                                                                                                RichText::new(*part)
-                                                                                                    .font(mono_font.clone())
-                                                                                                    .size(chrome.fonts.sm)
-                                                                                                    .color(chrome.text),
-                                                                                            );
-                                                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                                                                                                if mini_button(ui, tr!("复制"), subtle_button_style(colors, chrome.fonts.sm)).clicked() {
-                                                                                                    ui.ctx().copy_text(part.to_string());
-                                                                                                }
-                                                                                            });
-                                                                                        });
-                                                                                    });
-                                                                                ui.add_space(4.0);
-                                                                            }
-                                                                        }
-                                                                    } else {
-                                                                        ui.label(RichText::new(content.as_str()).size(chrome.fonts.base).color(chrome.text));
-                                                                    }
-                                                                });
-                                                            });
-                                                    ui.add_space(4.0);
+                                                            ui.label(
+                                                                RichText::new(prefix)
+                                                                    .size(chrome.fonts.sm)
+                                                                    .strong()
+                                                                    .color(prefix_color),
+                                                            );
+                                                            ui.add_space(2.0);
+                                                            CommonMarkViewer::new().show(ui, &mut tab.md_cache, &msg.content);
+                                                        });
                                                 }
                                                 if tab.ai_is_streaming {
                                                     ui.label(
@@ -18389,6 +18349,7 @@ impl QueryTabState {
             ai_is_streaming: false,
             ai_done_rx: None,
             ai_input: String::new(),
+            md_cache: CommonMarkCache::default(),
         }
     }
 
