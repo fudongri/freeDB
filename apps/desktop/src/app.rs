@@ -9576,39 +9576,73 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }
                                 }
                                 // AI 助手下拉按钮
-                                let ai_label = ai_model_store.active()
-                                    .and_then(|_| ai_model_store.models.get(ai_model_store.active_index))
-                                    .map(|e| e.name.clone())
-                                    .unwrap_or_else(|| tr!("AI").to_string());
-                                let mut ai_items: Vec<String> = Vec::new();
-                                if ai_model_store.models.len() > 1 {
-                                    for (i, entry) in ai_model_store.models.iter().enumerate() {
-                                        let prefix = if i == ai_model_store.active_index { "\u{2713} " } else { "  " };
-                                        ai_items.push(format!("{}{}", prefix, entry.name));
+                                let ai_items: Vec<&str> = vec![
+                                    tr!("优化语句"),
+                                    tr!("根据注释生成语句"),
+                                    tr!("解释语句"),
+                                    tr!("数据质量检查"),
+                                    tr!("数据分析"),
+                                    tr!("AI 设置..."),
+                                ];
+                                let ai_item_refs: Vec<(&str, bool)> = ai_items.iter().map(|s| (*s, false)).collect();
+                                let btn_label = tr!("AI助手");
+                                let btn = ui.add(
+                                    egui::Button::new(RichText::new(format!("{btn_label} ▾")).size(chrome.fonts.md).color(chrome.text))
+                                        .fill(Color32::TRANSPARENT)
+                                        .stroke(Stroke::new(1.0, chrome.secondary_button_stroke))
+                                        .corner_radius(chrome.radius_lg)
+                                        .min_size(Vec2::new(120.0, 26.0)),
+                                );
+                                let ai_menu_id = egui::Id::new("ai_menu").with(&tab.id);
+                                let is_open = ui.data_mut(|d| d.get_temp::<bool>(ai_menu_id).unwrap_or(false));
+                                if btn.clicked() {
+                                    ui.data_mut(|d| d.insert_temp(ai_menu_id, !is_open));
+                                }
+                                if is_open && ui.input(|i| i.pointer.any_released()) && !btn.hovered() {
+                                    let popup_rect = ui.data_mut(|d| d.get_temp::<egui::Rect>(ai_menu_id.with("rect")));
+                                    if let Some(rect) = popup_rect {
+                                        if !rect.contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default())) {
+                                            ui.data_mut(|d| d.insert_temp(ai_menu_id, false));
+                                        }
                                     }
                                 }
-                                ai_items.push(tr!("优化语句").to_string());
-                                ai_items.push(tr!("根据注释生成语句").to_string());
-                                ai_items.push(tr!("解释语句").to_string());
-                                ai_items.push(tr!("数据质量检查").to_string());
-                                ai_items.push(tr!("数据分析").to_string());
-                                ai_items.push(tr!("AI 设置...").to_string());
-                                let ai_item_refs: Vec<(&str, bool)> = ai_items.iter().map(|s| (s.as_str(), false)).collect();
-                                let model_count = if ai_model_store.models.len() > 1 { ai_model_store.models.len() } else { 0 };
-                                if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("ai_menu").with(&tab.id), &ai_label, 120.0, &ai_item_refs) {
-                                    if sel < model_count {
-                                        action = TabUiAction::SwitchAiModel(sel);
-                                    } else {
-                                        let action_idx = sel - model_count;
-                                        action = match action_idx {
-                                            0 => TabUiAction::AiOptimize,
-                                            1 => TabUiAction::AiGenerate,
-                                            2 => TabUiAction::AiExplain,
-                                            3 => TabUiAction::AiDataQuality,
-                                            4 => TabUiAction::AiDataAnalysis,
-                                            _ => TabUiAction::OpenAiSettings,
-                                        };
-                                    }
+                                let open = ui.data_mut(|d| d.get_temp::<bool>(ai_menu_id).unwrap_or(false));
+                                if open {
+                                    let below = btn.rect.left_bottom() + egui::vec2(0.0, 4.0);
+                                    let area = egui::Area::new(ai_menu_id)
+                                        .order(egui::Order::Foreground)
+                                        .fixed_pos(below)
+                                        .interactable(true);
+                                    area.show(ui.ctx(), |ui| {
+                                        egui::Frame::new()
+                                            .fill(chrome.card_bg)
+                                            .stroke(Stroke::new(1.0, chrome.border))
+                                            .corner_radius(chrome.radius_lg)
+                                            .inner_margin(egui::Margin::symmetric(4, 4))
+                                            .show(ui, |ui| {
+                                                ui.set_width(112.0);
+                                                for (i, (item, _)) in ai_item_refs.iter().enumerate() {
+                                                    let r = ui.add(
+                                                        egui::Button::new(RichText::new(*item).size(chrome.fonts.sm).color(chrome.text))
+                                                            .fill(Color32::TRANSPARENT)
+                                                            .stroke(Stroke::NONE)
+                                                            .corner_radius(chrome.radius_sm)
+                                                            .min_size(Vec2::new(104.0, 26.0)),
+                                                    );
+                                                    if r.clicked() {
+                                                        action = match i {
+                                                            0 => TabUiAction::AiOptimize,
+                                                            1 => TabUiAction::AiGenerate,
+                                                            2 => TabUiAction::AiExplain,
+                                                            3 => TabUiAction::AiDataQuality,
+                                                            4 => TabUiAction::AiDataAnalysis,
+                                                            _ => TabUiAction::OpenAiSettings,
+                                                        };
+                                                        ui.data_mut(|d| d.insert_temp(ai_menu_id, false));
+                                                    }
+                                                }
+                                            });
+                                    });
                                 }
                             });
                             ui.add_space(10.0);
@@ -10051,6 +10085,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         }
                                     };
                                     ui.label(RichText::new(summary).size(chrome.fonts.sm).color(chrome.weak_text));
+                                    // 模型名（靠右，summary 左侧）
+                                    if let Some(entry) = ai_model_store.models.get(ai_model_store.active_index) {
+                                        ui.add_space(8.0);
+                                        ui.colored_label(chrome.success, RichText::new("●").size(chrome.fonts.sm));
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(&entry.name)
+                                                .size(chrome.fonts.sm)
+                                                .color(chrome.weak_text),
+                                        );
+                                    }
                                 });
                             });
                             ui.add_space(4.0);

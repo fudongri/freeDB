@@ -861,6 +861,7 @@ fn en(key: &'static str) -> &'static str {
         "OpenAI 兼容" => "OpenAI Compatible",
         "Claude" => "Claude",
         "AI 设置..." => "AI Settings...",
+        "AI助手" => "AI Assistant",
         "正在测试连接..." => "Testing connection...",
         "连接成功" => "Connection successful",
         "连接失败: {}" => "Connection failed: {}",
