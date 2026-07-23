@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::{AiError, AiProvider, ChatMessage, Role, map_status_error};
+use crate::{AiError, AiProvider, ChatMessage, Role, ToolCall, ToolDef, map_status_error};
 
 pub struct OpenAiProvider {
     client: Client,
@@ -31,8 +31,22 @@ impl OpenAiProvider {
                     Role::System => "system",
                     Role::User => "user",
                     Role::Assistant => "assistant",
+                    Role::Tool => "tool",
                 };
-                json!({ "role": role, "content": m.content })
+                let mut msg = json!({ "role": role, "content": m.content });
+                if let Some(ref tool_calls) = m.tool_calls {
+                    msg["tool_calls"] = serde_json::to_value(tool_calls.iter().map(|tc| {
+                        json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": { "name": tc.name, "arguments": tc.arguments }
+                        })
+                    }).collect::<Vec<_>>()).unwrap_or_default();
+                }
+                if let Some(ref call_id) = m.tool_call_id {
+                    msg["tool_call_id"] = json!(call_id);
+                }
+                msg
             })
             .collect()
     }
@@ -149,6 +163,127 @@ impl AiProvider for OpenAiProvider {
             .map(|s| s.to_string())
             .ok_or_else(|| AiError::InvalidResponse("missing content in response".into()))
     }
+
+    async fn chat_stream_with_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDef>,
+        tx: mpsc::UnboundedSender<String>,
+    ) -> Result<Vec<ToolCall>, AiError> {
+        let tools_json: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters
+                    }
+                })
+            })
+            .collect();
+
+        let body = json!({
+            "model": self.model,
+            "messages": Self::build_messages(&messages),
+            "tools": tools_json,
+            "stream": true,
+        });
+
+        let response = build_request(&self.client, &self.request_url(), &self.api_key, &body)
+            .send()
+            .await
+            .map_err(|e| AiError::NetworkError(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(map_status_error(status, text));
+        }
+
+        // tool_calls 累积器：按 index 分组
+        let mut tool_calls_map: std::collections::BTreeMap<usize, (String, String, String)> =
+            std::collections::BTreeMap::new();
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| AiError::NetworkError(e.to_string()))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(line_end) = buffer.find('\n') {
+                let line = buffer[..line_end].trim().to_string();
+                buffer = buffer[line_end + 1..].to_string();
+
+                if line.starts_with("data: ") {
+                    let data = &line[6..];
+                    if data == "[DONE]" {
+                        break;
+                    }
+                    if let Ok(parsed) = serde_json::from_str::<Value>(data) {
+                        // 处理文本内容
+                        if let Some(delta) = parsed
+                            .get("choices")
+                            .and_then(|c| c.get(0))
+                            .and_then(|c| c.get("delta"))
+                        {
+                            if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                let _ = tx.send(content.to_string());
+                            }
+                            // 处理 tool_calls 增量
+                            if let Some(tool_calls) =
+                                delta.get("tool_calls").and_then(|tc| tc.as_array())
+                            {
+                                for tc in tool_calls {
+                                    let index = tc
+                                        .get("index")
+                                        .and_then(|i| i.as_u64())
+                                        .unwrap_or(0) as usize;
+                                    let entry =
+                                        tool_calls_map.entry(index).or_default();
+                                    if let Some(id) =
+                                        tc.get("id").and_then(|i| i.as_str())
+                                    {
+                                        entry.0 = id.to_string();
+                                    }
+                                    if let Some(name) = tc
+                                        .get("function")
+                                        .and_then(|f| f.get("name"))
+                                        .and_then(|n| n.as_str())
+                                    {
+                                        entry.1 = name.to_string();
+                                    }
+                                    if let Some(args) = tc
+                                        .get("function")
+                                        .and_then(|f| f.get("arguments"))
+                                        .and_then(|a| a.as_str())
+                                    {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if tool_calls_map.is_empty() {
+            return Ok(vec![]);
+        }
+
+        Ok(tool_calls_map
+            .into_values()
+            .filter(|(id, name, _)| !id.is_empty() && !name.is_empty())
+            .map(|(id, name, arguments)| ToolCall {
+                id,
+                name,
+                arguments,
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -163,18 +298,9 @@ mod tests {
     #[test]
     fn build_messages_converts_roles() {
         let messages = vec![
-            ChatMessage {
-                role: Role::System,
-                content: "You are helpful.".into(),
-            },
-            ChatMessage {
-                role: Role::User,
-                content: "Hello".into(),
-            },
-            ChatMessage {
-                role: Role::Assistant,
-                content: "Hi!".into(),
-            },
+            ChatMessage::new(Role::System, "You are helpful.".into(),),
+            ChatMessage::new(Role::User, "Hello".into(),),
+            ChatMessage::new(Role::Assistant, "Hi!".into(),),
         ];
         let result = OpenAiProvider::build_messages(&messages);
         assert_eq!(result.len(), 3);
@@ -247,10 +373,7 @@ data: [DONE]\n\n";
 
         let result = provider
             .chat_stream(
-                vec![ChatMessage {
-                    role: Role::User,
-                    content: "Hi".into(),
-                }],
+                vec![ChatMessage::new(Role::User, "Hi".into(),)],
                 tx,
             )
             .await;
@@ -286,10 +409,7 @@ data: [DONE]\n\n";
 
         let provider = make_provider(&server.url());
         let result = provider
-            .chat(vec![ChatMessage {
-                role: Role::User,
-                content: "How are you?".into(),
-            }])
+            .chat(vec![ChatMessage::new(Role::User, "How are you?".into(),)])
             .await;
 
         assert_eq!(result.unwrap(), "I am fine, thanks!");
@@ -308,10 +428,7 @@ data: [DONE]\n\n";
 
         let provider = make_provider(&server.url());
         let result = provider
-            .chat(vec![ChatMessage {
-                role: Role::User,
-                content: "test".into(),
-            }])
+            .chat(vec![ChatMessage::new(Role::User, "test".into(),)])
             .await;
 
         assert!(matches!(result.unwrap_err(), AiError::AuthError));
@@ -330,10 +447,7 @@ data: [DONE]\n\n";
 
         let provider = make_provider(&server.url());
         let result = provider
-            .chat(vec![ChatMessage {
-                role: Role::User,
-                content: "test".into(),
-            }])
+            .chat(vec![ChatMessage::new(Role::User, "test".into(),)])
             .await;
 
         assert!(matches!(result.unwrap_err(), AiError::RateLimitExceeded));
@@ -355,10 +469,7 @@ data: [DONE]\n\n";
 
         let provider = make_provider(&server.url());
         let result = provider
-            .chat(vec![ChatMessage {
-                role: Role::User,
-                content: "test".into(),
-            }])
+            .chat(vec![ChatMessage::new(Role::User, "test".into(),)])
             .await;
 
         assert!(matches!(result.unwrap_err(), AiError::InvalidResponse(_)));

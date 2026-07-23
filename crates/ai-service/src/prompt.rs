@@ -4,7 +4,6 @@ use crate::Role;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiAction {
     Optimize,
-    Generate,
     Explain,
     DataQuality,
     DataAnalysis,
@@ -23,8 +22,8 @@ pub fn system_prompt(db_type: &str, schema_info: &str) -> String {
 /// 构建完整的对话消息：system + user
 pub fn build_messages(system: &str, user_prompt: &str) -> Vec<ChatMessage> {
     vec![
-        ChatMessage { role: Role::System, content: system.to_string() },
-        ChatMessage { role: Role::User, content: user_prompt.to_string() },
+        ChatMessage::new(Role::System, system),
+        ChatMessage::new(Role::User, user_prompt),
     ]
 }
 
@@ -32,13 +31,6 @@ pub fn optimize_prompt(statement: &str) -> String {
     format!(
         "请优化以下数据库查询语句的性能。说明优化原因和预期效果。\n\n当前语句：\n{}",
         statement
-    )
-}
-
-pub fn generate_prompt(description: &str) -> String {
-    format!(
-        "根据以下描述，生成对应的数据库查询语句。只返回语句，不需要解释。\n\n描述：\n{}",
-        description
     )
 }
 
@@ -83,10 +75,7 @@ pub fn data_analysis_prompt(statement: &str, row_count: usize, data_sample: &str
 /// 测试连接用的简单提示词
 pub fn test_connection_prompt() -> Vec<ChatMessage> {
     vec![
-        ChatMessage {
-            role: Role::User,
-            content: "请回复\"连接成功\"两个字。".to_string(),
-        },
+        ChatMessage::new(Role::User, "请回复\"连接成功\"两个字。"),
     ]
 }
 
@@ -117,13 +106,6 @@ mod tests {
         let prompt = optimize_prompt("SELECT * FROM t");
         assert!(prompt.contains("SELECT * FROM t"));
         assert!(prompt.contains("优化"));
-    }
-
-    #[test]
-    fn generate_prompt_contains_description() {
-        let prompt = generate_prompt("查询所有活跃用户");
-        assert!(prompt.contains("查询所有活跃用户"));
-        assert!(prompt.contains("生成"));
     }
 
     #[test]

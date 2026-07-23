@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::{AiError, AiProvider, ChatMessage, Role, map_status_error};
+use crate::{AiError, AiProvider, ChatMessage, Role, ToolCall, ToolDef, map_status_error};
 
 pub struct ClaudeProvider {
     client: Client,
@@ -32,7 +32,7 @@ impl ClaudeProvider {
 
     fn build_request_body(messages: &[ChatMessage]) -> Value {
         let mut system = String::new();
-        let mut api_messages = Vec::new();
+        let mut api_messages: Vec<Value> = Vec::new();
 
         for msg in messages {
             match msg.role {
@@ -46,7 +46,38 @@ impl ClaudeProvider {
                     api_messages.push(json!({ "role": "user", "content": msg.content }));
                 }
                 Role::Assistant => {
-                    api_messages.push(json!({ "role": "assistant", "content": msg.content }));
+                    if let Some(ref tool_calls) = msg.tool_calls {
+                        // 包含 tool_use 的 assistant 消息
+                        let mut content: Vec<Value> = Vec::new();
+                        if !msg.content.is_empty() {
+                            content.push(json!({ "type": "text", "text": msg.content }));
+                        }
+                        for tc in tool_calls {
+                            let input: Value = serde_json::from_str(&tc.arguments)
+                                .unwrap_or(serde_json::json!({}));
+                            content.push(json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.name,
+                                "input": input
+                            }));
+                        }
+                        api_messages.push(json!({ "role": "assistant", "content": content }));
+                    } else {
+                        api_messages.push(json!({ "role": "assistant", "content": msg.content }));
+                    }
+                }
+                Role::Tool => {
+                    // 工具结果作为 user 消息的 tool_result 内容块
+                    let call_id = msg.tool_call_id.as_deref().unwrap_or("");
+                    api_messages.push(json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": msg.content
+                        }]
+                    }));
                 }
             }
         }
@@ -166,6 +197,140 @@ impl AiProvider for ClaudeProvider {
             .map(|s| s.to_string())
             .ok_or_else(|| AiError::InvalidResponse("missing content in response".into()))
     }
+
+    async fn chat_stream_with_tools(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDef>,
+        tx: mpsc::UnboundedSender<String>,
+    ) -> Result<Vec<ToolCall>, AiError> {
+        let tools_json: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters
+                })
+            })
+            .collect();
+
+        let mut body = Self::build_request_body(&messages);
+        body["model"] = json!(self.model);
+        body["tools"] = json!(tools_json);
+
+        let response = self
+            .client
+            .post(&self.request_url())
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AiError::NetworkError(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(map_status_error(status, text));
+        }
+
+        // 当前正在累积的 tool_use 块
+        struct ActiveToolUse {
+            id: String,
+            name: String,
+            arguments: String,
+        }
+
+        let mut active_tool: Option<ActiveToolUse> = None;
+        let mut completed_tools: Vec<ToolCall> = Vec::new();
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| AiError::NetworkError(e.to_string()))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(line_end) = buffer.find('\n') {
+                let line = buffer[..line_end].trim().to_string();
+                buffer = buffer[line_end + 1..].to_string();
+
+                if line.starts_with("data: ") {
+                    let data = &line[6..];
+                    if let Ok(parsed) = serde_json::from_str::<Value>(data) {
+                        let event_type =
+                            parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match event_type {
+                            "content_block_start" => {
+                                if let Some(block) = parsed.get("content_block") {
+                                    let block_type =
+                                        block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    if block_type == "tool_use" {
+                                        active_tool = Some(ActiveToolUse {
+                                            id: block
+                                                .get("id")
+                                                .and_then(|i| i.as_str())
+                                                .unwrap_or("")
+                                                .to_string(),
+                                            name: block
+                                                .get("name")
+                                                .and_then(|n| n.as_str())
+                                                .unwrap_or("")
+                                                .to_string(),
+                                            arguments: String::new(),
+                                        });
+                                    }
+                                }
+                            }
+                            "content_block_delta" => {
+                                if let Some(delta) = parsed.get("delta") {
+                                    let delta_type =
+                                        delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    match delta_type {
+                                        "text_delta" => {
+                                            if let Some(text) =
+                                                delta.get("text").and_then(|t| t.as_str())
+                                            {
+                                                let _ = tx.send(text.to_string());
+                                            }
+                                        }
+                                        "input_json_delta" => {
+                                            if let Some(partial) = delta
+                                                .get("partial_json")
+                                                .and_then(|p| p.as_str())
+                                            {
+                                                if let Some(ref mut tool) = active_tool {
+                                                    tool.arguments.push_str(partial);
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            "content_block_stop" => {
+                                if let Some(tool) = active_tool.take() {
+                                    completed_tools.push(ToolCall {
+                                        id: tool.id,
+                                        name: tool.name,
+                                        arguments: tool.arguments,
+                                    });
+                                }
+                            }
+                            "message_stop" => {
+                                return Ok(completed_tools);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(completed_tools)
+    }
 }
 
 #[cfg(test)]
@@ -174,24 +339,15 @@ mod tests {
     use serde_json::json;
 
     fn make_provider(base_url: &str) -> ClaudeProvider {
-        ClaudeProvider::new("test-key".into(), base_url.into(), "claude-sonnet-4-20250514".into())
+        ClaudeProvider::new("test-key".into(), base_url.into(), "claude-sonnet-5".into())
     }
 
     #[test]
     fn build_request_body_separates_system() {
         let messages = vec![
-            ChatMessage {
-                role: Role::System,
-                content: "You are helpful.".into(),
-            },
-            ChatMessage {
-                role: Role::User,
-                content: "Hello".into(),
-            },
-            ChatMessage {
-                role: Role::Assistant,
-                content: "Hi!".into(),
-            },
+            ChatMessage::new(Role::System, "You are helpful.".into(),),
+            ChatMessage::new(Role::User, "Hello".into(),),
+            ChatMessage::new(Role::Assistant, "Hi!".into(),),
         ];
         let body = ClaudeProvider::build_request_body(&messages);
         assert_eq!(body["system"], "You are helpful.");
@@ -205,10 +361,7 @@ mod tests {
 
     #[test]
     fn build_request_body_no_system_field_when_absent() {
-        let messages = vec![ChatMessage {
-            role: Role::User,
-            content: "Hi".into(),
-        }];
+        let messages = vec![ChatMessage::new(Role::User, "Hi".into(),)];
         let body = ClaudeProvider::build_request_body(&messages);
         assert!(body.get("system").is_none());
     }
@@ -216,18 +369,9 @@ mod tests {
     #[test]
     fn build_request_body_multiple_system_messages_concatenated() {
         let messages = vec![
-            ChatMessage {
-                role: Role::System,
-                content: "First instruction.".into(),
-            },
-            ChatMessage {
-                role: Role::System,
-                content: "Second instruction.".into(),
-            },
-            ChatMessage {
-                role: Role::User,
-                content: "Go".into(),
-            },
+            ChatMessage::new(Role::System, "First instruction.".into(),),
+            ChatMessage::new(Role::System, "Second instruction.".into(),),
+            ChatMessage::new(Role::User, "Go".into(),),
         ];
         let body = ClaudeProvider::build_request_body(&messages);
         assert_eq!(body["system"], "First instruction.\nSecond instruction.");
@@ -238,10 +382,7 @@ mod tests {
 
     #[test]
     fn build_request_body_uses_max_tokens() {
-        let messages = vec![ChatMessage {
-            role: Role::User,
-            content: "Hi".into(),
-        }];
+        let messages = vec![ChatMessage::new(Role::User, "Hi".into(),)];
         let body = ClaudeProvider::build_request_body(&messages);
         assert_eq!(body["max_tokens"], 4096);
         assert!(body.get("max_completion_tokens").is_none());
@@ -302,10 +443,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
         let result = provider
             .chat_stream(
-                vec![ChatMessage {
-                    role: Role::User,
-                    content: "Hi".into(),
-                }],
+                vec![ChatMessage::new(Role::User, "Hi".into(),)],
                 tx,
             )
             .await;
@@ -339,10 +477,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
         let provider = make_provider(&server.url());
         let result = provider
-            .chat(vec![ChatMessage {
-                role: Role::User,
-                content: "How are you?".into(),
-            }])
+            .chat(vec![ChatMessage::new(Role::User, "How are you?".into(),)])
             .await;
 
         assert_eq!(result.unwrap(), "I am fine, thanks!");
@@ -361,10 +496,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
         let provider = make_provider(&server.url());
         let result = provider
-            .chat(vec![ChatMessage {
-                role: Role::User,
-                content: "test".into(),
-            }])
+            .chat(vec![ChatMessage::new(Role::User, "test".into(),)])
             .await;
 
         assert!(matches!(result.unwrap_err(), AiError::AuthError));
@@ -383,10 +515,7 @@ event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
         let provider = make_provider(&server.url());
         let result = provider
-            .chat(vec![ChatMessage {
-                role: Role::User,
-                content: "test".into(),
-            }])
+            .chat(vec![ChatMessage::new(Role::User, "test".into(),)])
             .await;
 
         assert!(matches!(result.unwrap_err(), AiError::RateLimitExceeded));

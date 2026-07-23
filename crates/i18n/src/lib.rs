@@ -849,7 +849,6 @@ fn en(key: &'static str) -> &'static str {
         "AI 设置" => "AI Settings",
         "AI 助手" => "AI Assistant",
         "优化语句" => "Optimize Statement",
-        "根据注释生成语句" => "Generate from Comment",
         "解释语句" => "Explain Statement",
         "数据质量检查" => "Data Quality Check",
         "数据分析" => "Data Analysis",

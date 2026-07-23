@@ -53,7 +53,7 @@ impl Default for AiSettingsForm {
             provider_type: AiSettingsProviderType::OpenAI,
             api_key: String::new(),
             base_url: "https://api.openai.com/v1".into(),
-            model: "gpt-4o".into(),
+            model: "gpt-5.6-sol".into(),
             show_api_key: false,
             test_status: None,
         }
@@ -709,9 +709,6 @@ struct QueryTabState {
     pending_edit_context_analysis: bool,
     /// 手动编辑模式：等待用户输入表名
     manual_edit_prompt: bool,
-    pending_ai_generate: bool,
-    /// Generate 模式的 AI 响应接收器（非流式）
-    pending_ai_generate_rx: Option<std::sync::mpsc::Receiver<Result<String, ai_service::AiError>>>,
     /// 流式模式的 AI 响应接收器
     ai_stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     /// AI 对话历史
@@ -721,7 +718,7 @@ struct QueryTabState {
     /// AI 是否正在流式输出
     ai_is_streaming: bool,
     /// 流式完成通知接收器
-    ai_done_rx: Option<tokio::sync::oneshot::Receiver<Result<(), ai_service::AiError>>>,
+    ai_done_rx: Option<tokio::sync::oneshot::Receiver<Result<String, ai_service::AiError>>>,
     /// AI 对话输入框内容
     ai_input: String,
     /// Markdown 渲染缓存
@@ -784,8 +781,6 @@ impl Clone for QueryTabState {
             edit_context: self.edit_context.clone(),
             pending_edit_context_analysis: self.pending_edit_context_analysis,
             manual_edit_prompt: self.manual_edit_prompt,
-            pending_ai_generate: self.pending_ai_generate,
-            pending_ai_generate_rx: None,
             ai_stream_rx: None,
             ai_conversation: self.ai_conversation.clone(),
             ai_streaming_text: self.ai_streaming_text.clone(),
@@ -7562,11 +7557,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
         };
 
-        let (sql, last_executed_sql, db_type_str) = {
+        let (sql, last_executed_sql, db_type_str, connection_id) = {
             let tab = match self.tabs.get(self.active_tab) {
                 Some(WorkspaceTab::Query(t)) => t,
                 _ => return,
             };
+            let cid = tab.connection_id.clone().unwrap_or_default();
             let db_type = tab.connection_id.as_ref()
                 .and_then(|cid| self.connections.iter().find(|c| &c.id == cid))
                 .map(|c| match c.kind {
@@ -7575,7 +7571,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     DatabaseKind::MongoDb => "MongoDB",
                 })
                 .unwrap_or("SQL");
-            (tab.sql.clone(), tab.last_executed_sql.clone(), db_type)
+            (tab.sql.clone(), tab.last_executed_sql.clone(), db_type, cid)
         };
 
         // 数据检查/分析需要结果数据，在 tab 借用外获取
@@ -7589,7 +7585,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         // 阶段二：构造提示词（不再持有 tab 引用）
         let user_prompt = match action {
             ai_service::prompt::AiAction::Optimize => ai_service::prompt::optimize_prompt(&sql),
-            ai_service::prompt::AiAction::Generate => ai_service::prompt::generate_prompt(&sql),
             ai_service::prompt::AiAction::Explain => ai_service::prompt::explain_prompt(&sql),
             ai_service::prompt::AiAction::DataQuality | ai_service::prompt::AiAction::DataAnalysis => {
                 if data_sample.is_empty() {
@@ -7608,29 +7603,152 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
         };
 
-        let schema_info = "";
-        let system = ai_service::prompt::system_prompt(db_type_str, schema_info);
+        let system = ai_service::prompt::system_prompt(db_type_str, "");
         let messages = ai_service::prompt::build_messages(&system, &user_prompt);
+
+        // 构建工具执行器：从 schema_cache 快照数据
+        self.ensure_metadata_cache(&connection_id);
+        let conn_databases: Vec<String> = self.schema_cache
+            .database_names_for(&connection_id)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let conn_schemas: Vec<(String, Vec<String>)> = self.schema_cache
+            .schema_names_for(&connection_id)
+            .iter()
+            .map(|s| (s.to_string(), self.schema_cache.tables_for_schema(s)
+                .unwrap_or(&[])
+                .iter()
+                .map(|t| t.to_string())
+                .collect()))
+            .collect();
+        let db_tables: Vec<(String, Vec<String>)> = conn_databases
+            .iter()
+            .map(|db| (db.clone(), self.schema_cache.tables_for_database(db)
+                .unwrap_or(&[])
+                .iter()
+                .map(|t| t.to_string())
+                .collect()))
+            .collect();
+        let all_tables: Vec<(String, bool, Vec<core_domain::ColumnDefinition>)> = self.schema_cache
+            .table_names()
+            .iter()
+            .map(|name| {
+                let is_view = self.schema_cache.is_view(name);
+                let cols = self.schema_cache.columns_for_table(name)
+                    .unwrap_or(&[])
+                    .to_vec();
+                (name.to_string(), is_view, cols)
+            })
+            .collect();
+
+        let tool_services = self.services.clone();
+        let tool_connection_id = connection_id.clone();
+        let executor = move |name: String, args: String| {
+            let databases = conn_databases.clone();
+            let schemas = conn_schemas.clone();
+            let db_tables = db_tables.clone();
+            let all_tables = all_tables.clone();
+            let tool_services = tool_services.clone();
+            let tool_connection_id = tool_connection_id.clone();
+            async move {
+                let params: serde_json::Value = serde_json::from_str(&args)
+                    .unwrap_or(serde_json::json!({}));
+                match name.as_str() {
+                    "list_databases" => {
+                        serde_json::to_string(&databases).unwrap_or_default()
+                    }
+                    "list_schemas" => {
+                        serde_json::to_string(&schemas.iter().map(|(n, _)| n).collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    }
+                    "list_tables" => {
+                        let schema = params.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+                        let database = params.get("database").and_then(|v| v.as_str()).unwrap_or("");
+                        let tables: Vec<serde_json::Value> = if !schema.is_empty() {
+                            schemas.iter()
+                                .find(|(n, _)| n == schema)
+                                .map(|(_, ts)| ts.iter().map(|t| {
+                                    let is_view = all_tables.iter().any(|(n, iv, _)| n == t && *iv);
+                                    serde_json::json!({"name": t, "type": if is_view { "view" } else { "table" }})
+                                }).collect())
+                                .unwrap_or_default()
+                        } else if !database.is_empty() {
+                            db_tables.iter()
+                                .find(|(n, _)| n == database)
+                                .map(|(_, ts)| ts.iter().map(|t| {
+                                    let is_view = all_tables.iter().any(|(n, iv, _)| n == t && *iv);
+                                    serde_json::json!({"name": t, "type": if is_view { "view" } else { "table" }})
+                                }).collect())
+                                .unwrap_or_default()
+                        } else {
+                            all_tables.iter().map(|(n, iv, _)| {
+                                serde_json::json!({"name": n, "type": if *iv { "view" } else { "table" }})
+                            }).collect()
+                        };
+                        serde_json::to_string(&tables).unwrap_or_default()
+                    }
+                    "get_table_columns" => {
+                        let table = params.get("table").and_then(|v| v.as_str()).unwrap_or("");
+                        let database = params.get("database").and_then(|v| v.as_str()).unwrap_or("");
+                        let key = if !database.is_empty() {
+                            format!("{}.{}", database, table)
+                        } else {
+                            table.to_string()
+                        };
+                        let found = all_tables.iter()
+                            .find(|(n, _, _)| n == &key || n == table);
+                        let cols: Vec<serde_json::Value> = if let Some((_, is_view, cols)) = found {
+                            if cols.is_empty() {
+                                // 表已知但列未缓存，按需加载
+                                let table_ref = core_domain::TableRef {
+                                    connection_id: tool_connection_id.clone(),
+                                    database: if database.is_empty() { None } else { Some(database.to_string()) },
+                                    schema: params.get("schema").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    table: table.to_string(),
+                                    is_view: *is_view,
+                                };
+                                match tool_services.load_table_definition(&table_ref).await {
+                                    Ok(def) => def.columns.iter().map(|c| serde_json::json!({
+                                        "name": c.name, "type": c.data_type, "nullable": c.nullable,
+                                        "primary_key": c.primary_key, "comment": c.comment
+                                    })).collect(),
+                                    Err(_) => vec![],
+                                }
+                            } else {
+                                cols.iter().map(|c| serde_json::json!({
+                                    "name": c.name, "type": c.data_type, "nullable": c.nullable,
+                                    "primary_key": c.primary_key, "comment": c.comment
+                                })).collect()
+                            }
+                        } else {
+                            vec![]
+                        };
+                        serde_json::to_string(&cols).unwrap_or_default()
+                    }
+                    "search_objects" => {
+                        let keyword = params.get("keyword").and_then(|v| v.as_str()).unwrap_or("");
+                        let kw = keyword.to_lowercase();
+                        let results: Vec<serde_json::Value> = all_tables.iter()
+                            .filter(|(n, _, _)| n.to_lowercase().contains(&kw))
+                            .map(|(n, iv, _)| {
+                                serde_json::json!({"name": n, "type": if *iv { "view" } else { "table" }})
+                            })
+                            .collect();
+                        serde_json::to_string(&results).unwrap_or_default()
+                    }
+                    _ => "未知工具".to_string(),
+                }
+            }
+        };
+
+        let tools = ai_service::tools::tool_definitions();
 
         // 阶段三：执行并更新 tab
         let tab = match self.tabs.get_mut(self.active_tab) {
             Some(WorkspaceTab::Query(t)) => t,
             _ => return,
         };
-
-        // 生成模式：结果替换编辑器内容，使用非流式
-        if action == ai_service::prompt::AiAction::Generate {
-            let provider = ai_service::create_provider(&config.provider);
-            let (tx, rx) = std::sync::mpsc::channel();
-            let handle = self.runtime.handle().clone();
-            handle.spawn(async move {
-                let result = provider.chat(messages).await;
-                let _ = tx.send(result);
-            });
-            tab.pending_ai_generate = true;
-            tab.pending_ai_generate_rx = Some(rx);
-            return;
-        }
 
         // 其他模式：流式输出到 AI 面板
         let provider = ai_service::create_provider(&config.provider);
@@ -7655,7 +7773,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         let handle = self.runtime.handle().clone();
         handle.spawn(async move {
-            let result = provider.chat_stream(messages, tx).await;
+            let result = ai_service::tools::chat_with_tools(
+                &*provider, messages, tools, &executor, Some(tx),
+            ).await;
             let _ = done_tx.send(result);
         });
     }
@@ -8146,7 +8266,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 });
             }
             TabUiAction::AiOptimize => self.execute_ai_action(ai_service::prompt::AiAction::Optimize),
-            TabUiAction::AiGenerate => self.execute_ai_action(ai_service::prompt::AiAction::Generate),
             TabUiAction::AiExplain => self.execute_ai_action(ai_service::prompt::AiAction::Explain),
             TabUiAction::AiDataQuality => self.execute_ai_action(ai_service::prompt::AiAction::DataQuality),
             TabUiAction::AiDataAnalysis => self.execute_ai_action(ai_service::prompt::AiAction::DataAnalysis),
@@ -9582,7 +9701,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 // AI 助手下拉按钮
                                 let ai_items: Vec<&str> = vec![
                                     tr!("优化语句"),
-                                    tr!("根据注释生成语句"),
                                     tr!("解释语句"),
                                     tr!("数据质量检查"),
                                     tr!("数据分析"),
@@ -9617,7 +9735,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         .order(egui::Order::Foreground)
                                         .fixed_pos(below)
                                         .interactable(true);
-                                    area.show(ui.ctx(), |ui| {
+                                    let area_resp = area.show(ui.ctx(), |ui| {
                                         egui::Frame::new()
                                             .fill(chrome.card_bg)
                                             .stroke(Stroke::new(1.0, chrome.border))
@@ -9648,10 +9766,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     if response.clicked() {
                                                         action = match i {
                                                             0 => TabUiAction::AiOptimize,
-                                                            1 => TabUiAction::AiGenerate,
-                                                            2 => TabUiAction::AiExplain,
-                                                            3 => TabUiAction::AiDataQuality,
-                                                            4 => TabUiAction::AiDataAnalysis,
+                                                            1 => TabUiAction::AiExplain,
+                                                            2 => TabUiAction::AiDataQuality,
+                                                            3 => TabUiAction::AiDataAnalysis,
                                                             _ => TabUiAction::OpenAiSettings,
                                                         };
                                                         ui.data_mut(|d| d.insert_temp(ai_menu_id, false));
@@ -9659,6 +9776,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 }
                                             });
                                     });
+                                    ui.data_mut(|d| d.insert_temp(ai_menu_id.with("rect"), area_resp.response.rect));
                                 }
                             });
                             ui.add_space(10.0);
@@ -10395,7 +10513,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     .color(prefix_color),
                                                             );
                                                             ui.add_space(2.0);
+                                                            // 禁用 noninteractive 边框，避免 egui_commonmark 表格渲染红框
+                                                            let prev_stroke = ui.style().visuals.widgets.noninteractive.bg_stroke;
+                                                            ui.style_mut().visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
                                                             CommonMarkViewer::new().show(ui, &mut tab.md_cache, &msg.content);
+                                                            ui.style_mut().visuals.widgets.noninteractive.bg_stroke = prev_stroke;
                                                         });
                                                 }
                                                 if tab.ai_is_streaming {
@@ -10481,10 +10603,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         let system =
                                                             ai_service::prompt::system_prompt(&db_type, "");
                                                         let mut messages: Vec<ai_service::ChatMessage> =
-                                                            vec![ai_service::ChatMessage {
-                                                                role: ai_service::Role::System,
-                                                                content: system,
-                                                            }];
+                                                            vec![ai_service::ChatMessage::new(ai_service::Role::System, system)];
                                                         let conversation: Vec<_> =
                                                             tab.ai_conversation.iter().collect();
                                                         let start = if conversation.len() > 20 {
@@ -10499,12 +10618,121 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     ai_service::Role::Assistant
                                                                 }
                                                             };
-                                                            messages.push(ai_service::ChatMessage {
-                                                                role,
-                                                                content: msg.content.clone(),
-                                                            });
+                                                            messages.push(ai_service::ChatMessage::new(role, msg.content.clone()));
                                                         }
 
+                                                        // 快照元数据用于工具执行
+                                                        let cid = tab.connection_id.clone().unwrap_or_default();
+                                                        let conn_databases: Vec<String> = schema_cache
+                                                            .database_names_for(&cid)
+                                                            .iter().map(|s| s.to_string()).collect();
+                                                        let conn_schemas: Vec<(String, Vec<String>)> = schema_cache
+                                                            .schema_names_for(&cid)
+                                                            .iter().map(|s| (s.to_string(), schema_cache.tables_for_schema(s)
+                                                                .unwrap_or(&[]).iter().map(|t| t.to_string()).collect()))
+                                                            .collect();
+                                                        let db_tables: Vec<(String, Vec<String>)> = conn_databases
+                                                            .iter().map(|db| (db.clone(), schema_cache.tables_for_database(db)
+                                                                .unwrap_or(&[]).iter().map(|t| t.to_string()).collect()))
+                                                            .collect();
+                                                        let all_tables: Vec<(String, bool, Vec<core_domain::ColumnDefinition>)> = schema_cache
+                                                            .table_names().iter().map(|name| {
+                                                                let is_view = schema_cache.is_view(name);
+                                                                let cols = schema_cache.columns_for_table(name)
+                                                                    .unwrap_or(&[]).to_vec();
+                                                                (name.to_string(), is_view, cols)
+                                                            }).collect();
+
+                                                        let tool_services = services.clone();
+                                                        let tool_cid = cid.clone();
+                                                        let executor = move |name: String, args: String| {
+                                                            let databases = conn_databases.clone();
+                                                            let schemas = conn_schemas.clone();
+                                                            let db_tables = db_tables.clone();
+                                                            let all_tables = all_tables.clone();
+                                                            let tool_services = tool_services.clone();
+                                                            let tool_cid = tool_cid.clone();
+                                                            async move {
+                                                                let params: serde_json::Value = serde_json::from_str(&args)
+                                                                    .unwrap_or(serde_json::json!({}));
+                                                                match name.as_str() {
+                                                                    "list_databases" => serde_json::to_string(&databases).unwrap_or_default(),
+                                                                    "list_schemas" => serde_json::to_string(&schemas.iter().map(|(n, _)| n).collect::<Vec<_>>()).unwrap_or_default(),
+                                                                    "list_tables" => {
+                                                                        let schema = params.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+                                                                        let database = params.get("database").and_then(|v| v.as_str()).unwrap_or("");
+                                                                        let tables: Vec<serde_json::Value> = if !schema.is_empty() {
+                                                                            schemas.iter().find(|(n, _)| n == schema)
+                                                                                .map(|(_, ts)| ts.iter().map(|t| {
+                                                                                    let is_view = all_tables.iter().any(|(n, iv, _)| n == t && *iv);
+                                                                                    serde_json::json!({"name": t, "type": if is_view { "view" } else { "table" }})
+                                                                                }).collect()).unwrap_or_default()
+                                                                        } else if !database.is_empty() {
+                                                                            db_tables.iter().find(|(n, _)| n == database)
+                                                                                .map(|(_, ts)| ts.iter().map(|t| {
+                                                                                    let is_view = all_tables.iter().any(|(n, iv, _)| n == t && *iv);
+                                                                                    serde_json::json!({"name": t, "type": if is_view { "view" } else { "table" }})
+                                                                                }).collect()).unwrap_or_default()
+                                                                        } else {
+                                                                            all_tables.iter().map(|(n, iv, _)| {
+                                                                                serde_json::json!({"name": n, "type": if *iv { "view" } else { "table" }})
+                                                                            }).collect()
+                                                                        };
+                                                                        serde_json::to_string(&tables).unwrap_or_default()
+                                                                    }
+                                                                    "get_table_columns" => {
+                                                                        let table = params.get("table").and_then(|v| v.as_str()).unwrap_or("");
+                                                                        let database = params.get("database").and_then(|v| v.as_str()).unwrap_or("");
+                                                                        let schema = params.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+                                                                        let key = if !database.is_empty() {
+                                                                            format!("{}.{}", database, table)
+                                                                        } else {
+                                                                            table.to_string()
+                                                                        };
+                                                                        let found = all_tables.iter()
+                                                                            .find(|(n, _, _)| n == &key || n == table);
+                                                                        let cols: Vec<serde_json::Value> = if let Some((_, is_view, cols)) = found {
+                                                                            if cols.is_empty() {
+                                                                                let table_ref = core_domain::TableRef {
+                                                                                    connection_id: tool_cid.clone(),
+                                                                                    database: if database.is_empty() { None } else { Some(database.to_string()) },
+                                                                                    schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
+                                                                                    table: table.to_string(),
+                                                                                    is_view: *is_view,
+                                                                                };
+                                                                                match tool_services.load_table_definition(&table_ref).await {
+                                                                                    Ok(def) => def.columns.iter().map(|c| serde_json::json!({
+                                                                                        "name": c.name, "type": c.data_type, "nullable": c.nullable,
+                                                                                        "primary_key": c.primary_key, "comment": c.comment
+                                                                                    })).collect(),
+                                                                                    Err(_) => vec![],
+                                                                                }
+                                                                            } else {
+                                                                                cols.iter().map(|c| serde_json::json!({
+                                                                                    "name": c.name, "type": c.data_type, "nullable": c.nullable,
+                                                                                    "primary_key": c.primary_key, "comment": c.comment
+                                                                                })).collect()
+                                                                            }
+                                                                        } else {
+                                                                            vec![]
+                                                                        };
+                                                                        serde_json::to_string(&cols).unwrap_or_default()
+                                                                    }
+                                                                    "search_objects" => {
+                                                                        let keyword = params.get("keyword").and_then(|v| v.as_str()).unwrap_or("");
+                                                                        let kw = keyword.to_lowercase();
+                                                                        let results: Vec<serde_json::Value> = all_tables.iter()
+                                                                            .filter(|(n, _, _)| n.to_lowercase().contains(&kw))
+                                                                            .map(|(n, iv, _)| serde_json::json!({"name": n, "type": if *iv { "view" } else { "table" }}))
+                                                                            .collect();
+                                                                        serde_json::to_string(&results).unwrap_or_default()
+                                                                    }
+                                                                    _ => "未知工具".to_string(),
+                                                                }
+                                                            }
+                                                        };
+
+                                                        let tools = ai_service::tools::tool_definitions();
                                                         let provider =
                                                             ai_service::create_provider(&config.provider);
                                                         let (tx, rx) =
@@ -10518,8 +10746,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                                                         let handle = runtime.handle().clone();
                                                         handle.spawn(async move {
-                                                            let result =
-                                                                provider.chat_stream(messages, tx).await;
+                                                            let result = ai_service::tools::chat_with_tools(
+                                                                &*provider, messages, tools, &executor, Some(tx),
+                                                            ).await;
                                                             let _ = done_tx.send(result);
                                                         });
                                                     }
@@ -14106,7 +14335,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             self.pending_test_connection = Some(rx);
                             ui.spinner();
                         }
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            self.connection_test_result = Some((false, tr!("连接测试失败: 后台任务异常终止").into()));
+                        }
                     }
                 }
                 if let Some((success, msg)) = &self.connection_test_result {
@@ -15941,27 +16172,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
             }
         }
-
-        // 3. 处理 AI Generate 非流式结果
-        if let Some(rx) = tab.pending_ai_generate_rx.take() {
-            match rx.try_recv() {
-                Ok(result) => match result {
-                    Ok(text) => {
-                        tab.sql = text;
-                    }
-                    Err(e) => {
-                        tab.messages.push(tr!("AI 错误: {}", e).to_string());
-                        tab.active_bottom_tab = QueryBottomTab::Messages;
-                    }
-                },
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    tab.pending_ai_generate_rx = Some(rx);
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    tab.pending_ai_generate = false;
-                }
-            }
-        }
     }
 
     fn poll_ddl_pending_action(&mut self) {
@@ -16472,7 +16682,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             // 统一提供商列表：所有预设 + Claude
                                             let all_providers: Vec<(&str, &str, &str, bool)> = OPENAI_PRESETS.iter()
                                                 .map(|(name, url, model)| (*name, *url, *model, false))
-                                                .chain(std::iter::once(("Claude", CLAUDE_BASE_URL, "claude-sonnet-4-20250514", true)))
+                                                .chain(std::iter::once(("Claude", CLAUDE_BASE_URL, "claude-sonnet-5", true)))
                                                 .collect();
                                             // 检测当前选中项
                                             let selected_idx = all_providers.iter().position(|(_, url, _, is_claude)| {
@@ -16517,31 +16727,58 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                         });
                                         form_grid_row(ui, tr!("模型"), |ui| {
-                                            // 根据当前提供商查找推荐模型列表
-                                            let current_url = &form.base_url;
-                                            let is_claude = form.provider_type == AiSettingsProviderType::Claude;
+                                            let palette = mac_ui_palette_from_ui(ui);
                                             let preset_models: &[&str] = PROVIDER_MODELS.iter()
-                                                .find(|(_, url, _)| {
-                                                    if is_claude { url.is_empty() } else { *url == current_url.as_str() }
-                                                })
+                                                .find(|(_, url, _)| *url == form.base_url.as_str())
                                                 .map(|(_, _, models)| *models)
                                                 .unwrap_or(&[]);
-                                            let mut model_items: Vec<String> = Vec::new();
-                                            if !preset_models.is_empty() {
-                                                for &m in preset_models {
-                                                    model_items.push(m.to_string());
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            let text_response = ui.add_sized(
+                                                [248.0, 22.0],
+                                                egui::TextEdit::singleline(&mut form.model)
+                                                    .font(egui::TextStyle::Monospace),
+                                            );
+                                            let popup_id = egui::Id::new("ai-model-suggest");
+                                            let dropdown_btn = ui.add(
+                                                egui::Button::new(RichText::new("▾").size(palette.fonts.md).color(palette.text))
+                                                    .fill(Color32::TRANSPARENT)
+                                                    .stroke(Stroke::new(1.0, palette.secondary_button_stroke))
+                                                    .corner_radius(palette.radius_lg)
+                                                    .min_size(Vec2::new(22.0, 22.0)),
+                                            );
+                                            if dropdown_btn.clicked() {
+                                                let is_open = ui.memory(|m| m.is_popup_open(popup_id));
+                                                if is_open {
+                                                    ui.memory_mut(|m| m.close_popup(popup_id));
+                                                } else {
+                                                    ui.memory_mut(|m| m.open_popup(popup_id));
                                                 }
                                             }
-                                            // 当前模型不在推荐列表中时追加
-                                            if !model_items.contains(&form.model) {
-                                                model_items.insert(0, form.model.clone());
+                                            // 点击其它区域时关闭（排除按钮和文本输入框自身）
+                                            if ui.memory(|m| m.is_popup_open(popup_id))
+                                                && ui.input(|i| i.pointer.any_released())
+                                                && !dropdown_btn.hovered()
+                                                && !text_response.hovered()
+                                            {
+                                                ui.memory_mut(|m| m.close_popup(popup_id));
                                             }
-                                            let model_refs: Vec<(&str, bool)> = model_items.iter()
-                                                .map(|s| (s.as_str(), s.as_str() == form.model.as_str()))
-                                                .collect();
-                                            if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("ai-model-select"), &form.model, 280.0, &model_refs) {
-                                                form.model = model_items[sel].clone();
-                                            }
+                                            egui::popup_below_widget(
+                                                ui,
+                                                popup_id,
+                                                &dropdown_btn,
+                                                egui::PopupCloseBehavior::CloseOnClickOutside,
+                                                |ui| {
+                                                    ui.set_min_width(230.0);
+                                                    for &model_name in preset_models {
+                                                        let is_current = model_name == form.model.as_str();
+                                                        let resp = ui.selectable_label(is_current, model_name);
+                                                        if resp.clicked() {
+                                                            form.model = model_name.to_string();
+                                                            ui.memory_mut(|m| m.close_popup(popup_id));
+                                                        }
+                                                    }
+                                                },
+                                            );
                                         });
                                     });
                             });
@@ -16569,6 +16806,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 });
                             }
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                self.ai_settings_form.test_status = Some(tr!("连接测试失败: 后台任务异常终止").into());
                                 self.pending_ai_test = None;
                             }
                         }
@@ -17477,7 +17715,7 @@ impl eframe::App for DesktopApp {
             || !self.pending_autocomplete_columns.is_empty()
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Table(t) if t.generate_data_running))
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::TableSummary(ts) if ts.stats_loading))
-            || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Query(t) if t.ai_is_streaming || t.pending_ai_generate))
+            || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Query(t) if t.ai_is_streaming))
         {
             // 后台任务进行中时主动请求后续帧，避免必须等鼠标再次移动才显示结果。
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -18407,8 +18645,6 @@ impl QueryTabState {
             edit_context: None,
             pending_edit_context_analysis: false,
             manual_edit_prompt: false,
-            pending_ai_generate: false,
-            pending_ai_generate_rx: None,
             ai_stream_rx: None,
             ai_conversation: Vec::new(),
             ai_streaming_text: String::new(),
@@ -18622,7 +18858,6 @@ enum TabUiAction {
     RefreshProcesslist,
     LoadFile(std::path::PathBuf),
     AiOptimize,
-    AiGenerate,
     AiExplain,
     AiDataQuality,
     AiDataAnalysis,

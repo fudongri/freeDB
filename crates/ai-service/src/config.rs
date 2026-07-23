@@ -78,15 +78,15 @@ impl AiModelStore {
 
 /// OpenAI 兼容格式的预设 (名称, Base URL, 默认模型)
 pub const OPENAI_PRESETS: &[(&str, &str, &str)] = &[
-    ("OpenAI", "https://api.openai.com/v1", "gpt-4.1"),
+    ("OpenAI", "https://api.openai.com/v1", "gpt-5.6-sol"),
     ("DeepSeek", "https://api.deepseek.com/v1", "deepseek-v4-flash"),
-    ("MiMo", "https://api.xiaomimimo.com/v1", "mimo-v2-pro"),
-    ("GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
-    ("Kimi", "https://api.moonshot.cn/v1", "moonshot-v1-auto"),
+    ("MiMo", "https://api.xiaomimimo.com/v1", "mimo-v2.5"),
+    ("GLM", "https://open.bigmodel.cn/api/paas/v4", "GLM-4.7"),
+    ("Kimi", "https://api.moonshot.cn/v1", "K3"),
     (
         "Qwen",
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "qwen-plus",
+        "qwen-max",
     ),
 ];
 
@@ -95,11 +95,11 @@ pub const CLAUDE_BASE_URL: &str = "https://api.anthropic.com";
 
 /// 各提供商推荐模型列表（名称, Base URL, 模型列表）
 pub const PROVIDER_MODELS: &[(&str, &str, &[&str])] = &[
-    ("OpenAI", "https://api.openai.com/v1", &["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o3", "o3-mini", "o4-mini"]),
+    ("OpenAI", "https://api.openai.com/v1", &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro", "gpt-5.3-codex", "o3", "o3-pro", "gpt-4.1"]),
     ("DeepSeek", "https://api.deepseek.com/v1", &["deepseek-v4-flash", "deepseek-v4-pro"]),
-    ("MiMo", "https://api.xiaomimimo.com/v1", &["mimo-v2-pro", "mimo-v2-flash"]),
-    ("GLM", "https://open.bigmodel.cn/api/paas/v4", &["glm-4-plus", "glm-4-flash", "glm-4-long"]),
-    ("Kimi", "https://api.moonshot.cn/v1", &["moonshot-v1-auto", "moonshot-v1-128k", "moonshot-v1-32k"]),
-    ("Qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", &["qwen-plus", "qwen-turbo", "qwen-max", "qwen3-coder-plus"]),
-    ("Claude", "", &["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"]),
+    ("Qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", &["qwen-max", "qwen-plus", "qwen-turbo"]),
+    ("GLM", "https://open.bigmodel.cn/api/paas/v4", &["GLM-4.7", "GLM-4", "GLM-4-Air", "GLM-4-9B"]),
+    ("Kimi", "https://api.moonshot.cn/v1", &["K3", "K2.6", "K3 Swarm"]),
+    ("MiMo", "https://api.xiaomimimo.com/v1", &["mimo-v2.5", "mimo-v2.5-pro", "mimo-v2-flash", "mimo-v2-omni"]),
+    ("Claude", "https://api.anthropic.com", &["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"]),
 ];
