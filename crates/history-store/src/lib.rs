@@ -43,11 +43,19 @@ impl HistoryStore {
     }
 
     pub fn append(&self, connection_id: &str, sql_text: &str, elapsed_ms: u128, success: bool) -> Result<()> {
+        const MAX_HISTORY_PER_CONNECTION: i64 = 10_000;
         let connection = self.connection.lock();
         connection.execute(
             "INSERT INTO query_history (id, connection_id, sql_text, executed_at, elapsed_ms, success)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![Uuid::new_v4().to_string(), connection_id, sql_text, Utc::now().to_rfc3339(), elapsed_ms as i64, success as i64],
+        )?;
+        // 自动裁剪超出上限的历史记录
+        connection.execute(
+            "DELETE FROM query_history WHERE connection_id = ?1 AND id NOT IN (
+                SELECT id FROM query_history WHERE connection_id = ?1 ORDER BY executed_at DESC LIMIT ?2
+            )",
+            params![connection_id, MAX_HISTORY_PER_CONNECTION],
         )?;
         Ok(())
     }

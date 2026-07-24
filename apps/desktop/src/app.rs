@@ -16,6 +16,7 @@ use eframe::egui::{
 };
 use egui_extras::{Size, StripBuilder, TableBuilder};
 use rfd::FileDialog;
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -473,6 +474,7 @@ type FileLoadResult = Result<(Vec<slowlog_parser::FingerprintStats>, Vec<slowlog
 
 const MAX_RECENT_TABS: usize = 50;
 const MAX_AI_CONVERSATION_LEN: usize = 50;
+const MAX_DISPLAY_TEXT_LEN: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum RecentTabEntry {
@@ -23572,12 +23574,17 @@ fn render_table_editor_cell(
         .rect_filled(table_cell_fill_rect(ui.max_rect(), selected), 0.0, editor_fill);
     let outer_rect = ui.max_rect();
 
-    if edit.value.contains('\n') {
-        // 多行：单元格内显示首行预览，下方浮层显示完整编辑器
+    if edit.value.contains('\n') || edit.value.len() > MAX_DISPLAY_TEXT_LEN {
+        // 多行或长文本：单元格内显示首行预览，下方浮层显示完整编辑器（带 ScrollArea 防卡顿）
         let first_line = edit.value.split('\n').next().unwrap_or("");
+        let preview_text = if first_line.len() > MAX_DISPLAY_TEXT_LEN {
+            &first_line[..first_line.char_indices().nth(MAX_DISPLAY_TEXT_LEN).map_or(first_line.len(), |(i, _)| i)]
+        } else {
+            first_line
+        };
         let preview_response = ui.put(
             outer_rect,
-            egui::Label::new(RichText::new(first_line).size(palette.fonts.base).color(palette.weak_text)),
+            egui::Label::new(RichText::new(preview_text).size(palette.fonts.base).color(palette.weak_text)),
         );
         let pos = egui::pos2(outer_rect.left(), outer_rect.bottom());
         let width = outer_rect.width().max(200.0);
@@ -29054,7 +29061,12 @@ impl TableCellDisplay {
 
 fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> TableCellDisplay {
     let trimmed = text.trim();
-    let first_line = trimmed.split('\n').next().unwrap_or(trimmed);
+    let first_line_raw = trimmed.split('\n').next().unwrap_or(trimmed);
+    let first_line = if first_line_raw.chars().count() > MAX_DISPLAY_TEXT_LEN {
+        Cow::Owned(first_line_raw.chars().take(MAX_DISPLAY_TEXT_LEN).collect())
+    } else {
+        Cow::Borrowed(first_line_raw)
+    };
     if weak {
         return TableCellDisplay {
             text: first_line.to_string(),
@@ -29079,7 +29091,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
         };
     }
 
-    if looks_like_number(first_line) {
+    if looks_like_number(first_line.as_ref()) {
         return TableCellDisplay {
             text: first_line.to_string(),
             tone: TableCellTone::Normal,
@@ -29088,7 +29100,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
         };
     }
 
-    if looks_like_json(first_line) {
+    if looks_like_json(first_line.as_ref()) {
         return TableCellDisplay {
             text: first_line.to_string(),
             tone: TableCellTone::Accent,
@@ -29097,7 +29109,7 @@ fn table_display_text(text: &str, weak: bool, column_type: Option<&str>) -> Tabl
         };
     }
 
-    if looks_like_datetime(first_line) {
+    if looks_like_datetime(first_line.as_ref()) {
         return TableCellDisplay {
             text: first_line.to_string(),
             tone: TableCellTone::Normal,
@@ -30468,6 +30480,7 @@ fn is_long_text_type(data_type: &str) -> bool {
             | "bytea"
     )
 }
+
 
 fn mini_button(ui: &mut egui::Ui, label: &str, style: ButtonStyle) -> egui::Response {
     ui.add(

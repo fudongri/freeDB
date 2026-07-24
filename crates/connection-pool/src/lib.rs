@@ -81,21 +81,32 @@ impl ConnectionPool {
         };
         let key = pool_key(&profile.id, profile.kind, effective_db);
 
-        // 复用空闲连接（不做逐次 ping，keepalive 已定期清理死连接，操作失败时上层处理重连）
-        let snapshot = self.snapshot(&key);
-        for handle in &snapshot {
-            if handle.try_lock().is_ok() {
-                tracing::debug!(key = %key, "连接池命中，复用空闲连接");
-                return Ok(handle.clone());
+        let mut backoff_ms = 50u64;
+        loop {
+            // 复用空闲连接（不做逐次 ping，keepalive 已定期清理死连接，操作失败时上层处理重连）
+            let snapshot = self.snapshot(&key);
+            for handle in &snapshot {
+                if handle.try_lock().is_ok() {
+                    tracing::debug!(key = %key, "连接池命中，复用空闲连接");
+                    return Ok(handle.clone());
+                }
             }
-        }
 
-        // 建新连接
-        tracing::info!(key = %key, host = %profile.host, port = profile.port, "连接池新建连接");
-        let new = self.provider(profile.kind).connect(profile, password, effective_db).await?;
-        let handle = Arc::new(AsyncMutex::new(new));
-        self.push(&key, handle.clone());
-        Ok(handle)
+            // 池已满，等待连接释放
+            if snapshot.len() >= POOL_MAX_PER_KEY {
+                tracing::debug!(key = %key, pool_size = snapshot.len(), "连接池已满，等待空闲连接");
+                sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(5000);
+                continue;
+            }
+
+            // 建新连接
+            tracing::info!(key = %key, host = %profile.host, port = profile.port, "连接池新建连接");
+            let new = self.provider(profile.kind).connect(profile, password, effective_db).await?;
+            let handle = Arc::new(AsyncMutex::new(new));
+            self.push(&key, handle.clone());
+            return Ok(handle);
+        }
     }
 
     // ── 内部操作 ──
