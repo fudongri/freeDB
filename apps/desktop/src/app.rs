@@ -12728,7 +12728,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         let mut column_btn_rect: Option<egui::Rect> = None;
                                         let mut gen_data_btn_rect: Option<egui::Rect> = None;
                                         ui.horizontal(|ui| {
-                                            if toolbar_button(ui, tr!("刷新"), subtle_button_style(colors, fonts.md))
+                                            if toolbar_button(ui, tr!("刷新"), ghost_button_style(colors, fonts.md))
                                                 .on_hover_text(tr!("刷新 ({}+R)", MOD_KEY))
                                                 .clicked()
                                             {
@@ -12737,7 +12737,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 action =
                                                     TabUiAction::RefreshActiveTable { reload_definition: true };
                                             }
-                                            if toolbar_button(ui, tr!("新增"), subtle_button_style(colors, fonts.md)).clicked() {
+                                            if toolbar_button(ui, tr!("新增"), ghost_button_style(colors, fonts.md)).clicked() {
                                                 let columns = table_editable_columns(tab);
                                                 tab.pending_insert_row =
                                                     Some(create_empty_insert_row(&columns));
@@ -12761,9 +12761,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_filter_summary(&tab.preview_filter)
                                                     .is_some();
                                             let filter_kind = if filter_active {
-                                                selection_button_style(colors, fonts.md)
+                                                ghost_selection_button_style(colors, fonts.md)
                                             } else {
-                                                subtle_button_style(colors, fonts.md)
+                                                ghost_button_style(colors, fonts.md)
                                             };
                                             if toolbar_button(ui, tr!("筛选"), filter_kind).clicked() {
                                                 tab.show_preview_filter = !tab.show_preview_filter;
@@ -12775,9 +12775,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 || table_sort_summary(&tab.preview_sort)
                                                     .is_some();
                                             let sort_kind = if sort_active {
-                                                selection_button_style(colors, fonts.md)
+                                                ghost_selection_button_style(colors, fonts.md)
                                             } else {
-                                                subtle_button_style(colors, fonts.md)
+                                                ghost_button_style(colors, fonts.md)
                                             };
                                             if toolbar_button(ui, tr!("排序"), sort_kind).clicked() {
                                                 tab.show_preview_sort = !tab.show_preview_sort;
@@ -12786,7 +12786,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 }
                                             }
                                             let export_popup_id = egui::Id::new(("export-popup", &tab.id));
-                                            let export_btn = toolbar_button(ui, tr!("导出 ▾"), subtle_button_style(colors, fonts.md));
+                                            let export_btn = toolbar_button(ui, tr!("导出 ▾"), ghost_button_style(colors, fonts.md));
                                             if export_btn.clicked() {
                                                 let is_open = ui.memory(|m| m.is_popup_open(export_popup_id));
                                                 if is_open {
@@ -12819,9 +12819,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             );
                                             let all_columns = table_editable_columns(tab);
                                             let column_filter_kind = if !tab.hidden_columns.is_empty() {
-                                                accent_active_button_style(colors, fonts.md)
+                                                ghost_accent_active_button_style(colors, fonts.md)
                                             } else {
-                                                subtle_button_style(colors, fonts.md)
+                                                ghost_button_style(colors, fonts.md)
                                             };
                                             let column_btn_response = toolbar_button(ui, tr!("列"), column_filter_kind);
                                             if column_btn_response.clicked() {
@@ -12832,7 +12832,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                             column_btn_rect = Some(column_btn_response.rect);
                                             // 生成数据按钮
-                                            let gen_data_btn_response = toolbar_button(ui, tr!("生成数据"), subtle_button_style(colors, fonts.md));
+                                            let gen_data_btn_response = toolbar_button(ui, tr!("生成数据"), ghost_button_style(colors, fonts.md));
                                             gen_data_btn_rect = Some(gen_data_btn_response.rect);
                                             if gen_data_btn_response.clicked() {
                                                 tab.show_generate_data_popup = !tab.show_generate_data_popup;
@@ -18987,6 +18987,42 @@ fn subtle_button_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyle
         fill: c.subtle_button_bg,
         text: c.subtle_button_text,
         stroke: Stroke::new(1.0, c.subtle_button_stroke),
+        font_size,
+        min_width: 0.0,
+        min_height: 26.0,
+        corner_radius: c.radius_md,
+    }
+}
+
+fn ghost_button_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyle {
+    ButtonStyle {
+        fill: c.subtle_button_bg,
+        text: c.subtle_button_text,
+        stroke: Stroke::NONE,
+        font_size,
+        min_width: 0.0,
+        min_height: 26.0,
+        corner_radius: c.radius_md,
+    }
+}
+
+fn ghost_selection_button_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyle {
+    ButtonStyle {
+        fill: c.selection_bg,
+        text: c.selection_text,
+        stroke: Stroke::NONE,
+        font_size,
+        min_width: 0.0,
+        min_height: 26.0,
+        corner_radius: c.radius_md,
+    }
+}
+
+fn ghost_accent_active_button_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyle {
+    ButtonStyle {
+        fill: c.accent_active_button_bg,
+        text: c.accent_active_button_text,
+        stroke: Stroke::NONE,
         font_size,
         min_width: 0.0,
         min_height: 26.0,
