@@ -394,6 +394,20 @@ enum WorkspaceTab {
     SlowQuery(SlowQueryTabState),
 }
 
+impl WorkspaceTab {
+    fn tab_id(&self) -> Option<&str> {
+        match self {
+            Self::Query(t) => Some(&t.id),
+            Self::Table(t) => Some(&t.id),
+            Self::CreateTable(t) => Some(&t.id),
+            Self::TableSummary(t) => Some(&t.id),
+            Self::SchemaSummary(t) => Some(&t.id),
+            Self::Routine(t) => Some(&t.id),
+            Self::Dashboard | Self::SlowQuery(_) => None,
+        }
+    }
+}
+
 /// 慢查询分析标签页状态
 #[derive(Clone)]
 struct SlowQueryTabState {
@@ -458,6 +472,7 @@ type ProcesslistLoadResult = Result<Vec<core_domain::ProcessInfo>, String>;
 type FileLoadResult = Result<(Vec<slowlog_parser::FingerprintStats>, Vec<slowlog_parser::SlowQueryEntry>, std::path::PathBuf), String>;
 
 const MAX_RECENT_TABS: usize = 50;
+const MAX_AI_CONVERSATION_LEN: usize = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum RecentTabEntry {
@@ -1832,6 +1847,8 @@ impl DesktopApp {
         self.collapse_connection_tree(connection_id);
         self.active_connections.remove(connection_id);
         self.loading_connections.remove(connection_id);
+        self.cache_loaded_connections.remove(connection_id);
+        self.schema_cache.clear();
         // 清理选中状态避免自动重连
         if self.selected_connection.as_deref() == Some(connection_id) {
             self.selected_connection = None;
@@ -4450,12 +4467,37 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
+    /// 清理与指定 tab_id 关联的全局 pending 异步操作
+    fn cleanup_pending_for_tab(&mut self, tab_id: &str) {
+        if self.pending_table_preview.as_ref().is_some_and(|(tid, _)| tid == tab_id) {
+            self.pending_table_preview = None;
+        }
+        if self.pending_table_summary.as_ref().is_some_and(|(tid, _)| tid == tab_id) {
+            self.pending_table_summary = None;
+        }
+        if self.pending_schema_summary.as_ref().is_some_and(|(tid, _)| tid == tab_id) {
+            self.pending_schema_summary = None;
+        }
+        if self.pending_routine_summary.as_ref().is_some_and(|(tid, _)| tid == tab_id) {
+            self.pending_routine_summary = None;
+        }
+        self.pending_routine_definition.remove(tab_id);
+    }
+
     fn close_workspace_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
         if index == self.active_tab {
             self.record_recent_tab();
+        }
+        // 关闭前清理异步资源：取消正在执行的查询、丢弃关联的 pending 操作
+        let tab_id = self.tabs[index].tab_id().map(|s| s.to_owned());
+        if let WorkspaceTab::Query(q) = &mut self.tabs[index] {
+            q.abort_sender.take();
+        }
+        if let Some(id) = &tab_id {
+            self.cleanup_pending_for_tab(id);
         }
         self.tabs.remove(index);
         self.tab_back_stack.retain(|i| *i != index);
@@ -7046,6 +7088,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         match (pending_close_tab, pending_active_tab) {
             (Some(usize::MAX), Some(usize::MAX)) => {
                 // 关闭全部 → 回到 Dashboard
+                for tab in self.tabs.iter_mut() {
+                    if let WorkspaceTab::Query(q) = tab {
+                        q.abort_sender.take();
+                    }
+                }
+                let ids: Vec<String> = self.tabs.iter().filter_map(|t| t.tab_id().map(|s| s.to_owned())).collect();
+                for id in &ids {
+                    self.cleanup_pending_for_tab(id);
+                }
+                self.pending_query_execution = None;
                 self.tabs.clear();
                 self.tabs.push(WorkspaceTab::Dashboard);
                 self.scroll_tabs_to_end = true;
@@ -7053,6 +7105,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             (Some(val), Some(keep_index)) if val == usize::MAX - 1 => {
                 // 关闭其他: keep only the clicked tab
+                for (i, tab) in self.tabs.iter_mut().enumerate() {
+                    if i == keep_index { continue; }
+                    if let WorkspaceTab::Query(q) = tab {
+                        q.abort_sender.take();
+                    }
+                }
+                let ids: Vec<String> = self.tabs.iter().enumerate()
+                    .filter(|(i, _)| *i != keep_index)
+                    .filter_map(|(_, t)| t.tab_id().map(|s| s.to_owned()))
+                    .collect();
+                for id in &ids {
+                    self.cleanup_pending_for_tab(id);
+                }
                 self.tabs = vec![self.tabs[keep_index].clone()];
                 if self.active_tab >= self.tabs.len() {
                     self.active_tab = self.tabs.len().saturating_sub(1);
@@ -7060,6 +7125,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             (Some(right_index), Some(keep_index)) if right_index == keep_index => {
                 // 关闭右侧标签: keep 0..=keep_index, remove all after
+                for tab in self.tabs.iter_mut().skip(keep_index + 1) {
+                    if let WorkspaceTab::Query(q) = tab {
+                        q.abort_sender.take();
+                    }
+                }
+                let ids: Vec<String> = self.tabs.iter().skip(keep_index + 1)
+                    .filter_map(|t| t.tab_id().map(|s| s.to_owned()))
+                    .collect();
+                for id in &ids {
+                    self.cleanup_pending_for_tab(id);
+                }
                 let keep_tabs: Vec<_> = (0..=keep_index)
                     .map(|i| self.tabs[i].clone())
                     .collect();
@@ -7767,6 +7843,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             role: AiRole::Assistant,
             content: String::new(),
         });
+        if tab.ai_conversation.len() > MAX_AI_CONVERSATION_LEN {
+            let drain_count = tab.ai_conversation.len() - MAX_AI_CONVERSATION_LEN;
+            tab.ai_conversation.drain(..drain_count);
+        }
 
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         tab.ai_done_rx = Some(done_rx);
@@ -10597,6 +10677,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         role: AiRole::Assistant,
                                                         content: String::new(),
                                                     });
+                                                    if tab.ai_conversation.len() > MAX_AI_CONVERSATION_LEN {
+                                                        let drain_count = tab.ai_conversation.len() - MAX_AI_CONVERSATION_LEN;
+                                                        tab.ai_conversation.drain(..drain_count);
+                                                    }
                                                     tab.ai_streaming_text.clear();
 
                                                     if let Some(ref config) = config {
@@ -13404,7 +13488,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             &mut tab.preview_sort,
                                             &available_columns,
                                         );
-                                        update_filter_value_suggestions(tab);
                                         if tab.show_preview_filter
                                         {
                                             ui.add_space(6.0);
@@ -30315,6 +30398,18 @@ fn update_filter_value_suggestions(tab: &mut TableTabState) {
     if preview.rows.is_empty() {
         return;
     }
+    // 长文本/二进制类型不适合做筛选推荐
+    let long_text_cols: std::collections::HashSet<&str> = tab
+        .definition
+        .as_ref()
+        .map(|def| {
+            def.columns
+                .iter()
+                .filter(|c| is_long_text_type(&c.data_type))
+                .map(|c| c.name.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut map: HashMap<String, HashMap<String, usize>> = tab
         .filter_value_suggestions
         .iter()
@@ -30327,6 +30422,9 @@ fn update_filter_value_suggestions(tab: &mut TableTabState) {
         .collect();
     for row in &preview.rows {
         for col in &preview.columns {
+            if long_text_cols.contains(col.as_str()) {
+                continue;
+            }
             if let Some(QueryCellValue::Text(val)) = row.get(col) {
                 if !val.is_empty() {
                     *map.entry(col.clone()).or_default().entry(val.clone()).or_insert(0) += 1;
@@ -30345,6 +30443,30 @@ fn update_filter_value_suggestions(tab: &mut TableTabState) {
             (col, entries)
         })
         .collect();
+}
+
+fn is_long_text_type(data_type: &str) -> bool {
+    let t = data_type
+        .split('(')
+        .next()
+        .unwrap_or(data_type)
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "text"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "blob"
+            | "tinyblob"
+            | "mediumblob"
+            | "longblob"
+            | "json"
+            | "jsonb"
+            | "xml"
+            | "bytea"
+    )
 }
 
 fn mini_button(ui: &mut egui::Ui, label: &str, style: ButtonStyle) -> egui::Response {
