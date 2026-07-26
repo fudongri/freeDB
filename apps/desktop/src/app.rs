@@ -29458,6 +29458,142 @@ fn current_line_number(sql: &str, cursor_range: Option<egui::text::CCursorRange>
     line
 }
 
+/// 从光标位置查找所在 SQL 语句（以分号为界）
+fn find_statement_at_cursor(sql: &str, cursor_range: Option<egui::text::CCursorRange>) -> Option<String> {
+    let range = cursor_range?;
+    let char_idx = range.primary.index;
+    find_statement_at_index(sql, char_idx)
+}
+
+/// 根据字符索引查找其所在的 SQL 语句（以分号为界，正确处理引号和注释）
+fn find_statement_at_index(sql: &str, char_index: usize) -> Option<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let len = chars.len();
+    if len == 0 { return None; }
+    let ci = char_index.min(len);
+
+    // 向前找上一个未引用分号
+    let mut start = 0usize;
+    let mut in_sq = false; let mut in_dq = false; let mut in_bt = false;
+    let mut in_lc = false; let mut in_bc = false;
+    for i in 0..ci {
+        let ch = chars[i];
+        let next = if i + 1 < len { chars[i + 1] } else { '\0' };
+        if !in_sq && !in_dq && !in_bt && !in_lc && !in_bc {
+            if ch == '-' && next == '-' && (i + 2 >= len || chars[i + 2] == ' ' || chars[i + 2] == '\t' || chars[i + 2] == '\n') { in_lc = true; continue; }
+            if ch == '/' && next == '/' { in_lc = true; continue; }
+            if ch == '#' { in_lc = true; continue; }
+            if ch == '/' && next == '*' { in_bc = true; continue; }
+            if ch == '\'' { in_sq = true; continue; }
+            if ch == '"' { in_dq = true; continue; }
+            if ch == '`' { in_bt = true; continue; }
+            if ch == ';' { start = i + 1; }
+        } else if in_lc {
+            if ch == '\n' { in_lc = false; }
+        } else if in_bc {
+            if ch == '*' && next == '/' { in_bc = false; }
+        } else if in_sq {
+            if ch == '\'' { if next == '\'' { } else { in_sq = false; } }
+        } else if in_dq {
+            if ch == '"' { if next == '"' { } else { in_dq = false; } }
+        } else if in_bt {
+            if ch == '`' { if next == '`' { } else { in_bt = false; } }
+        }
+    }
+
+    // 向后找下一个未引用分号
+    let mut end = len;
+    in_sq = false; in_dq = false; in_bt = false;
+    in_lc = false; in_bc = false;
+    for i in ci..len {
+        let ch = chars[i];
+        let next = if i + 1 < len { chars[i + 1] } else { '\0' };
+        if !in_sq && !in_dq && !in_bt && !in_lc && !in_bc {
+            if ch == '-' && next == '-' && (i + 2 >= len || chars[i + 2] == ' ' || chars[i + 2] == '\t' || chars[i + 2] == '\n') { in_lc = true; continue; }
+            if ch == '/' && next == '/' { in_lc = true; continue; }
+            if ch == '#' { in_lc = true; continue; }
+            if ch == '/' && next == '*' { in_bc = true; continue; }
+            if ch == '\'' { in_sq = true; continue; }
+            if ch == '"' { in_dq = true; continue; }
+            if ch == '`' { in_bt = true; continue; }
+            if ch == ';' { end = i; break; }
+        } else if in_lc {
+            if ch == '\n' { in_lc = false; }
+        } else if in_bc {
+            if ch == '*' && next == '/' { in_bc = false; }
+        } else if in_sq {
+            if ch == '\'' { if next == '\'' { } else { in_sq = false; } }
+        } else if in_dq {
+            if ch == '"' { if next == '"' { } else { in_dq = false; } }
+        } else if in_bt {
+            if ch == '`' { if next == '`' { } else { in_bt = false; } }
+        }
+    }
+
+    let stmt: String = chars[start..end].iter().collect();
+    let trimmed = stmt.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// 返回所有语句起始位置的字符索引（跳过注释和空白）
+fn find_all_statement_starts(sql: &str) -> Vec<usize> {
+    let chars: Vec<char> = sql.chars().collect();
+    let len = chars.len();
+    if len == 0 { return Vec::new(); }
+    let mut starts = Vec::new();
+    // 0=语句间空白/注释, 1=语句内
+    let mut state = 0u8;
+    let mut in_sq = false; let mut in_dq = false; let mut in_bt = false;
+    let mut in_lc = false; let mut in_bc = false;
+    for i in 0..len {
+        let ch = chars[i];
+        let next = if i + 1 < len { chars[i + 1] } else { '\0' };
+        if in_lc {
+            if ch == '\n' { in_lc = false; }
+            continue;
+        }
+        if in_bc {
+            if ch == '*' && next == '/' { in_bc = false; }
+            continue;
+        }
+        if in_sq {
+            if ch == '\'' { if next == '\'' { } else { in_sq = false; } }
+            continue;
+        }
+        if in_dq {
+            if ch == '"' { if next == '"' { } else { in_dq = false; } }
+            continue;
+        }
+        if in_bt {
+            if ch == '`' { if next == '`' { } else { in_bt = false; } }
+            continue;
+        }
+        // 不在任何引号/注释内
+        if ch == '-' && next == '-' && (i + 2 >= len || chars[i + 2] == ' ' || chars[i + 2] == '\t' || chars[i + 2] == '\n') {
+            in_lc = true; continue;
+        }
+        if ch == '/' && next == '/' { in_lc = true; continue; }
+        if ch == '#' { in_lc = true; continue; }
+        if ch == '/' && next == '*' { in_bc = true; continue; }
+        if ch == '\'' { in_sq = true; continue; }
+        if ch == '"' { in_dq = true; continue; }
+        if ch == '`' { in_bt = true; continue; }
+        if ch == ';' {
+            state = 0;
+            continue;
+        }
+        if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
+            continue;
+        }
+        // 实际语句字符
+        if state == 0 {
+            starts.push(i);
+            state = 1;
+        }
+    }
+    starts
+}
+
 fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();
@@ -32006,6 +32142,7 @@ fn render_query_editor(
     );
 
     let mut gutter_rows: Vec<(f32, usize)> = Vec::new();
+    let mut gutter_line_offsets: HashMap<usize, usize> = HashMap::new();
 
     // 编辑器（独立 ScrollArea，不与外层嵌套）
     ui.allocate_ui_at_rect(editor_rect, |ui| {
@@ -32088,6 +32225,20 @@ fn render_query_editor(
 
                         tab.cursor_range = output.cursor_range;
 
+                        // 右键点击时移动光标到点击位置（与左键行为一致）
+                        if output.response.secondary_clicked() {
+                            if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
+                                let galley_local = pointer_pos - output.galley_pos;
+                                let ccursor = output.galley.cursor_from_pos(galley_local);
+                                let new_range = egui::text::CCursorRange::one(ccursor);
+                                if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
+                                    state.cursor.set_char_range(Some(new_range));
+                                    state.store(ui.ctx(), editor_id);
+                                }
+                                tab.cursor_range = Some(new_range);
+                            }
+                        }
+
                         // SQL 变化后重新计算查找匹配（修复编辑 SQL 后高亮偏移过期的问题）
                         if tab.find.open && !tab.find.find_text.is_empty() && tab.find.last_sql != tab.sql && !tab.find.use_regex {
                             tab.find.recompute(&tab.sql);
@@ -32165,10 +32316,14 @@ fn render_query_editor(
                         }
 
                         gutter_rows.clear();
+                        gutter_line_offsets.clear();
                         let mut visual_line = 1usize;
+                        let mut byte_offset_acc = 0usize;
                         for row in &output.galley.rows {
                             let center_y = output.galley_pos.y + row.pos.y + row.height() * 0.5;
                             gutter_rows.push((center_y, visual_line));
+                            gutter_line_offsets.entry(visual_line).or_insert(byte_offset_acc);
+                            byte_offset_acc += row.char_count_including_newline();
                             if row.ends_with_newline {
                                 visual_line += 1;
                             }
@@ -32274,6 +32429,15 @@ fn render_query_editor(
                                             _ => ExecuteMode::Whole,
                                         });
                                         ui.close();
+                                    }
+                                    // 执行当前语句（光标所在语句，以分号为界）
+                                    if let Some(stmt) = find_statement_at_cursor(&tab.sql, tab.cursor_range) {
+                                        let mut stmt_job = egui::text::LayoutJob::default();
+                                        stmt_job.append(tr!("▶ 执行当前语句"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
+                                        if ui.add_enabled(!is_executing, egui::Button::new(stmt_job)).clicked() {
+                                            *action = TabUiAction::ExecuteQuery(ExecuteMode::Explicit(stmt));
+                                            ui.close();
+                                        }
                                     }
                                 });
                                 if tab.editor_focus_requested {
@@ -32489,35 +32653,107 @@ fn render_query_editor(
 
     // 行号跟随 TextEdit 实际 galley 行位置绘制，避免长文本时自估算累计误差
     {
+        let is_executing = tab.abort_sender.is_some();
         let painter = ui.painter();
         let clip_painter = painter.with_clip_rect(gutter_rect);
         clip_painter.rect_filled(gutter_rect, 0.0, palette.gutter_bg);
         let text_x = gutter_rect.right() - 6.0;
+        // 计算所有语句起始位置
+        let stmt_starts = find_all_statement_starts(&tab.sql);
+        // 语句起始字符索引 → visual_line 映射
+        let mut stmt_line_map: HashMap<usize, usize> = HashMap::new();
+        for &sci in &stmt_starts {
+            if let Some((&vl, _)) = gutter_line_offsets.iter()
+                .filter(|(_, off)| **off <= sci)
+                .max_by_key(|(_, off)| **off)
+            {
+                stmt_line_map.insert(sci, vl);
+            }
+        }
+        // 每个 visual_line 对应的语句起始字符索引（用于点击时定位语句）
+        let mut line_stmt_map: HashMap<usize, usize> = HashMap::new();
+        for (&sci, &vl) in &stmt_line_map {
+            line_stmt_map.entry(vl).or_insert(sci);
+        }
+        let play_lines: HashSet<usize> = stmt_line_map.values().copied().collect();
+        let play_lines: HashSet<usize> = stmt_line_map.values().copied().collect();
+        // 光标所在语句的起始行（用于图标/行号高亮）
+        let cursor_char_idx = tab.cursor_range.map(|r| r.primary.index).unwrap_or(0);
+        let cursor_stmt_line = stmt_starts.iter().rev()
+            .find(|&&sci| sci <= cursor_char_idx)
+            .and_then(|sci| stmt_line_map.get(sci).copied());
         let mut last_line: Option<usize> = None;
-        for (center_y, line) in gutter_rows {
-            if last_line == Some(line) {
+        let mut hover_stmt_line: Option<usize> = None;
+        for (center_y, line) in &gutter_rows {
+            if last_line == Some(*line) {
                 continue;
             }
-            last_line = Some(line);
-            let is_current = current_line == line;
+            last_line = Some(*line);
             if center_y + gutter_row_height * 0.5 < gutter_rect.top()
                 || center_y - gutter_row_height * 0.5 > gutter_rect.bottom()
             {
                 continue;
             }
-            if is_current {
+            let is_play_line = play_lines.contains(line) && !is_executing;
+            // 所有语句起始行显示背景高亮
+            if is_play_line {
                 let highlight_rect = egui::Rect::from_min_max(
                     egui::pos2(gutter_rect.left() + 2.0, center_y - gutter_row_height * 0.5),
                     egui::pos2(gutter_rect.right() - 2.0, center_y + gutter_row_height * 0.5),
                 );
                 clip_painter.rect_filled(highlight_rect, colors.radius_md, palette.current_line_bg);
             }
+            // 语句起始行左侧显示执行按钮
+            if is_play_line {
+                let play_rect = egui::Rect::from_center_size(
+                    egui::pos2(gutter_rect.left() + 10.0, *center_y),
+                    egui::vec2(gutter_row_height - 4.0, gutter_row_height - 4.0),
+                );
+                let play_resp = ui.allocate_rect(play_rect, egui::Sense::click());
+                let play_hovered = play_resp.hovered();
+                let play_clicked = play_resp.clicked();
+                if play_hovered {
+                    hover_stmt_line = Some(*line);
+                }
+                let play_color = if play_hovered {
+                    colors.accent_button_text
+                } else if cursor_stmt_line == Some(*line) {
+                    palette.line_number_active
+                } else {
+                    palette.line_number
+                };
+                clip_painter.text(
+                    play_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "▶",
+                    FontId::new(fonts.code * 0.7, FontFamily::Monospace),
+                    play_color,
+                );
+                play_resp.on_hover_text(tr!("执行当前语句"));
+                if play_clicked {
+                    if let Some(&sci) = line_stmt_map.get(line) {
+                        // 移动光标到语句起始位置
+                        let eid = egui::Id::from(format!("query-editor-{}", tab.id));
+                        if let Some(mut state) = TextEdit::load_state(ui.ctx(), eid) {
+                            state.cursor.set_char_range(Some(
+                                egui::text::CCursorRange::one(egui::text::CCursor::new(sci)),
+                            ));
+                            state.store(ui.ctx(), eid);
+                        }
+                        if let Some(stmt) = find_statement_at_index(&tab.sql, sci) {
+                            *action = TabUiAction::ExecuteQuery(ExecuteMode::Explicit(stmt));
+                        }
+                    }
+                }
+            }
+            // 行号始终显示（右侧）
+            let num_active = cursor_stmt_line == Some(*line) || hover_stmt_line == Some(*line);
             clip_painter.text(
-                egui::pos2(text_x, center_y),
+                egui::pos2(text_x, *center_y),
                 Align2::RIGHT_CENTER,
                 line.to_string(),
                 FontId::new(fonts.code, FontFamily::Monospace),
-                if is_current { palette.line_number_active } else { palette.line_number },
+                if num_active { palette.line_number_active } else { palette.line_number },
             );
         }
     }

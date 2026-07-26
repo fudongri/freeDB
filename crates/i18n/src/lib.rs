@@ -738,6 +738,8 @@ fn en(key: &'static str) -> &'static str {
         "▶ 执行选中语句" => "▶ Execute Selected",
         "执行选中语句" => "Execute Selected",
         "执行选中语句 ({}+R)" => "Execute Selected ({}+R)",
+        "▶ 执行当前语句" => "▶ Execute Current Statement",
+        "执行当前语句" => "Execute Current Statement",
         "✕ 取消编辑" => "✕ Cancel Edit",
         "● {} 处未保存的修改" => "● {} unsaved change(s)",
         "{} 条日志" => "{} log entries",
