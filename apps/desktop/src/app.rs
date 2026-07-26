@@ -10387,7 +10387,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 }
                                             }
                                         } else {
-                                            let result_action = render_result_table(ui, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag, &mut tab.result_column_widths, &mut tab.result_column_resize_drag, &mut tab.result_row_number_width, &mut tab.result_row_num_resize_drag);
+                                            let result_action = render_result_table(ui, &tab.id, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag, &mut tab.result_column_widths, &mut tab.result_column_resize_drag, &mut tab.result_row_number_width, &mut tab.result_row_num_resize_drag, &mut sel.cell_selection_anchor, &mut sel.cell_selection_current, &mut sel.cell_selection_drag_started);
                                             if !matches!(result_action.action, TabUiAction::None) {
                                                 action = result_action.action;
                                             }
@@ -20050,6 +20050,7 @@ struct ResultTableActionResult {
 
 fn render_result_table(
     ui: &mut egui::Ui,
+    tab_id: &str,
     result: &mut QueryResult,
     sort_state: &mut TableSortState,
     sql_driven_sort: bool,
@@ -20064,6 +20065,9 @@ fn render_result_table(
     result_column_resize_drag: &mut Option<(usize, f32)>,
     row_number_width: &mut f32,
     row_num_resize_drag: &mut Option<f32>,
+    cell_selection_anchor: &mut Option<(usize, usize)>,
+    cell_selection_current: &mut Option<(usize, usize)>,
+    cell_selection_drag_started: &mut bool,
 ) -> ResultTableActionResult {
     let palette = mac_ui_palette_from_ui(ui);
     if result.columns.is_empty() {
@@ -20383,17 +20387,61 @@ fn render_result_table(
                                         let column_selected = selected_columns.contains(&col_idx);
                                         let search_highlight = search.open && search.match_set.contains(&(index, col_idx));
                                         let is_current_match = current_match_pos == Some((index, col_idx));
-                                        table_body_cell(
+                                        let cell_value = row.get(column).unwrap_or(&QueryCellValue::Null);
+                                        let in_selection = query_cell_in_selection(*cell_selection_anchor, *cell_selection_current, index, col_idx);
+                                        let (response, _, _) = render_table_body_interactive_cell(
                                             ui,
                                             &palette,
                                             fill,
-                                            row.get(column).unwrap_or(&QueryCellValue::Null),
+                                            cell_value,
+                                            false,
                                             false,
                                             column_selected,
                                             search_highlight,
                                             is_current_match,
                                             &search.committed_keyword,
+                                            true,
+                                            in_selection,
+                                            false,
+                                            false,
+                                            "",
+                                            false,
+                                            None,
                                         );
+                                        // 矩形选区交互
+                                        let pointer_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                        let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                        let pointer_just_released = ui.input(|i| i.pointer.primary_released());
+                                        let cell_contains_pointer = response.contains_pointer();
+
+                                        if response.is_pointer_button_down_on()
+                                            && pointer_pressed
+                                            && !*cell_selection_drag_started
+                                            && result_column_resize_drag.is_none()
+                                            && (cell_selection_anchor.is_none()
+                                                || cell_selection_anchor.is_some_and(|a| a != (index, col_idx)))
+                                        {
+                                            *cell_selection_anchor = Some((index, col_idx));
+                                            *cell_selection_current = Some((index, col_idx));
+                                            *cell_selection_drag_started = true;
+                                            *selected_row = None;
+                                            selected_rows.clear();
+                                            *selection_anchor = None;
+                                            selected_columns.clear();
+                                            let editor_id = egui::Id::from(format!("query-editor-{}", tab_id));
+                                            ui.ctx().memory_mut(|mem| mem.surrender_focus(editor_id));
+                                        }
+                                        if *cell_selection_drag_started
+                                            && pointer_down
+                                            && cell_contains_pointer
+                                            && cell_selection_anchor.is_some()
+                                            && result_column_resize_drag.is_none()
+                                        {
+                                            *cell_selection_current = Some((index, col_idx));
+                                        }
+                                        if pointer_just_released && cell_selection_anchor.is_some() {
+                                            *cell_selection_drag_started = false;
+                                        }
                                     });
                                 }
                                 row_ui.col(|ui| {
