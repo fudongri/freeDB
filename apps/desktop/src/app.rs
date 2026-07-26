@@ -32078,7 +32078,7 @@ fn render_query_editor(
             .rect
             .width()
     });
-    let gutter_width = (gutter_text_width + 12.0).max(42.0);
+    let gutter_width = (gutter_text_width + 28.0).max(56.0);
     let gutter_row_height = row_height + 2.0;
 
     // ── 查找/替换栏 ──
