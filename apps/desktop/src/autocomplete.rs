@@ -873,7 +873,22 @@ enum MongoContext {
     NotMongo,
 }
 
+/// 将字节索引安全地钳制到最近的 UTF-8 字符边界
+fn clamp_to_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    loop {
+        if s.is_char_boundary(i) {
+            return i;
+        }
+        i -= 1;
+    }
+}
+
 fn detect_mongo_context(sql: &str, cursor: usize) -> MongoContext {
+    let cursor = clamp_to_char_boundary(sql, cursor);
     let before = &sql[..cursor];
     if !before.starts_with("db.") && !before.contains("\ndb.") {
         return MongoContext::NotMongo;
