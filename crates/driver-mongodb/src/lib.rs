@@ -1317,6 +1317,12 @@ fn preprocess_mongo_json(input: &str) -> String {
                         out.push('"');
                         in_string = false;
                         break;
+                    } else if sc == '\n' {
+                        out.push_str("\\n");
+                    } else if sc == '\r' {
+                        out.push_str("\\r");
+                    } else if sc == '\t' {
+                        out.push_str("\\t");
                     } else {
                         out.push(sc);
                     }
@@ -1340,6 +1346,12 @@ fn preprocess_mongo_json(input: &str) -> String {
                 } else if sc == '"' {
                     out.push('\\');
                     out.push('"');
+                } else if sc == '\n' {
+                    out.push_str("\\n");
+                } else if sc == '\r' {
+                    out.push_str("\\r");
+                } else if sc == '\t' {
+                    out.push_str("\\t");
                 } else {
                     out.push(sc);
                 }
@@ -1704,6 +1716,14 @@ mod tests {
         assert_eq!(v["hobbies"][1], "reading", "hobbies[1] mismatch");
         assert_eq!(v["address"]["city"], "北京", "address.city mismatch");
         assert_eq!(v["address"]["district"], "海淀", "address.district mismatch");
+    }
+
+    #[test]
+    fn test_preprocess_multiline_string() {
+        let input = "{key: 'line1\nline2\ttab'}";
+        let result = preprocess_mongo_json(input);
+        let v: serde_json::Value = serde_json::from_str(&result).expect("failed to parse JSON");
+        assert_eq!(v["key"], "line1\nline2\ttab");
     }
 
     #[test]
