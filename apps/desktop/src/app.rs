@@ -32144,6 +32144,12 @@ fn render_query_editor(
     let mut gutter_rows: Vec<(f32, usize)> = Vec::new();
     let mut gutter_line_offsets: HashMap<usize, usize> = HashMap::new();
 
+    // 预计算可视行数（基于稳定的编辑器高度，避免在 ScrollArea 内部
+    // 使用 ui.available_height() 导致滚动时帧间抖动）
+    // inner_margin(symmetric(12, 10)) 上下各 10px，共 20px
+    let editor_content_height = (remaining_editor_height - 20.0).max(20.0);
+    let visible_rows = ((editor_content_height / gutter_row_height).ceil() as usize).max(1);
+
     // 编辑器（独立 ScrollArea，不与外层嵌套）
     ui.allocate_ui_at_rect(editor_rect, |ui| {
         egui::Frame::new()
@@ -32151,7 +32157,7 @@ fn render_query_editor(
             .inner_margin(egui::Margin::symmetric(12, 10))
             .show(ui, |ui| {
                 let available_height = ui.available_height();
-                
+
                 let scroll_area_output = egui::ScrollArea::vertical()
                     .id_salt(format!("query-editor-scroll-{}", tab.id))
                     .max_height(available_height)
@@ -32159,8 +32165,6 @@ fn render_query_editor(
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let editor_available_width = ui.available_width();
-                        // 估算可视区域能容纳的行数，确保 TextEdit 交互区填满整个编辑器
-                        let visible_rows = ((ui.available_height() / gutter_row_height).ceil() as usize).max(1);
                         let saved_cursor = tab.cursor_range;
                         // For multi-cursor edit replication: snapshot before TextEdit processes input.
                         // Clone sql BEFORE giving a &mut to TextEdit (avoids borrow conflict).
@@ -32658,6 +32662,9 @@ fn render_query_editor(
         let clip_painter = painter.with_clip_rect(gutter_rect);
         clip_painter.rect_filled(gutter_rect, 0.0, palette.gutter_bg);
         let text_x = gutter_rect.right() - 6.0;
+        // 整个 gutter 统一一次分配用于交互检测，避免逐按钮 allocate_rect 导致抖动
+        let gutter_resp = ui.allocate_rect(gutter_rect, egui::Sense::click());
+        let pointer_pos = gutter_resp.hovered().then(|| ui.ctx().pointer_latest_pos()).flatten();
         // 计算所有语句起始位置
         let stmt_starts = find_all_statement_starts(&tab.sql);
         // 语句起始字符索引 → visual_line 映射
@@ -32676,7 +32683,6 @@ fn render_query_editor(
             line_stmt_map.entry(vl).or_insert(sci);
         }
         let play_lines: HashSet<usize> = stmt_line_map.values().copied().collect();
-        let play_lines: HashSet<usize> = stmt_line_map.values().copied().collect();
         // 光标所在语句的起始行（用于图标/行号高亮）
         let cursor_char_idx = tab.cursor_range.map(|r| r.primary.index).unwrap_or(0);
         let cursor_stmt_line = stmt_starts.iter().rev()
@@ -32684,6 +32690,7 @@ fn render_query_editor(
             .and_then(|sci| stmt_line_map.get(sci).copied());
         let mut last_line: Option<usize> = None;
         let mut hover_stmt_line: Option<usize> = None;
+        let mut clicked_stmt_line: Option<usize> = None;
         for (center_y, line) in &gutter_rows {
             if last_line == Some(*line) {
                 continue;
@@ -32703,17 +32710,19 @@ fn render_query_editor(
                 );
                 clip_painter.rect_filled(highlight_rect, colors.radius_md, palette.current_line_bg);
             }
-            // 语句起始行左侧显示执行按钮
+            // 语句起始行左侧显示执行按钮（交互由 gutter_resp 统一处理）
             if is_play_line {
                 let play_rect = egui::Rect::from_center_size(
                     egui::pos2(gutter_rect.left() + 10.0, *center_y),
                     egui::vec2(gutter_row_height - 4.0, gutter_row_height - 4.0),
                 );
-                let play_resp = ui.allocate_rect(play_rect, egui::Sense::click());
-                let play_hovered = play_resp.hovered();
-                let play_clicked = play_resp.clicked();
+                let play_hovered = pointer_pos.is_some_and(|p| play_rect.contains(p));
                 if play_hovered {
                     hover_stmt_line = Some(*line);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if play_hovered && gutter_resp.clicked() {
+                    clicked_stmt_line = Some(*line);
                 }
                 let play_color = if play_hovered {
                     colors.accent_button_text
@@ -32729,22 +32738,6 @@ fn render_query_editor(
                     FontId::new(fonts.code * 0.7, FontFamily::Monospace),
                     play_color,
                 );
-                play_resp.on_hover_text(tr!("执行当前语句"));
-                if play_clicked {
-                    if let Some(&sci) = line_stmt_map.get(line) {
-                        // 移动光标到语句起始位置
-                        let eid = egui::Id::from(format!("query-editor-{}", tab.id));
-                        if let Some(mut state) = TextEdit::load_state(ui.ctx(), eid) {
-                            state.cursor.set_char_range(Some(
-                                egui::text::CCursorRange::one(egui::text::CCursor::new(sci)),
-                            ));
-                            state.store(ui.ctx(), eid);
-                        }
-                        if let Some(stmt) = find_statement_at_index(&tab.sql, sci) {
-                            *action = TabUiAction::ExecuteQuery(ExecuteMode::Explicit(stmt));
-                        }
-                    }
-                }
             }
             // 行号始终显示（右侧）
             let num_active = cursor_stmt_line == Some(*line) || hover_stmt_line == Some(*line);
@@ -32756,8 +32749,22 @@ fn render_query_editor(
                 if num_active { palette.line_number_active } else { palette.line_number },
             );
         }
+        // 统一处理点击（移到循环外避免 borrow 冲突）
+        if let Some(line) = clicked_stmt_line {
+            if let Some(&sci) = line_stmt_map.get(&line) {
+                let eid = egui::Id::from(format!("query-editor-{}", tab.id));
+                if let Some(mut state) = TextEdit::load_state(ui.ctx(), eid) {
+                    state.cursor.set_char_range(Some(
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(sci)),
+                    ));
+                    state.store(ui.ctx(), eid);
+                }
+                if let Some(stmt) = find_statement_at_index(&tab.sql, sci) {
+                    *action = TabUiAction::ExecuteQuery(ExecuteMode::Explicit(stmt));
+                }
+            }
+        }
     }
-    ui.allocate_rect(gutter_rect, egui::Sense::hover());
 }
 
 /// 已保存查询折叠面板
