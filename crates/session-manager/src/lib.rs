@@ -222,6 +222,7 @@ impl SessionManager {
 
     /// 批量执行 SQL 语句，所有语句在同一个连接上按顺序执行。
     /// 用于保持 MySQL 用户变量（@var）在语句间的持久性。
+    /// 遇到临时性连接错误时自动重连并重试当前语句（最多 max_retries 次）
     pub async fn execute_sql_batch(
         &self,
         profile: &ConnectionProfile,
@@ -232,41 +233,67 @@ impl SessionManager {
     ) -> Vec<AppResult<QueryResult>> {
         let db_owned = database.or(profile.default_database.as_deref());
         let db: Option<&str> = db_owned;
-        let handle = match self.pool.acquire(profile, password, db).await {
+        let mut handle = match self.pool.acquire(profile, password, db).await {
             Ok(h) => h,
             Err(e) => {
-                // 所有语句都返回同一个错误
                 return statements.into_iter().map(|_| Err(e.clone_error())).collect();
             }
         };
-        let mut guard = handle.lock().await;
-        let h: &mut driver_api::ConnectionHandle = &mut *guard;
-        let d: &dyn DatabaseDriver = match profile.kind {
-            DatabaseKind::Postgres => &self.pool.postgres,
-            DatabaseKind::MySql => &self.pool.mysql,
-            DatabaseKind::MongoDb => &self.pool.mongodb,
-        };
         let mut results = Vec::with_capacity(statements.len());
         for stmt in statements {
-            let exec = QueryExecution {
-                connection_id: connection_id.to_string(),
-                database: db.map(|s| s.to_string()),
-                sql: stmt,
-            };
-            match d.execute_sql(h, exec).await {
-                Ok(r) => results.push(Ok(r)),
-                Err(e) => {
-                    results.push(Err(e));
-                    break; // 出错后停止执行后续语句
+            let mut attempt = 0u32;
+            loop {
+                let mut guard = handle.lock().await;
+                let h: &mut driver_api::ConnectionHandle = &mut *guard;
+                let d: &dyn DatabaseDriver = match profile.kind {
+                    DatabaseKind::Postgres => &self.pool.postgres,
+                    DatabaseKind::MySql => &self.pool.mysql,
+                    DatabaseKind::MongoDb => &self.pool.mongodb,
+                };
+                let exec = QueryExecution {
+                    connection_id: connection_id.to_string(),
+                    database: db.map(|s| s.to_string()),
+                    sql: stmt.clone(),
+                };
+                match d.execute_sql(h, exec).await {
+                    Ok(r) => {
+                        drop(guard);
+                        results.push(Ok(r));
+                        break;
+                    }
+                    Err(e) if self.is_retryable(&e) && attempt < self.retry.max_retries => {
+                        attempt += 1;
+                        let backoff = self.backoff_ms(attempt);
+                        tracing::warn!(
+                            connection_id = %profile.id, attempt, backoff_ms = backoff, error = %e,
+                            "操作失败（可重试），驱逐连接后重连"
+                        );
+                        drop(guard);
+                        self.pool.evict(&profile.id);
+                        self.set_reconnecting(connection_id, Some(&e));
+                        sleep(Duration::from_millis(backoff)).await;
+                        match self.pool.acquire(profile, password, db).await {
+                            Ok(h) => { handle = h; }
+                            Err(acquire_err) => {
+                                results.push(Err(acquire_err));
+                                return results;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        drop(guard);
+                        results.push(Err(e));
+                        return results;
+                    }
                 }
             }
         }
-        drop(guard);
         self.set_connected(connection_id);
         results
     }
 
     /// 逐条执行 SQL，每条完成即通过回调返回结果（用于实时推送消息）
+    /// 遇到临时性连接错误时自动重连并重试当前语句（最多 max_retries 次）
     pub async fn execute_sql_batch_streaming(
         &self,
         profile: &ConnectionProfile,
@@ -278,7 +305,7 @@ impl SessionManager {
     ) {
         let db_owned = database.or(profile.default_database.as_deref());
         let db: Option<&str> = db_owned;
-        let handle = match self.pool.acquire(profile, password, db).await {
+        let mut handle = match self.pool.acquire(profile, password, db).await {
             Ok(h) => h,
             Err(e) => {
                 for stmt in statements {
@@ -287,25 +314,58 @@ impl SessionManager {
                 return;
             }
         };
-        let mut guard = handle.lock().await;
-        let h: &mut driver_api::ConnectionHandle = &mut *guard;
-        let d: &dyn DatabaseDriver = match profile.kind {
-            DatabaseKind::Postgres => &self.pool.postgres,
-            DatabaseKind::MySql => &self.pool.mysql,
-            DatabaseKind::MongoDb => &self.pool.mongodb,
-        };
         for stmt in statements {
-            let exec = QueryExecution {
-                connection_id: connection_id.to_string(),
-                database: db.map(|s| s.to_string()),
-                sql: stmt.clone(),
-            };
-            let result = d.execute_sql(h, exec).await;
-            let is_err = result.is_err();
-            let cont = on_result(stmt, result);
-            if is_err || !cont { break; }
+            let mut attempt = 0u32;
+            loop {
+                let mut guard = handle.lock().await;
+                let h: &mut driver_api::ConnectionHandle = &mut *guard;
+                let d: &dyn DatabaseDriver = match profile.kind {
+                    DatabaseKind::Postgres => &self.pool.postgres,
+                    DatabaseKind::MySql => &self.pool.mysql,
+                    DatabaseKind::MongoDb => &self.pool.mongodb,
+                };
+                let exec = QueryExecution {
+                    connection_id: connection_id.to_string(),
+                    database: db.map(|s| s.to_string()),
+                    sql: stmt.clone(),
+                };
+                match d.execute_sql(h, exec).await {
+                    Ok(result) => {
+                        drop(guard);
+                        if !on_result(stmt, Ok(result)) { return; }
+                        break;
+                    }
+                    Err(e) if self.is_retryable(&e) && attempt < self.retry.max_retries => {
+                        attempt += 1;
+                        let backoff = self.backoff_ms(attempt);
+                        tracing::warn!(
+                            connection_id = %profile.id,
+                            attempt,
+                            backoff_ms = backoff,
+                            error = %e,
+                            "操作失败（可重试），驱逐连接后重连"
+                        );
+                        drop(guard);
+                        self.pool.evict(&profile.id);
+                        self.set_reconnecting(connection_id, Some(&e));
+                        sleep(Duration::from_millis(backoff)).await;
+                        match self.pool.acquire(profile, password, db).await {
+                            Ok(h) => { handle = h; }
+                            Err(acquire_err) => {
+                                tracing::error!(connection_id = %profile.id, error = %acquire_err, "重连失败");
+                                on_result(stmt, Err(acquire_err));
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        drop(guard);
+                        if !on_result(stmt, Err(e)) { return; }
+                        break;
+                    }
+                }
+            }
         }
-        drop(guard);
         self.set_connected(connection_id);
     }
 
