@@ -10,7 +10,7 @@ Unicode true
 ; Metadata
 
 !define PRODUCT_NAME "FreeDB"
-!define PRODUCT_VERSION "1.1.6"
+!define PRODUCT_VERSION "1.1.7"
 !define PRODUCT_PUBLISHER "FreeDB Contributors"
 !define PRODUCT_WEB_SITE "https://github.com/fudongri/freedb"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\freedb.exe"
