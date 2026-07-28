@@ -32229,17 +32229,30 @@ fn render_query_editor(
 
                         tab.cursor_range = output.cursor_range;
 
-                        // 右键点击时移动光标到点击位置（与左键行为一致）
+                        // 右键点击时：若点击位置在已选区域内则保留选择，否则移动光标
                         if output.response.secondary_clicked() {
                             if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
                                 let galley_local = pointer_pos - output.galley_pos;
                                 let ccursor = output.galley.cursor_from_pos(galley_local);
-                                let new_range = egui::text::CCursorRange::one(ccursor);
-                                if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
-                                    state.cursor.set_char_range(Some(new_range));
-                                    state.store(ui.ctx(), editor_id);
+                                let current_range = tab.cursor_range;
+                                let click_in_selection = current_range.is_some_and(|r| {
+                                    !r.is_empty() && {
+                                        let (start, end) = if r.primary.index <= r.secondary.index {
+                                            (r.primary.index, r.secondary.index)
+                                        } else {
+                                            (r.secondary.index, r.primary.index)
+                                        };
+                                        ccursor.index >= start && ccursor.index <= end
+                                    }
+                                });
+                                if !click_in_selection {
+                                    let new_range = egui::text::CCursorRange::one(ccursor);
+                                    if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
+                                        state.cursor.set_char_range(Some(new_range));
+                                        state.store(ui.ctx(), editor_id);
+                                    }
+                                    tab.cursor_range = Some(new_range);
                                 }
-                                tab.cursor_range = Some(new_range);
                             }
                         }
 
