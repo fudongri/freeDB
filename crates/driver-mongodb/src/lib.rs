@@ -8,7 +8,7 @@ use futures::stream::TryStreamExt;
 use i18n::tr;
 use mongodb::bson::{doc, Bson, Document};
 use mongodb::options::{ClientOptions, FindOptions, ListCollectionsOptions, SelectionCriteria};
-use mongodb::Client;
+use mongodb::{Client, IndexModel};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
@@ -879,6 +879,234 @@ async fn execute_mongo_command(
                     Some(tr!("已创建集合: {}").replace("{}", &parsed.collection)),
                     HashMap::new(),
                 ))
+            }
+            "dropIndex" => {
+                let name = parse_string_arg(&parsed.args)
+                    .ok_or_else(|| AppError::Validation(tr!("dropIndex 需要一个索引名称参数").into()))?;
+                coll.drop_index(name)
+                    .await
+                    .map_err(map_mongo_error)?;
+                Ok((
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some(tr!("已删除索引: {}").replace("{}", &parsed.args)),
+                    HashMap::new(),
+                ))
+            }
+            "dropIndexes" => {
+                coll.drop_indexes()
+                    .await
+                    .map_err(map_mongo_error)?;
+                Ok((
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some(tr!("已删除集合 {} 的所有索引").replace("{}", &parsed.collection)),
+                    HashMap::new(),
+                ))
+            }
+            "createIndex" => {
+                let parts: Vec<_> = split_top_level_args(&parsed.args);
+                let keys = parse_jsonish_doc(parts[0].clone())?;
+                let mut model_doc = doc! { "key": keys };
+                if parts.len() >= 2 {
+                    let opts = parse_jsonish_doc(parts[1].clone())?;
+                    for (k, v) in opts { model_doc.insert(k, v); }
+                }
+                let model: IndexModel = mongodb::bson::from_document(model_doc)
+                    .map_err(|e| AppError::Query(e.to_string()))?;
+                coll.create_index(model)
+                    .await
+                    .map_err(map_mongo_error)?;
+                Ok((
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some(tr!("已创建索引").to_string()),
+                    HashMap::new(),
+                ))
+            }
+            "createIndexes" => {
+                let trimmed = parsed.args.trim();
+                let inner = trimmed
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or(trimmed);
+                let parts = split_top_level_args(inner);
+                let mut indexes = Vec::new();
+                for part in parts {
+                    let doc = parse_jsonish_doc(part)?;
+                    let model: IndexModel = mongodb::bson::from_document(doc)
+                        .map_err(|e| AppError::Query(e.to_string()))?;
+                    indexes.push(model);
+                }
+                let count = indexes.len();
+                coll.create_indexes(indexes)
+                    .await
+                    .map_err(map_mongo_error)?;
+                Ok((
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some(tr!("已创建 {} 个索引").replace("{}", &count.to_string())),
+                    HashMap::new(),
+                ))
+            }
+            "listIndexes" => {
+                let mut cursor = coll.list_indexes()
+                    .await
+                    .map_err(map_mongo_error)?;
+                let mut columns = vec!["name".to_string(), "keys".to_string(), "options".to_string()];
+                let mut rows = Vec::new();
+                while cursor.advance().await.map_err(map_mongo_error)? {
+                    let doc = cursor.current();
+                    let name = doc.get_str("name").unwrap_or("").to_string();
+                    let keys = doc.get_document("key").ok()
+                        .and_then(|k| Document::try_from(k).ok())
+                        .map(|k| serde_json::to_string(&k).unwrap_or_default())
+                        .unwrap_or_default();
+                    let mut opts_str = String::new();
+                    if let Ok(unique) = doc.get_bool("unique") {
+                        opts_str = format!("unique: {}", unique);
+                    }
+                    let mut row = BTreeMap::new();
+                    row.insert("name".to_string(), QueryCellValue::Text(name));
+                    row.insert("keys".to_string(), QueryCellValue::Text(keys));
+                    row.insert("options".to_string(), QueryCellValue::Text(opts_str));
+                    rows.push(row);
+                }
+                Ok((columns, rows, None, None, HashMap::new()))
+            }
+            "replaceOne" => {
+                let parts: Vec<_> = split_top_level_args(&parsed.args);
+                if parts.is_empty() {
+                    return Err(AppError::Validation(tr!("replaceOne 需要 filter 参数").into()));
+                }
+                let filter = parse_jsonish_doc(parts[0].clone())?;
+                let replacement = if parts.len() >= 2 {
+                    parse_jsonish_doc(parts[1].clone())?
+                } else {
+                    return Err(AppError::Validation(tr!("replaceOne 需要 replacement 参数").into()));
+                };
+                let result = coll
+                    .replace_one(filter, &replacement)
+                    .await
+                    .map_err(map_mongo_error)?;
+                Ok((
+                    Vec::new(),
+                    Vec::new(),
+                    Some(result.modified_count),
+                    Some(tr!("已替换 {} 条记录").replace("{}", &result.modified_count.to_string())),
+                    HashMap::new(),
+                ))
+            }
+            "findOneAndUpdate" => {
+                let parts: Vec<_> = split_top_level_args(&parsed.args);
+                if parts.len() < 2 {
+                    return Err(AppError::Validation(tr!("findOneAndUpdate 需要 filter 和 update 两个参数").into()));
+                }
+                let filter = parse_jsonish_doc(parts[0].clone())?;
+                let update = parse_jsonish_doc(parts[1].clone())?;
+                let result = coll
+                    .find_one_and_update(filter, update)
+                    .await
+                    .map_err(map_mongo_error)?;
+                match result {
+                    Some(doc) => {
+                        let mut columns = Vec::new();
+                        let mut row = BTreeMap::new();
+                        for (key, value) in &doc {
+                            columns.push(key.clone());
+                            row.insert(key.clone(), bson_to_cell(Some(value)));
+                        }
+                        Ok((columns, vec![row], None, None, HashMap::new()))
+                    }
+                    None => Ok((Vec::new(), Vec::new(), None, Some("null".to_string()), HashMap::new())),
+                }
+            }
+            "findOneAndDelete" => {
+                let filter = parse_single_doc(&parsed.args).unwrap_or_default();
+                let result = coll
+                    .find_one_and_delete(filter)
+                    .await
+                    .map_err(map_mongo_error)?;
+                match result {
+                    Some(doc) => {
+                        let mut columns = Vec::new();
+                        let mut row = BTreeMap::new();
+                        for (key, value) in &doc {
+                            columns.push(key.clone());
+                            row.insert(key.clone(), bson_to_cell(Some(value)));
+                        }
+                        Ok((columns, vec![row], None, None, HashMap::new()))
+                    }
+                    None => Ok((Vec::new(), Vec::new(), None, Some("null".to_string()), HashMap::new())),
+                }
+            }
+            "findOneAndReplace" => {
+                let parts: Vec<_> = split_top_level_args(&parsed.args);
+                if parts.len() < 2 {
+                    return Err(AppError::Validation(tr!("findOneAndReplace 需要 filter 和 replacement 两个参数").into()));
+                }
+                let filter = parse_jsonish_doc(parts[0].clone())?;
+                let replacement = parse_jsonish_doc(parts[1].clone())?;
+                let result = coll
+                    .find_one_and_replace(filter, &replacement)
+                    .await
+                    .map_err(map_mongo_error)?;
+                match result {
+                    Some(doc) => {
+                        let mut columns = Vec::new();
+                        let mut row = BTreeMap::new();
+                        for (key, value) in &doc {
+                            columns.push(key.clone());
+                            row.insert(key.clone(), bson_to_cell(Some(value)));
+                        }
+                        Ok((columns, vec![row], None, None, HashMap::new()))
+                    }
+                    None => Ok((Vec::new(), Vec::new(), None, Some("null".to_string()), HashMap::new())),
+                }
+            }
+            "estimatedDocumentCount" => {
+                let count = coll
+                    .estimated_document_count()
+                    .await
+                    .map_err(map_mongo_error)?;
+                let columns = vec!["count".to_string()];
+                let mut row = BTreeMap::new();
+                row.insert("count".to_string(), QueryCellValue::Text(count.to_string()));
+                Ok((columns, vec![row], None, None, HashMap::new()))
+            }
+            "renameCollection" => {
+                let new_name = parse_string_arg(&parsed.args)
+                    .ok_or_else(|| AppError::Validation(tr!("renameCollection 需要新集合名称").into()))?;
+                let from_ns = format!("{}.{}", db_name, parsed.collection);
+                let to_ns = format!("{}.{}", db_name, new_name);
+                db.run_command(doc! {
+                    "renameCollection": from_ns,
+                    "to": to_ns
+                })
+                    .await
+                    .map_err(map_mongo_error)?;
+                Ok((
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some(tr!("已将集合重命名为: {}").replace("{}", &format!("{} → {}", parsed.collection, new_name))),
+                    HashMap::new(),
+                ))
+            }
+            "collStats" | "stats" => {
+                let result = db
+                    .run_command(doc! { "collStats": &parsed.collection })
+                    .await
+                    .map_err(map_mongo_error)?;
+                let json = serde_json::to_string_pretty(&result).unwrap_or_else(|_| format!("{:?}", result));
+                let columns = vec!["stats".to_string()];
+                let mut row = BTreeMap::new();
+                row.insert("stats".to_string(), QueryCellValue::Text(json));
+                Ok((columns, vec![row], None, None, HashMap::new()))
             }
             _ => Err(AppError::Query(format!(
                 "unsupported method: {}",
