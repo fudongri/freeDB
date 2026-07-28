@@ -103,6 +103,7 @@ pub struct DesktopApp {
     search_keyword: String,
     committed_search: String, // 搜索关键字（失焦确认，仅清空搜索框时清除）
     search_field_focused: bool, // 上一帧搜索框有焦点
+    pre_search_expanded: Option<HashSet<String>>, // 搜索前的展开状态快照，用于搜索结束后恢复
     tabs: Vec<WorkspaceTab>,
     active_tab: usize,
     status_message: String,
@@ -1660,6 +1661,7 @@ impl DesktopApp {
             search_keyword: String::new(),
             committed_search: String::new(),
             search_field_focused: false,
+            pre_search_expanded: None,
             tabs: vec![WorkspaceTab::Dashboard],
             active_tab: 0,
             status_message: tr!("就绪").into(),
@@ -5563,6 +5565,35 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .show(ui, |ui| {
                 let keyword = self.committed_search.to_ascii_lowercase();
                 let is_searching = !keyword.is_empty();
+
+                // 搜索开始：保存展开状态，自动展开匹配路径；搜索结束：恢复原状态
+                let prev_keyword = self.pre_search_expanded.as_ref().map(|_| true);
+                let has_keyword = is_searching;
+                match (prev_keyword.is_some(), has_keyword) {
+                    (false, true) => {
+                        // 搜索开始：保存当前展开状态，自动展开匹配路径
+                        self.pre_search_expanded = Some(self.expanded_nodes.clone());
+                        let children_by_node = self.children_by_node.clone();
+                        for conn in &self.connections {
+                            if self.tree_contains_keyword(&conn.id, &keyword) {
+                                self.expanded_nodes.insert(conn.id.clone());
+                            }
+                            if let Some(roots) = self.roots_by_connection.get(&conn.id).cloned() {
+                                for root in &roots {
+                                    Self::collect_matching_ancestors(root, &keyword, &children_by_node, &mut self.expanded_nodes);
+                                }
+                            }
+                        }
+                    }
+                    (true, false) => {
+                        // 搜索结束：恢复原始展开状态
+                        if let Some(saved) = self.pre_search_expanded.take() {
+                            self.expanded_nodes = saved;
+                        }
+                    }
+                    _ => {}
+                }
+
                 let connection_count = self.connections.len();
 
                 // 收集每行 rect
@@ -5757,7 +5788,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     row_rects.push((connection.id.clone(), egui::Rect::from_min_max(row_start, row_end)));
 
                     if let Some(nodes) = self.roots_by_connection.get(&connection.id).cloned() {
-                        if conn_expanded || is_searching {
+                        if conn_expanded {
                             // 仅活跃模式：只渲染已打开的数据库
                             let active_dbs = if self.sidebar_active_only {
                                 self.active_connections.get(&connection.id).cloned()
@@ -6119,18 +6150,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let children_match = self.node_or_children_match(node, &keyword);
 
         // 搜索过滤：不匹配且子节点也不匹配的节点直接跳过
-        if !under_user_expanded && is_searching && !node_matches && !children_match {
-            return;
-        }
-
-        // 搜索中：不匹配但子节点匹配的节点，跳过自身渲染但继续递归子节点
-        if !under_user_expanded && is_searching && !node_matches && children_match {
-            let explicitly_expanded = self.expanded_nodes.contains(&node.id);
-            if let Some(children) = self.children_by_node.get(&node.id).cloned() {
-                for child in children {
-                    self.render_node(ui, &child, depth, actions, under_user_expanded);
-                }
-            }
+        if is_searching && !node_matches && !children_match {
             return;
         }
 
@@ -6751,16 +6771,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             } // end of else (non-renaming mode)
         });
 
-        let keyword = self.committed_search.to_ascii_lowercase();
         let explicitly_expanded = self.expanded_nodes.contains(&node.id);
-        let next_under_expanded = under_user_expanded || explicitly_expanded;
-        // 搜索中：过滤通过的节点全部展开子节点，显示完整路径
-        // 非搜索中：仅展开的节点显示子节点
-        let is_searching = !keyword.is_empty();
-        if explicitly_expanded || is_searching {
+        // 展开的节点显示子节点
+        if explicitly_expanded {
             if let Some(children) = self.children_by_node.get(&node.id).cloned() {
                 for child in children {
-                    self.render_node(ui, &child, depth + 1, actions, next_under_expanded);
+                    self.render_node(ui, &child, depth + 1, actions, false);
                 }
             }
         }
@@ -6790,6 +6806,30 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
         }
         false
+    }
+
+    /// 递归将匹配关键词的节点的所有祖先加入 expanded（返回 true 表示子树中有匹配）
+    fn collect_matching_ancestors(
+        node: &ExplorerNode,
+        keyword: &str,
+        children_by_node: &HashMap<String, Vec<ExplorerNode>>,
+        expanded: &mut HashSet<String>,
+    ) -> bool {
+        let self_matches = node.name.to_ascii_lowercase().contains(keyword);
+        let mut child_matches = false;
+        if let Some(children) = children_by_node.get(&node.id) {
+            for child in children {
+                if Self::collect_matching_ancestors(child, keyword, children_by_node, expanded) {
+                    child_matches = true;
+                }
+            }
+        }
+        if self_matches || child_matches {
+            expanded.insert(node.id.clone());
+            true
+        } else {
+            false
+        }
     }
 
     fn render_tabs(&mut self, ui: &mut egui::Ui) {
