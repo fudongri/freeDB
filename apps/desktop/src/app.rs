@@ -958,6 +958,10 @@ struct TableTabState {
     column_resize_drag: Option<(usize, f32)>,
     preview_row_number_width: f32,
     row_num_resize_drag: Option<f32>,
+    structure_col_widths: Vec<f32>,
+    structure_resize_drag: Option<(usize, f32)>,
+    index_col_widths: Vec<f32>,
+    index_resize_drag: Option<(usize, f32)>,
     show_column_filter: bool,
     search: TableSearchState,
     // 筛选值智能提示稳定缓存：列名 → [(值, 出现次数)]。
@@ -3713,6 +3717,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             column_resize_drag: None,
             preview_row_number_width: 42.0,
             row_num_resize_drag: None,
+            structure_col_widths: Vec::new(),
+            structure_resize_drag: None,
+            index_col_widths: Vec::new(),
+            index_resize_drag: None,
             show_column_filter: false,
             search: TableSearchState::default(),
             filter_value_suggestions: HashMap::new(),
@@ -24930,12 +24938,25 @@ enum ParsedDdlItem {
     Constraint(String),
 }
 
-fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition, db_kind: DatabaseKind) {
+fn render_table_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState, definition: &TableDefinition, ctx: &egui::Context) {
     let palette = mac_ui_palette_from_ui(ui);
     let viewport_width = ui.available_width().max(0.0);
     let viewport_height = ui.available_height().max(180.0);
-    let show_auto_increment = db_kind == DatabaseKind::MySql;
-    let show_on_update = db_kind == DatabaseKind::MySql;
+    let show_auto_increment = tab.database_kind == DatabaseKind::MySql;
+    let show_on_update = tab.database_kind == DatabaseKind::MySql;
+
+    let mut structure_col_widths = if tab.structure_col_widths.len() == 7 {
+        tab.structure_col_widths.clone()
+    } else {
+        tab.structure_resize_drag = None;
+        vec![42.0, 200.0, 130.0, 60.0, 150.0, 150.0, 100.0]
+    };
+    if show_auto_increment && structure_col_widths.len() < 8 {
+        structure_col_widths.push(110.0);
+    }
+    if show_on_update && structure_col_widths.len() < 9 {
+        structure_col_widths.push(110.0);
+    }
 
     egui::Frame::new()
         .fill(palette.card_bg)
@@ -24948,46 +24969,196 @@ fn render_table_structure_grid(ui: &mut egui::Ui, definition: &TableDefinition, 
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    let header_y_start = ui.cursor().top();
+                    let header_painter = ui.painter().clone();
+                    let mut column_right_edges: Vec<f32> = vec![];
+                    let mut hovered_header_col_idx: Option<usize> = None;
                     let mut table = TableBuilder::new(ui)
                         .vscroll(false)
                         .striped(false)
                         .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
-                        .column(egui_extras::Column::initial(42.0).at_least(42.0))
-                        .column(egui_extras::Column::initial(200.0).at_least(120.0))
-                        .column(egui_extras::Column::initial(130.0).at_least(80.0))
-                        .column(egui_extras::Column::initial(60.0).at_least(50.0))
-                        .column(egui_extras::Column::initial(150.0).at_least(80.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[0]).at_least(42.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[1]).at_least(120.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[2]).at_least(80.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[3]).at_least(50.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[4]).at_least(80.0))
                         .column(egui_extras::Column::remainder().at_least(100.0))
-                        .column(egui_extras::Column::initial(100.0).at_least(80.0));
+                        .column(egui_extras::Column::initial(structure_col_widths[6]).at_least(80.0));
                     if show_auto_increment {
-                        table = table.column(egui_extras::Column::initial(110.0).at_least(80.0));
+                        table = table.column(egui_extras::Column::initial(structure_col_widths[7]).at_least(80.0));
                     }
                     if show_on_update {
-                        table = table.column(egui_extras::Column::initial(110.0).at_least(80.0));
+                        let idx = if show_auto_increment { 8 } else { 7 };
+                        table = table.column(egui_extras::Column::initial(structure_col_widths[idx]).at_least(80.0));
                     }
-                    table
+                    let mut col_idx = 0usize;
+                    let mut table = table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                let cell_rect = ui.max_rect();
+                                let resize_handle_x = cell_rect.right() - 3.0;
+                                let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                if on_resize_handle || is_resizing_this {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                }
+                                if on_resize_handle && just_pressed {
+                                    tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                }
+                                if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                    if resize_col == col_idx && pointer_down {
+                                        if let Some(pos) = pointer_pos {
+                                            let delta = pos.x - start_x;
+                                            if col_idx < structure_col_widths.len() {
+                                                structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                ctx.request_repaint();
+                                            }
+                                        }
+                                    }
+                                }
+                                column_right_edges.push(cell_rect.right());
+                                if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                    hovered_header_col_idx = Some(col_idx);
+                                }
+                                if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                    let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                    header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                }
+                                col_idx += 1;
                             });
                             for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键")] {
                                 header.col(|ui| {
                                     let (_, _, _, _) = table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
+                                    let cell_rect = ui.max_rect();
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < structure_col_widths.len() {
+                                                    structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                    tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                    ctx.request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    column_right_edges.push(cell_rect.right());
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                        hovered_header_col_idx = Some(col_idx);
+                                    }
+                                    if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                        let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                        header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                    }
+                                    col_idx += 1;
                                 });
                             }
                             if show_auto_increment {
                                 header.col(|ui| {
                                     let (_, _, _, _) = table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false, false);
+                                    let cell_rect = ui.max_rect();
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < structure_col_widths.len() {
+                                                    structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                    tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                    ctx.request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    column_right_edges.push(cell_rect.right());
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                        hovered_header_col_idx = Some(col_idx);
+                                    }
+                                    if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                        let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                        header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                    }
+                                    col_idx += 1;
                                 });
                             }
                             if show_on_update {
                                 header.col(|ui| {
                                     let (_, _, _, _) = table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false, false);
+                                    let cell_rect = ui.max_rect();
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < structure_col_widths.len() {
+                                                    structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                    tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                    ctx.request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    column_right_edges.push(cell_rect.right());
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                        hovered_header_col_idx = Some(col_idx);
+                                    }
+                                    if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                        let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                        header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                    }
+                                    col_idx += 1;
                                 });
                             }
-                        })
-                        .body(|mut body| {
+                        });
+                    if tab.structure_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                        tab.structure_resize_drag = None;
+                    }
+                    tab.structure_col_widths = structure_col_widths;
+                    table.body(|mut body| {
                             for (index, column) in definition.columns.iter().enumerate() {
                                 let fill = palette.card_bg;
                                 body.row(28.0, |mut row| {
@@ -25738,7 +25909,8 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
                 ui.add_space(6.0);
             }
         }
-        render_table_structure_grid(ui, &definition, tab.database_kind);
+        let str_ctx = ui.ctx().clone();
+        render_table_structure_grid(ui, tab, &definition, &str_ctx);
     }
 
     action
@@ -25933,12 +26105,16 @@ fn parse_mongo_create_index(line: &str) -> Option<ExistingIndex> {
     let mut part_start = 0;
     for (i, b) in args.bytes().enumerate() {
         match b {
-            b'{' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    part_start = i;
+                }
+                depth += 1;
+            }
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
                     parts.push(&args[part_start..=i]);
-                    part_start = i + 1;
                 }
             }
             _ => {}
@@ -25949,16 +26125,20 @@ fn parse_mongo_create_index(line: &str) -> Option<ExistingIndex> {
     let keys_doc = parts.first()?;
     let options_doc = parts.get(1);
 
-    // 解析 keys: {"col1": 1, "col2": -1}
+    // 解析 keys: {"col1": 1, "col2": -1} 或 {"field": "text"}
     let keys_inner = keys_doc.strip_prefix('{')?.strip_suffix('}')?;
-    let columns: Vec<String> = keys_inner
-        .split(',')
-        .filter_map(|entry| {
-            let (k, _) = entry.split_once(':')?;
-            let k = k.trim().trim_matches('"').trim_matches('\'');
-            if k.is_empty() { None } else { Some(k.to_string()) }
-        })
-        .collect();
+    let mut columns = Vec::new();
+    let mut index_type = String::from("REGULAR");
+    for entry in keys_inner.split(',') {
+        let Some((k, v)) = entry.split_once(':') else { continue };
+        let k = k.trim().trim_matches('"').trim_matches('\'');
+        if k.is_empty() { continue; }
+        columns.push(k.to_string());
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        if v != "1" && v != "-1" && !v.is_empty() {
+            index_type = v.to_uppercase();
+        }
+    }
 
     // 解析 options: {name: "...", unique: true}
     let mut name = String::new();
@@ -25990,7 +26170,7 @@ fn parse_mongo_create_index(line: &str) -> Option<ExistingIndex> {
         name,
         columns,
         unique,
-        index_type: "BTREE".to_string(),
+        index_type,
     })
 }
 
@@ -26123,42 +26303,126 @@ fn render_index_table(
     tab: &mut TableTabState,
     existing: &[ExistingIndex],
     palette: &MacUiPalette,
+    ctx: &egui::Context,
 ) {
     egui::Frame::new()
         .fill(palette.card_bg)
         .stroke(Stroke::NONE)
         .show(ui, |ui| {
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
         .id_salt("indexes-list")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
             let mut delete_pending: Option<usize> = None;
             let mut delete_existing: Option<usize> = None;
+            let ctx = ui.ctx().clone();
+            let header_y_start = ui.cursor().top();
+            let header_painter = ui.painter().clone();
+            let mut column_right_edges: Vec<f32> = vec![];
+            let mut hovered_header_col_idx: Option<usize> = None;
 
-            TableBuilder::new(ui)
+            let mut index_col_widths = if tab.index_col_widths.len() == 7 {
+                tab.index_col_widths.clone()
+            } else {
+                tab.index_resize_drag = None;
+                vec![42.0, 200.0, 80.0, 80.0, 150.0, 120.0, 80.0]
+            };
+
+            let mut col_idx = 0usize;
+            let mut table = TableBuilder::new(ui)
                 .vscroll(false)
                 .striped(false)
                 .resizable(false)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(egui_extras::Column::initial(42.0).at_least(42.0))
-                .column(egui_extras::Column::initial(200.0).at_least(120.0))
-                .column(egui_extras::Column::initial(80.0).at_least(60.0))
-                .column(egui_extras::Column::initial(80.0).at_least(60.0))
+                .column(egui_extras::Column::initial(index_col_widths[0]).at_least(42.0))
+                .column(egui_extras::Column::initial(index_col_widths[1]).at_least(120.0))
+                .column(egui_extras::Column::initial(index_col_widths[2]).at_least(60.0))
+                .column(egui_extras::Column::initial(index_col_widths[3]).at_least(60.0))
                 .column(egui_extras::Column::remainder().at_least(150.0))
-                .column(egui_extras::Column::initial(120.0).at_least(80.0))
-                .column(egui_extras::Column::initial(80.0).at_least(60.0))
+                .column(egui_extras::Column::initial(index_col_widths[5]).at_least(80.0))
+                .column(egui_extras::Column::initial(index_col_widths[6]).at_least(60.0))
                 .header(30.0, |mut header| {
                     header.col(|ui| {
                         let (_, _, _, _) = table_header_cell(ui, palette, "#", false, None, false, false, None, false, false);
+                        let cell_rect = ui.max_rect();
+                        let resize_handle_x = cell_rect.right() - 3.0;
+                        let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                        let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                        let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                        let pointer_down = ui.input(|i| i.pointer.primary_down());
+                        let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                        let is_resizing_this = tab.index_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                        if on_resize_handle || is_resizing_this {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                        }
+                        if on_resize_handle && just_pressed {
+                            tab.index_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                        }
+                        if let Some((resize_col, start_x)) = tab.index_resize_drag {
+                            if resize_col == col_idx && pointer_down {
+                                if let Some(pos) = pointer_pos {
+                                    let delta = pos.x - start_x;
+                                    index_col_widths[col_idx] = (index_col_widths[col_idx] + delta).max(40.0);
+                                    tab.index_resize_drag = Some((col_idx, pos.x));
+                                    ctx.request_repaint();
+                                }
+                            }
+                        }
+                        column_right_edges.push(cell_rect.right());
+                        if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                            hovered_header_col_idx = Some(col_idx);
+                        }
+                        if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                            let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                            header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                        }
+                        col_idx += 1;
                     });
                     for title in [tr!("索引名"), tr!("唯一性"), tr!("类型"), tr!("包含列"), tr!("来源"), tr!("删除")] {
                         header.col(|ui| {
                             let (_, _, _, _) = table_header_cell(ui, palette, title, false, None, false, false, None, false, false);
+                            let cell_rect = ui.max_rect();
+                            let resize_handle_x = cell_rect.right() - 3.0;
+                            let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                            let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                            let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                            let pointer_down = ui.input(|i| i.pointer.primary_down());
+                            let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                            let is_resizing_this = tab.index_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                            if on_resize_handle || is_resizing_this {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                            }
+                            if on_resize_handle && just_pressed {
+                                tab.index_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                            }
+                            if let Some((resize_col, start_x)) = tab.index_resize_drag {
+                                if resize_col == col_idx && pointer_down {
+                                    if let Some(pos) = pointer_pos {
+                                        let delta = pos.x - start_x;
+                                        index_col_widths[col_idx] = (index_col_widths[col_idx] + delta).max(40.0);
+                                        tab.index_resize_drag = Some((col_idx, pos.x));
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            }
+                            column_right_edges.push(cell_rect.right());
+                            if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                hovered_header_col_idx = Some(col_idx);
+                            }
+                            if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                            }
+                            col_idx += 1;
                         });
                     }
-                })
-                .body(|mut body| {
+                });
+            if tab.index_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                tab.index_resize_drag = None;
+            }
+            tab.index_col_widths = index_col_widths;
+            table.body(|mut body| {
                     let idx_grid_v = Color32::TRANSPARENT;
                     let idx_grid_h = subtle_grid_color(palette.table_grid, 30);
                     let mut row_num = 0usize;
@@ -26189,10 +26453,15 @@ fn render_index_table(
                             row.col(|ui| {
                                 let rect = ui.max_rect();
                                 paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                let cb_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
-                                let mut checked = idx.unique;
-                                ui.put(cb_rect, egui::Checkbox::without_text(&mut checked));
-                                index_cell_double_click_copy(ui, rect, if idx.unique { "✓" } else { "—" });
+                                let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                child.add_space(4.0);
+                                let (label, color) = if idx.unique {
+                                    ("✓", palette.accent_button_text)
+                                } else {
+                                    ("—", palette.weak_text)
+                                };
+                                child.label(RichText::new(label).size(palette.fonts.base).color(color));
+                                index_cell_double_click_copy(ui, rect, label);
                             });
                             // 类型
                             row.col(|ui| {
@@ -26277,7 +26546,7 @@ fn render_index_table(
                                 let rect = ui.max_rect();
                                 paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
                                 let cb_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
-                                ui.put(cb_rect, egui::Checkbox::without_text(&mut idx.unique));
+                                ui.put(cb_rect, egui::Checkbox::new(&mut idx.unique, ""));
                             });
                             // 类型（新增索引默认 BTREE）
                             row.col(|ui| {
@@ -26487,7 +26756,8 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui_t
     }
 
     // 索引表格
-    render_index_table(ui, tab, &existing, &palette);
+    let idx_ctx = ui.ctx().clone();
+    render_index_table(ui, tab, &existing, &palette, &idx_ctx);
 
     // 增加索引弹窗
     if tab.add_index_dialog_open {
@@ -26502,6 +26772,23 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
     let palette = mac_ui_palette_from_ui(ui);
     let show_auto_increment = tab.database_kind == DatabaseKind::MySql;
     let show_on_update = tab.database_kind == DatabaseKind::MySql;
+    let ctx = ui.ctx().clone();
+
+    let mut structure_col_widths = if tab.structure_col_widths.len() >= 7 {
+        tab.structure_col_widths.clone()
+    } else {
+        tab.structure_resize_drag = None;
+        vec![42.0, 200.0, 130.0, 60.0, 140.0, 150.0, 100.0]
+    };
+    if show_auto_increment && structure_col_widths.len() < 8 {
+        structure_col_widths.push(110.0);
+    }
+    if show_on_update && structure_col_widths.len() < 9 {
+        structure_col_widths.push(120.0);
+    }
+    if structure_col_widths.len() < 7 + show_auto_increment as usize + show_on_update as usize + 1 {
+        structure_col_widths.push(60.0);
+    }
 
     egui::Frame::new()
         .fill(palette.card_bg)
@@ -26512,54 +26799,240 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    let header_y_start = ui.cursor().top();
+                    let header_painter = ui.painter().clone();
+                    let mut column_right_edges: Vec<f32> = vec![];
+                    let mut hovered_header_col_idx: Option<usize> = None;
                     let mut table = TableBuilder::new(ui)
                         .vscroll(false)
                         .striped(false)
                         .resizable(false)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
-                        .column(egui_extras::Column::initial(42.0).at_least(42.0))
-                        .column(egui_extras::Column::initial(200.0).at_least(120.0))
-                        .column(egui_extras::Column::initial(130.0).at_least(80.0))
-                        .column(egui_extras::Column::initial(60.0).at_least(50.0))
-                        .column(egui_extras::Column::initial(140.0).at_least(70.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[0]).at_least(42.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[1]).at_least(120.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[2]).at_least(80.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[3]).at_least(50.0))
+                        .column(egui_extras::Column::initial(structure_col_widths[4]).at_least(70.0))
                         .column(egui_extras::Column::remainder().at_least(80.0))
-                        .column(egui_extras::Column::initial(100.0).at_least(80.0));
+                        .column(egui_extras::Column::initial(structure_col_widths[6]).at_least(80.0));
                     if show_auto_increment {
-                        table = table.column(egui_extras::Column::initial(110.0).at_least(80.0));
+                        table = table.column(egui_extras::Column::initial(structure_col_widths[7]).at_least(80.0));
                     }
                     if show_on_update {
-                        table = table.column(egui_extras::Column::initial(120.0).at_least(80.0));
+                        let idx = if show_auto_increment { 8 } else { 7 };
+                        table = table.column(egui_extras::Column::initial(structure_col_widths[idx]).at_least(80.0));
                     }
-                    table = table.column(egui_extras::Column::initial(60.0).at_least(50.0));
-                    table
+                    let delete_idx = structure_col_widths.len() - 1;
+                    table = table.column(egui_extras::Column::initial(structure_col_widths[delete_idx]).at_least(50.0));
+                    let mut col_idx = 0usize;
+                    let mut table = table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
                                 let (_, _, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                let cell_rect = ui.max_rect();
+                                let resize_handle_x = cell_rect.right() - 3.0;
+                                let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                if on_resize_handle || is_resizing_this {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                }
+                                if on_resize_handle && just_pressed {
+                                    tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                }
+                                if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                    if resize_col == col_idx && pointer_down {
+                                        if let Some(pos) = pointer_pos {
+                                            let delta = pos.x - start_x;
+                                            if col_idx < structure_col_widths.len() {
+                                                structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                ui.ctx().request_repaint();
+                                            }
+                                        }
+                                    }
+                                }
+                                column_right_edges.push(cell_rect.right());
+                                if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                    hovered_header_col_idx = Some(col_idx);
+                                }
+                                if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                    let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                    header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                }
+                                col_idx += 1;
                             });
                             for title in [tr!("字段名"), tr!("类型"), tr!("非空"), tr!("默认值"), tr!("注释"), tr!("主键")] {
                                 header.col(|ui| {
                                     let (_, _, _, _) =
                                         table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
+                                    let cell_rect = ui.max_rect();
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < structure_col_widths.len() {
+                                                    structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                    tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                    ui.ctx().request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    column_right_edges.push(cell_rect.right());
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                        hovered_header_col_idx = Some(col_idx);
+                                    }
+                                    if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                        let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                        header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                    }
+                                    col_idx += 1;
                                 });
                             }
                             if show_auto_increment {
                                 header.col(|ui| {
                                     let (_, _, _, _) =
                                         table_header_cell(ui, &palette, tr!("自增"), false, None, false, false, None, false, false);
+                                    let cell_rect = ui.max_rect();
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < structure_col_widths.len() {
+                                                    structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                    tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                    ui.ctx().request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    column_right_edges.push(cell_rect.right());
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                        hovered_header_col_idx = Some(col_idx);
+                                    }
+                                    if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                        let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                        header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                    }
+                                    col_idx += 1;
                                 });
                             }
                             if show_on_update {
                                 header.col(|ui| {
                                     let (_, _, _, _) =
                                         table_header_cell(ui, &palette, tr!("更新时刷新"), false, None, false, false, None, false, false);
+                                    let cell_rect = ui.max_rect();
+                                    let resize_handle_x = cell_rect.right() - 3.0;
+                                    let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                    let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                    let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                    let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                    let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                    if on_resize_handle || is_resizing_this {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                    }
+                                    if on_resize_handle && just_pressed {
+                                        tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                    }
+                                    if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                        if resize_col == col_idx && pointer_down {
+                                            if let Some(pos) = pointer_pos {
+                                                let delta = pos.x - start_x;
+                                                if col_idx < structure_col_widths.len() {
+                                                    structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                    tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                    ui.ctx().request_repaint();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    column_right_edges.push(cell_rect.right());
+                                    if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                        hovered_header_col_idx = Some(col_idx);
+                                    }
+                                    if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                        let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                        header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                    }
+                                    col_idx += 1;
                                 });
                             }
                             header.col(|ui| {
                                 let (_, _, _, _) =
                                     table_header_cell(ui, &palette, tr!("删除"), false, None, false, false, None, false, false);
+                                let cell_rect = ui.max_rect();
+                                let resize_handle_x = cell_rect.right() - 3.0;
+                                let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                let is_resizing_this = tab.structure_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                if on_resize_handle || is_resizing_this {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                }
+                                if on_resize_handle && just_pressed {
+                                    tab.structure_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                }
+                                if let Some((resize_col, start_x)) = tab.structure_resize_drag {
+                                    if resize_col == col_idx && pointer_down {
+                                        if let Some(pos) = pointer_pos {
+                                            let delta = pos.x - start_x;
+                                            if col_idx < structure_col_widths.len() {
+                                                structure_col_widths[col_idx] = (structure_col_widths[col_idx] + delta).max(40.0);
+                                                tab.structure_resize_drag = Some((col_idx, pos.x));
+                                                ui.ctx().request_repaint();
+                                            }
+                                        }
+                                    }
+                                }
+                                column_right_edges.push(cell_rect.right());
+                                if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                    hovered_header_col_idx = Some(col_idx);
+                                }
+                                if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                    let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                    header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                }
+                                col_idx += 1;
                             });
-                        })
-                        .body(|mut body| {
+                        });
+                    if tab.structure_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                        tab.structure_resize_drag = None;
+                    }
+                    tab.structure_col_widths = structure_col_widths;
+                    table.body(|mut body| {
                             let mut drop_index: Option<usize> = None;
                             let mut toggle_nullable: Option<usize> = None;
                             let mut toggle_pk: Option<usize> = None;

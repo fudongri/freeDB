@@ -229,9 +229,12 @@ impl DatabaseDriver for MongoDbDriver {
                     }
                     let keys_doc: String = keys
                         .iter()
-                        .map(|(k, v)| {
-                            let dir = match v.as_i32() { Some(d) => d, _ => 1 };
-                            format!("\"{k}\": {dir}")
+                        .map(|(k, v)| match v.as_i32() {
+                            Some(d) => format!("\"{k}\": {d}"),
+                            None => match v.as_str() {
+                                Some(s) => format!("\"{k}\": \"{s}\""),
+                                None => format!("\"{k}\": 1"),
+                            },
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
