@@ -15,6 +15,9 @@ pub enum ConnectionHandle {
         client: mongodb::Client,
         database: Option<String>,
     },
+    Sqlite {
+        conn: std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    },
 }
 
 impl ConnectionHandle {
@@ -24,6 +27,10 @@ impl ConnectionHandle {
 
     pub fn is_mongodb(&self) -> bool {
         matches!(self, Self::MongoDb { .. })
+    }
+
+    pub fn is_sqlite(&self) -> bool {
+        matches!(self, Self::Sqlite { .. })
     }
 }
 

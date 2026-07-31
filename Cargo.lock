@@ -1486,6 +1486,7 @@ dependencies = [
  "i18n",
  "mongodb",
  "mysql_async",
+ "rusqlite",
  "tokio",
  "tokio-postgres",
 ]

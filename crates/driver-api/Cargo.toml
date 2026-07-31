@@ -10,5 +10,6 @@ core-domain = { path = "../core-domain" }
 i18n = { path = "../i18n" }
 mongodb.workspace = true
 mysql_async.workspace = true
+rusqlite.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
