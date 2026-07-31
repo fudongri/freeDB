@@ -5,7 +5,7 @@ use core_domain::{
 };
 use driver_api::{ConnectionHandle, ConnectionProvider, DatabaseDriver, TableSummary};
 use i18n::tr;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
@@ -182,13 +182,30 @@ impl DatabaseDriver for SqliteDriver {
                 ))
             })?;
             let cols = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-            // 唯一索引的 CREATE 声明（取 sql 字段，解析括号内的列名）
-            let mut ustmt = c.prepare(
-                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=?1 AND \"unique\"=1",
-            )?;
-            let uniq_sqls: Vec<String> = ustmt
-                .query_map([&table_name], |row| row.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
+            // 唯一索引检测：sqlite_master 没有 unique 列，须用 PRAGMA index_list 的 unique 字段
+            // 1) 收集 unique=1 的索引名
+            let mut ilstmt = c.prepare(&format!("PRAGMA index_list({})", quote_ident(&table_name)))?;
+            let uniq_indexes: Vec<String> = ilstmt
+                .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|(_, unique)| *unique == 1)
+                .map(|(name, _)| name)
+                .collect();
+            // 2) 取这些索引的 CREATE 声明（auto index 的 sql 为 NULL，跳过）
+            let mut uniq_sqls: Vec<String> = Vec::new();
+            for name in uniq_indexes {
+                if let Some(sql) = c
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1 AND sql IS NOT NULL",
+                        [&name],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                {
+                    uniq_sqls.push(sql);
+                }
+            }
             // 建表 SQL（含视图的 sqlite_master.sql）
             let create_sql: Option<String> = c
                 .query_row(
@@ -524,8 +541,6 @@ fn map_sqlite_error(e: rusqlite::Error) -> AppError {
     let msg = e.to_string();
     if msg.contains("locked") {
         AppError::transient_connection(msg)
-    } else if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-        AppError::Query(msg)
     } else {
         AppError::Query(msg)
     }
@@ -663,7 +678,18 @@ mod tests {
                 QueryExecution {
                     connection_id: "c1".into(),
                     database: None,
-                    sql: "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, age INTEGER)".into(),
+                    sql: "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT)".into(),
+                },
+            )
+            .await
+            .unwrap();
+        driver
+            .execute_sql(
+                &mut handle,
+                QueryExecution {
+                    connection_id: "c1".into(),
+                    database: None,
+                    sql: "CREATE UNIQUE INDEX idx_email ON t (email)".into(),
                 },
             )
             .await
@@ -685,6 +711,10 @@ mod tests {
         assert!(def.columns[0].primary_key);
         assert!(def.columns[0].auto_increment);
         assert!(!def.columns[1].nullable);
+        // email 列由显式 CREATE UNIQUE INDEX 唯一索引覆盖
+        assert!(def.columns[2].unique);
+        // name 列无唯一索引，不应被误判为 unique
+        assert!(!def.columns[1].unique);
         assert!(def.create_sql.is_some());
     }
 }
