@@ -18,6 +18,7 @@ members = [
     "crates/slowlog-parser",
     "crates/ui-theme",
     "crates/ai-service",
+    "crates/driver-sqlite",
 ]
 resolver = "2"
 

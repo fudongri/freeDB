@@ -1,0 +1,13 @@
+[package]
+name = "driver-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+core-domain = { path = "../core-domain" }
+driver-api = { path = "../driver-api" }
+i18n = { path = "../i18n" }
+rusqlite.workspace = true
+tokio.workspace = true
