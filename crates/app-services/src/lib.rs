@@ -95,6 +95,7 @@ impl AppServices {
         profile.direct_connection = input.direct_connection;
         profile.replica_set = input.replica_set;
         profile.connection_uri = input.connection_uri;
+        profile.file_path = input.file_path;
         profile.updated_at = Utc::now();
 
         if profile.password_saved {

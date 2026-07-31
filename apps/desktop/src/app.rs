@@ -1421,6 +1421,7 @@ struct ConnectionFormState {
     direct_connection: bool,
     replica_set: String,
     connection_uri: String,
+    file_path: String,
 }
 
 impl Default for ConnectionFormState {
@@ -1439,6 +1440,7 @@ impl Default for ConnectionFormState {
             direct_connection: false,
             replica_set: String::new(),
             connection_uri: String::new(),
+            file_path: String::new(),
         }
     }
 }
@@ -14511,6 +14513,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         ("MySQL", matches!(self.connection_form.kind, DatabaseKind::MySql)),
                                         ("PostgreSQL", matches!(self.connection_form.kind, DatabaseKind::Postgres)),
                                         ("MongoDB", matches!(self.connection_form.kind, DatabaseKind::MongoDb)),
+                                        ("SQLite", matches!(self.connection_form.kind, DatabaseKind::Sqlite)),
                                     ];
                                     if let Some(sel) = toolbar_dropdown(
                                         ui,
@@ -14530,6 +14533,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 self.connection_form.port = 5432;
                                                 self.connection_form.direct_connection = false;
                                             }
+                                            3 => {
+                                                self.connection_form.kind = DatabaseKind::Sqlite;
+                                                self.connection_form.port = 0;
+                                                self.connection_form.direct_connection = false;
+                                            }
                                             _ => {
                                                 self.connection_form.kind = DatabaseKind::MongoDb;
                                                 self.connection_form.port = 27017;
@@ -14538,42 +14546,72 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         }
                                     }
                                 });
-                                form_row(ui, tr!("名称"), &mut self.connection_form.name);
-                                form_row(ui, tr!("主机"), &mut self.connection_form.host);
-                                form_row_u16(ui, tr!("端口"), &mut self.connection_form.port);
-                                form_row(ui, tr!("用户名"), &mut self.connection_form.username);
-                                form_grid_row(ui, tr!("密码"), |ui| {
-                                    ui.add_sized(
-                                        [380.0, 30.0],
-                                        TextEdit::singleline(&mut self.connection_form.password).password(true),
+                                if self.connection_form.kind == DatabaseKind::Sqlite {
+                                    form_grid_row(ui, tr!("文件路径"), |ui| {
+                                        ui.add_sized(
+                                            [300.0, 30.0],
+                                            TextEdit::singleline(&mut self.connection_form.file_path),
+                                        );
+                                        if mini_button(ui, tr!("浏览..."), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                            if let Some(path) = rfd::FileDialog::new()
+                                                .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
+                                                .pick_file()
+                                            {
+                                                self.connection_form.file_path = path.display().to_string();
+                                            }
+                                        }
+                                        if mini_button(ui, tr!("新建空库"), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                            if let Some(path) = rfd::FileDialog::new()
+                                                .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
+                                                .set_file_name("new.db")
+                                                .save_file()
+                                            {
+                                                self.connection_form.file_path = path.display().to_string();
+                                            }
+                                        }
+                                    });
+                                    ui.small(
+                                        RichText::new(tr!("新建空库：选择保存位置即可创建新的 SQLite 数据库文件")).color(palette.subtitle),
                                     );
-                                });
-                                form_row(ui, tr!("默认数据库"), &mut self.connection_form.default_database);
-                                form_grid_row(ui, "SSL", |ui| {
-                                    let ssl_label = match self.connection_form.ssl_mode {
-                                        SslMode::Disable => "Disable",
-                                        SslMode::Prefer => "Prefer",
-                                        SslMode::Require => "Require",
-                                    };
-                                    let ssl_items = [
-                                        ("Disable", self.connection_form.ssl_mode == SslMode::Disable),
-                                        ("Prefer", self.connection_form.ssl_mode == SslMode::Prefer),
-                                        ("Require", self.connection_form.ssl_mode == SslMode::Require),
-                                    ];
-                                    if let Some(sel) = toolbar_dropdown(
-                                        ui,
-                                        egui::Id::new("connection-ssl-mode"),
-                                        ssl_label,
-                                        140.0,
-                                        &ssl_items,
-                                    ) {
-                                        self.connection_form.ssl_mode = match sel {
-                                            0 => SslMode::Disable,
-                                            1 => SslMode::Prefer,
-                                            _ => SslMode::Require,
+                                }
+                                form_row(ui, tr!("名称"), &mut self.connection_form.name);
+                                if self.connection_form.kind != DatabaseKind::Sqlite {
+                                    form_row(ui, tr!("主机"), &mut self.connection_form.host);
+                                    form_row_u16(ui, tr!("端口"), &mut self.connection_form.port);
+                                    form_row(ui, tr!("用户名"), &mut self.connection_form.username);
+                                    form_grid_row(ui, tr!("密码"), |ui| {
+                                        ui.add_sized(
+                                            [380.0, 30.0],
+                                            TextEdit::singleline(&mut self.connection_form.password).password(true),
+                                        );
+                                    });
+                                    form_row(ui, tr!("默认数据库"), &mut self.connection_form.default_database);
+                                    form_grid_row(ui, "SSL", |ui| {
+                                        let ssl_label = match self.connection_form.ssl_mode {
+                                            SslMode::Disable => "Disable",
+                                            SslMode::Prefer => "Prefer",
+                                            SslMode::Require => "Require",
                                         };
-                                    }
-                                });
+                                        let ssl_items = [
+                                            ("Disable", self.connection_form.ssl_mode == SslMode::Disable),
+                                            ("Prefer", self.connection_form.ssl_mode == SslMode::Prefer),
+                                            ("Require", self.connection_form.ssl_mode == SslMode::Require),
+                                        ];
+                                        if let Some(sel) = toolbar_dropdown(
+                                            ui,
+                                            egui::Id::new("connection-ssl-mode"),
+                                            ssl_label,
+                                            140.0,
+                                            &ssl_items,
+                                        ) {
+                                            self.connection_form.ssl_mode = match sel {
+                                                0 => SslMode::Disable,
+                                                1 => SslMode::Prefer,
+                                                _ => SslMode::Require,
+                                            };
+                                        }
+                                    });
+                                }
                             });
                         ui.style_mut().visuals.widgets.inactive.bg_stroke = prev_inactive;
                         ui.style_mut().visuals.widgets.noninteractive.bg_fill = prev_non_bg;
@@ -14582,7 +14620,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.connection_form.save_password, tr!("保存密码"));
+                    if self.connection_form.kind != DatabaseKind::Sqlite {
+                        ui.checkbox(&mut self.connection_form.save_password, tr!("保存密码"));
+                    }
                     if self.connection_form.kind == DatabaseKind::MongoDb {
                         ui.add_space(16.0);
                         ui.checkbox(&mut self.connection_form.direct_connection, tr!("直接连接"));
@@ -19045,6 +19085,7 @@ impl ConnectionFormState {
             direct_connection: profile.direct_connection,
             replica_set: profile.replica_set.clone().unwrap_or_default(),
             connection_uri: profile.connection_uri.clone().unwrap_or_default(),
+            file_path: profile.file_path.clone().unwrap_or_default(),
         }
     }
 
@@ -19064,7 +19105,7 @@ impl ConnectionFormState {
             direct_connection: self.direct_connection,
             replica_set: optional_string(&self.replica_set),
             connection_uri: optional_string(&self.connection_uri),
-            file_path: None,
+            file_path: optional_string(&self.file_path),
         }
     }
 }

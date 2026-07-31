@@ -425,6 +425,10 @@ fn en(key: &'static str) -> &'static str {
         "暂无保存的查询" => "No saved queries",
         "查询名称" => "Query Name",
         "保存" => "Save",
+        "文件路径" => "File Path",
+        "浏览..." => "Browse...",
+        "新建空库" => "New Empty Database",
+        "新建空库：选择保存位置即可创建新的 SQLite 数据库文件" => "New empty database: choose a save location to create a new SQLite database file",
 
         // ── driver-mysql.rs ──
         "MySQL 表格编辑将在后续迭代中补全" => "MySQL table editing will be available in a future release",
