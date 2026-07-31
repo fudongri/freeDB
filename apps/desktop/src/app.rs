@@ -16186,6 +16186,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         core_domain::DatabaseKind::MongoDb => {
                             format!("db.{}.drop()", name)
                         }
+                        core_domain::DatabaseKind::Sqlite => {
+                            format!("DROP {} \"{}\"", if is_view { "VIEW" } else { "TABLE" }, name.replace('"', "\"\""))
+                        }
                         _ => format!("DROP {} `{}`", if is_view { "VIEW" } else { "TABLE" }, name.replace('`', "``")),
                     };
                     let db = Some(database);
@@ -16205,6 +16208,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                         core_domain::DatabaseKind::MongoDb => {
                             format!("db.{}.deleteMany({{}})", name)
+                        }
+                        core_domain::DatabaseKind::Sqlite => {
+                            format!("DELETE FROM \"{}\"", name.replace('"', "\"\""))
                         }
                         _ => format!("TRUNCATE TABLE `{}`", name.replace('`', "``")),
                     };
@@ -16241,6 +16247,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             statements.push(format!("db.createCollection(\"{}\")", new_name));
                             if include_data {
                                 statements.push(format!("db.{}.find({{}}).forEach(function(d){{ db.{}.insert(d) }})", name, new_name));
+                            }
+                        }
+                        core_domain::DatabaseKind::Sqlite => {
+                            let old_escaped = name.replace('"', "\"\"");
+                            let new_escaped = new_name.replace('"', "\"\"");
+                            if is_view {
+                                statements.push(format!("CREATE VIEW \"{new_escaped}\" AS SELECT * FROM \"{old_escaped}\""));
+                            } else {
+                                statements.push(format!("CREATE TABLE \"{new_escaped}\" AS SELECT * FROM \"{old_escaped}\" WHERE 1=0"));
+                                if include_data {
+                                    statements.push(format!("INSERT INTO \"{new_escaped}\" SELECT * FROM \"{old_escaped}\""));
+                                }
                             }
                         }
                         _ => {
@@ -16557,6 +16575,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                     core_domain::DatabaseKind::MongoDb => {
                         format!("mongo-db:{}:{}", connection_id, database)
+                    }
+                    core_domain::DatabaseKind::Sqlite => {
+                        format!("sqlite-db:{}:{}", connection_id, database)
                     }
                     _ => format!("mysql-db:{}:{}", connection_id, database),
                 };
