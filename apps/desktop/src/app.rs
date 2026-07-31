@@ -4308,6 +4308,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         // Show spinner immediately by clearing old data
         tab.error = None;
         tab.preview = None;
+        tab.editing_cell = None;
         tab.pending_cell_changes.clear();
         let definition_for_filter = tab.definition.clone();
         if reload_definition {
