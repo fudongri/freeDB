@@ -717,4 +717,64 @@ mod tests {
         assert!(!def.columns[1].unique);
         assert!(def.create_sql.is_some());
     }
+
+    #[tokio::test]
+    async fn list_children_filters_internal_and_maps_cells() {
+        let driver = SqliteDriver;
+        let profile = memory_profile();
+        let mut handle = driver.connect(&profile, "", None).await.unwrap();
+        // AUTOINCREMENT 会生成 sqlite_sequence 内部表，list_children 必须过滤掉
+        driver
+            .execute_sql(
+                &mut handle,
+                QueryExecution {
+                    connection_id: "c1".into(),
+                    database: None,
+                    sql: "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v REAL, s TEXT)".into(),
+                },
+            )
+            .await
+            .unwrap();
+        driver
+            .execute_sql(
+                &mut handle,
+                QueryExecution {
+                    connection_id: "c1".into(),
+                    database: None,
+                    sql: "INSERT INTO t (v, s) VALUES (1.5, 'hi'), (NULL, NULL)".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let parent = ExplorerNode {
+            id: "db".into(),
+            connection_id: "c1".into(),
+            name: "db".into(),
+            node_type: ExplorerNodeType::Database,
+            parent_id: None,
+            database: Some("db".into()),
+            schema: None,
+            expandable: true,
+            loaded: true,
+        };
+        let nodes = driver.list_children(&mut handle, "c1", &parent).await.unwrap();
+        let names: Vec<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["t"], "sqlite_% 内部表应被过滤");
+        // 浮点/文本/NULL 单元格转换
+        let result = driver
+            .execute_sql(
+                &mut handle,
+                QueryExecution {
+                    connection_id: "c1".into(),
+                    database: None,
+                    sql: "SELECT * FROM t ORDER BY id".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.rows[0]["v"].as_text(), Some("1.5"));
+        assert_eq!(result.rows[0]["s"].as_text(), Some("hi"));
+        assert!(result.rows[1]["v"].is_null());
+        assert!(result.rows[1]["s"].is_null());
+    }
 }
