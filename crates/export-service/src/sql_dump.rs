@@ -50,6 +50,9 @@ pub fn dump_table_sql(
             out.push_str(&build_create_table_from_columns(table_name, table_def, db_kind));
         }
         DatabaseKind::MongoDb => {}
+        DatabaseKind::Sqlite => {
+            out.push_str(&build_create_table_from_columns(table_name, table_def, db_kind));
+        }
     }
 
     // ── INSERT data ──
@@ -93,6 +96,7 @@ pub fn dump_database_sql(
         DatabaseKind::MySql => out.push_str("SET FOREIGN_KEY_CHECKS = 0;\n\n"),
         DatabaseKind::Postgres => out.push_str("SET session_replication_role = 'replica';\n\n"),
         DatabaseKind::MongoDb => {}
+        DatabaseKind::Sqlite => out.push_str("PRAGMA foreign_keys = OFF;\n\n"),
     }
 
     for (name, def, data) in &tables {
@@ -104,6 +108,7 @@ pub fn dump_database_sql(
         DatabaseKind::MySql => out.push_str("SET FOREIGN_KEY_CHECKS = 1;\n"),
         DatabaseKind::Postgres => out.push_str("SET session_replication_role = 'origin';\n"),
         DatabaseKind::MongoDb => {}
+        DatabaseKind::Sqlite => out.push_str("PRAGMA foreign_keys = ON;\n"),
     }
     out
 }
@@ -115,6 +120,7 @@ fn quote_ident(name: &str, db_kind: DatabaseKind) -> String {
         DatabaseKind::MySql => format!("`{}`", name.replace('`', "``")),
         DatabaseKind::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
         DatabaseKind::MongoDb => name.to_string(),
+        DatabaseKind::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
     }
 }
 
@@ -134,6 +140,7 @@ fn format_cell(value: &QueryCellValue, db_kind: DatabaseKind) -> String {
                     DatabaseKind::MySql => format!("'{}'", escape_string(text)),
                     DatabaseKind::Postgres => format!("'{}'", escape_string(text)),
                     DatabaseKind::MongoDb => format!("'{}'", escape_string(text)),
+                    DatabaseKind::Sqlite => format!("'{}'", escape_string(text)),
                 }
             }
         }
@@ -168,7 +175,10 @@ fn build_create_table_from_columns(
     let pk_columns: Vec<&str> = table_def
         .columns
         .iter()
-        .filter(|c| c.primary_key)
+        .filter(|c| {
+            // SQLite 自增主键走列级声明，避免重复表级 PRIMARY KEY
+            c.primary_key && !(db_kind == DatabaseKind::Sqlite && c.auto_increment)
+        })
         .map(|c| c.name.as_str())
         .collect();
 
@@ -186,6 +196,12 @@ fn build_create_table_from_columns(
                 DatabaseKind::MySql => out.push_str(" AUTO_INCREMENT"),
                 DatabaseKind::Postgres => {} // SERIAL already implies this
                 DatabaseKind::MongoDb => {}
+                DatabaseKind::Sqlite => {
+                    // SQLite: AUTOINCREMENT 必须列级声明且仅限 INTEGER PRIMARY KEY
+                    if col.primary_key {
+                        out.push_str(" PRIMARY KEY AUTOINCREMENT");
+                    }
+                }
             }
         }
 
@@ -204,6 +220,7 @@ fn build_create_table_from_columns(
                 DatabaseKind::MySql => out.push_str(&format!(" COMMENT '{}'", escape_string(comment))),
                 DatabaseKind::Postgres => {}
                 DatabaseKind::MongoDb => {}
+                DatabaseKind::Sqlite => {}
             }
         }
 
@@ -262,6 +279,21 @@ fn map_data_type(data_type: &str, db_kind: DatabaseKind, is_auto: bool) -> Strin
             }
         }
         DatabaseKind::MongoDb => data_type.to_string(),
+        DatabaseKind::Sqlite => {
+            // SQLite 自增必须为 INTEGER（AUTOINCREMENT 仅配 INTEGER PRIMARY KEY 合法）
+            if is_auto {
+                "INTEGER".to_string()
+            } else {
+                match lower.as_str() {
+                    "varchar" | "char" | "text" | "clob" | "string" => "TEXT".to_string(),
+                    "integer" | "int" | "bigint" | "smallint" | "tinyint" | "mediumint"
+                    | "int2" | "int8" => "INTEGER".to_string(),
+                    "real" | "double" | "float" | "numeric" | "decimal" | "double precision" => "REAL".to_string(),
+                    "blob" | "binary" | "varbinary" | "bytea" => "BLOB".to_string(),
+                    _ => "TEXT".to_string(),
+                }
+            }
+        }
     }
 }
 

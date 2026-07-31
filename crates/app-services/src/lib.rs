@@ -811,6 +811,9 @@ impl AppServices {
             if let Some(ref uri) = conn.connection_uri {
                 write_elem(&mut w, "connectionUri", uri)?;
             }
+            if let Some(ref fp) = conn.file_path {
+                write_elem(&mut w, "filePath", fp)?;
+            }
             write_end(&mut w, "Connection")?;
         }
 
@@ -880,6 +883,7 @@ impl AppServices {
                     .unwrap_or(false),
                 replica_set: conn.replica_set.clone(),
                 connection_uri: conn.connection_uri.clone(),
+                file_path: conn.file_path.clone(),
             };
             if let Some(ref pw) = conn.password {
                 match base64::engine::general_purpose::STANDARD.decode(pw) {
@@ -1009,6 +1013,8 @@ struct ImportConnection {
     replica_set: Option<String>,
     #[serde(rename = "connectionUri")]
     connection_uri: Option<String>,
+    #[serde(rename = "filePath")]
+    file_path: Option<String>,
 }
 
 #[derive(Deserialize)]
