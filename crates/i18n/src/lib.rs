@@ -526,6 +526,7 @@ fn en(key: &'static str) -> &'static str {
         "连接名称 \"{}\" 已存在" => "Connection name \"{}\" already exists",
         "主机地址不能为空" => "Host address cannot be empty",
         "用户名不能为空" => "Username cannot be empty",
+        "SQLite 文件路径不能为空" => "SQLite file path cannot be empty",
         "语句内容不能为空" => "Statement content cannot be empty",
         "查询名称不能为空" => "Query name cannot be empty",
         "未命名查询" => "Untitled Query",

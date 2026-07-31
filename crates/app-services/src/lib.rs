@@ -926,11 +926,20 @@ fn validate_connection_input(input: &ConnectionProfileInput) -> Result<()> {
     if input.name.trim().is_empty() {
         return Err(anyhow!("{}", tr!("连接名称不能为空")));
     }
-    if input.host.trim().is_empty() {
-        return Err(anyhow!("{}", tr!("主机地址不能为空")));
-    }
-    if input.username.trim().is_empty() {
-        return Err(anyhow!("{}", tr!("用户名不能为空")));
+    match input.kind {
+        DatabaseKind::Sqlite => {
+            if input.file_path.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                return Err(anyhow!("{}", tr!("SQLite 文件路径不能为空")));
+            }
+        }
+        _ => {
+            if input.host.trim().is_empty() {
+                return Err(anyhow!("{}", tr!("主机地址不能为空")));
+            }
+            if input.username.trim().is_empty() {
+                return Err(anyhow!("{}", tr!("用户名不能为空")));
+            }
+        }
     }
     Ok(())
 }
