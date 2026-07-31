@@ -25748,6 +25748,8 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
     let mut pk_cols = Vec::new();
     for col in &active {
         let mut parts = vec![q(&col.name)];
+        // SQLite: 仅当列是 auto_increment 且为主键时，列级声明 PRIMARY KEY AUTOINCREMENT
+        let sqlite_pk_autoinc = db_kind == DatabaseKind::Sqlite && col.auto_increment && col.primary_key;
         // Postgres: auto_increment → SERIAL / BIGSERIAL
         if col.auto_increment && db_kind == DatabaseKind::Postgres {
             let t = col.data_type.to_ascii_uppercase();
@@ -25756,6 +25758,9 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
             } else {
                 parts.push("SERIAL".into());
             }
+        } else if sqlite_pk_autoinc {
+            // SQLite 的 AUTOINCREMENT 仅精确搭配 INTEGER PRIMARY KEY 合法，类型归一为 INTEGER
+            parts.push("INTEGER".into());
         } else {
             parts.push(col.data_type.clone());
         }
@@ -25773,8 +25778,6 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
                 _ => {}
             }
         }
-        // SQLite: 仅当列是 auto_increment 且为主键时，列级声明 PRIMARY KEY AUTOINCREMENT
-        let sqlite_pk_autoinc = db_kind == DatabaseKind::Sqlite && col.auto_increment && col.primary_key;
         if sqlite_pk_autoinc {
             parts.push("PRIMARY KEY AUTOINCREMENT".into());
         }
