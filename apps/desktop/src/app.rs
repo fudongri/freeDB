@@ -5628,7 +5628,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         // 解析 target_id 的 db/schema 段，用于按字段匹配祖先节点
                         // 结构：{type}:{conn}:{db}[:{schema}]:{name}
                         let target_parts: Vec<&str> = target_id.split(':').collect();
-                        let target_db = target_parts.get(2).copied().unwrap_or("");
+                        // SQLite 表节点 ID 为 {type}:{conn}:{name}，不含 database 段，
+                        // 其数据库名（文件 basename）从该连接根节点获取
+                        let target_db: String = if target_id.starts_with("sqlite-table:") {
+                            self.roots_by_connection
+                                .get(&conn_id)
+                                .and_then(|roots| {
+                                    roots
+                                        .iter()
+                                        .find(|n| n.node_type == ExplorerNodeType::Database)
+                                })
+                                .and_then(|n| n.database.as_deref())
+                                .unwrap_or("")
+                                .to_string()
+                        } else {
+                            target_parts
+                                .get(2)
+                                .copied()
+                                .unwrap_or("")
+                                .to_string()
+                        };
                         let target_schema = target_parts.get(3).copied().unwrap_or("");
 
                         // 展开所有祖先节点（Database / Schema 节点无法用 ID 前缀匹配，因为
@@ -5644,10 +5663,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         for node in &all_expandable {
                             let is_ancestor = match node.node_type {
                                 ExplorerNodeType::Database => {
-                                    node.database.as_deref() == Some(target_db)
+                                    node.database.as_deref() == Some(target_db.as_str())
                                 }
                                 ExplorerNodeType::Schema => {
-                                    node.database.as_deref() == Some(target_db)
+                                    node.database.as_deref() == Some(target_db.as_str())
                                         && node.schema.as_deref() == Some(target_schema)
                                 }
                                 _ => false,
