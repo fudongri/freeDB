@@ -7,6 +7,7 @@ use driver_api::{ConnectionHandle, ConnectionProvider, DatabaseDriver, TableSumm
 use i18n::tr;
 use rusqlite::{Connection, OptionalExtension};
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -36,11 +37,33 @@ fn sqlite_conn(handle: &mut ConnectionHandle) -> AppResult<SharedConn> {
     }
 }
 
-fn file_path(profile: &ConnectionProfile) -> AppResult<&str> {
-    profile
+/// 展开 `~` 为家目录；SQLite 不会自动展开波浪号。
+fn expand_home_with(path: &str, home: Option<OsString>) -> String {
+    if path == "~" {
+        if let Some(home) = home {
+            return home.to_string_lossy().to_string();
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = home {
+            return std::path::Path::new(&home)
+                .join(rest)
+                .to_string_lossy()
+                .to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn expand_home(path: &str) -> String {
+    expand_home_with(path, std::env::var_os("HOME"))
+}
+
+fn file_path(profile: &ConnectionProfile) -> AppResult<String> {
+    let raw = profile
         .file_path
         .as_deref()
-        .ok_or_else(|| AppError::Validation(tr!("SQLite 需要文件路径").to_string()))
+        .ok_or_else(|| AppError::Validation(tr!("SQLite 需要文件路径").to_string()))?;
+    Ok(expand_home(raw))
 }
 
 #[async_trait]
@@ -51,7 +74,7 @@ impl ConnectionProvider for SqliteDriver {
         _password: &str,
         _database: Option<&str>,
     ) -> AppResult<ConnectionHandle> {
-        let path = file_path(profile)?.to_string();
+        let path = file_path(profile)?;
         let conn = tokio::task::spawn_blocking(move || Connection::open(&path))
             .await
             .map_err(|e| AppError::connection(format!("sqlite task panicked: {e}")))?
@@ -69,12 +92,11 @@ impl ConnectionProvider for SqliteDriver {
 impl DatabaseDriver for SqliteDriver {
     async fn test_connection(&self, profile: &ConnectionProfile, _password: &str) -> AppResult<()> {
         let path = file_path(profile)?;
-        if !std::path::Path::new(path).exists() {
+        if !std::path::Path::new(&path).exists() {
             return Err(AppError::Validation(
                 tr!("SQLite 文件不存在: {}", path),
             ));
         }
-        let path = path.to_string();
         // 打开 + 验证可读都在阻塞闭包内执行，避免阻塞 async runtime
         tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&path).map_err(map_sqlite_error)?;
@@ -574,6 +596,18 @@ mod tests {
 
     fn memory_profile() -> ConnectionProfile {
         test_profile(":memory:")
+    }
+
+    #[test]
+    fn expand_home_resolves_tilde() {
+        let home = Some(std::ffi::OsString::from("/home/user"));
+        assert_eq!(expand_home_with("~/db.sqlite", home.clone()), "/home/user/db.sqlite");
+        assert_eq!(expand_home_with("~", home), "/home/user");
+        // 非 ~ 路径原样返回
+        assert_eq!(expand_home_with("/abs/path.db", Some(std::ffi::OsString::from("/h"))), "/abs/path.db");
+        assert_eq!(expand_home_with(":memory:", None), ":memory:");
+        // 无 HOME 时保持原样
+        assert_eq!(expand_home_with("~/x.db", None), "~/x.db");
     }
 
     #[tokio::test]

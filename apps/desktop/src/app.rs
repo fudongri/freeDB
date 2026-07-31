@@ -8507,6 +8507,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let db = database.as_deref().unwrap_or("test");
                         format!("mongo-db:{connection_id}:{db}")
                     }
+                    (DatabaseKind::Sqlite, Some(table_name)) => {
+                        // SQLite 表节点 ID 不含 database 段
+                        format!("sqlite-table:{connection_id}:{table_name}")
+                    }
+                    (DatabaseKind::Sqlite, None) => {
+                        let db = database.as_deref().unwrap_or("");
+                        format!("sqlite-db:{connection_id}:{db}")
+                    }
                     (_, Some(table_name)) => {
                         let db = database.as_deref().unwrap_or("");
                         format!("mysql-table:{connection_id}:{db}:{table_name}")

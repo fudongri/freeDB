@@ -129,10 +129,15 @@ impl AppServices {
 
     pub async fn test_connection(&self, input: ConnectionProfileInput) -> Result<()> {
         validate_connection_input(&input)?;
-        let password = input
-            .password
-            .clone()
-            .ok_or_else(|| anyhow!("{}", tr!("测试连接需要密码")))?;
+        // SQLite 无需密码，与 require_saved_password 的 SQLite 分支保持一致
+        let password = if input.kind == DatabaseKind::Sqlite {
+            String::new()
+        } else {
+            input
+                .password
+                .clone()
+                .ok_or_else(|| anyhow!("{}", tr!("测试连接需要密码")))?
+        };
         let mut profile = ConnectionProfile::from_input("test-connection".into(), input);
         profile.password_saved = false;
         self.session_manager
