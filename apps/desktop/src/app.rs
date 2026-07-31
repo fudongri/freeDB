@@ -4697,6 +4697,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     cached_data_len: 0,
                     cached_summary_filter: SummaryFilter::Tables,
                 };
+                self.tabs.push(WorkspaceTab::TableSummary(state));
+                self.active_tab = self.tabs.len().saturating_sub(1);
+                self.scroll_tabs_to_end = true;
                 let services = self.services.clone();
                 let handle = self.runtime.handle().clone();
                 let (sender, receiver) = mpsc::channel();
