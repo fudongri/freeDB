@@ -4185,6 +4185,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
             }
             DatabaseKind::MongoDb => table.table.clone(),
+            DatabaseKind::Sqlite => quote_identifier(db_kind, &table.table),
         }
     }
 
@@ -7766,6 +7767,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     DatabaseKind::MySql => "MySQL",
                     DatabaseKind::Postgres => "PostgreSQL",
                     DatabaseKind::MongoDb => "MongoDB",
+                    DatabaseKind::Sqlite => "SQLite",
                 })
                 .unwrap_or("SQL");
             (tab.sql.clone(), tab.last_executed_sql.clone(), db_type, cid)
@@ -9183,6 +9185,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 table_pattern.replace('\'', "''"),
             ),
             DatabaseKind::MongoDb => return None,
+            DatabaseKind::Sqlite => return None,
         };
 
         let result = self.runtime.block_on(self.services.execute_sql(QueryExecution {
@@ -10701,6 +10704,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             DatabaseKind::MySql => "MySQL",
                                             DatabaseKind::Postgres => "PostgreSQL",
                                             DatabaseKind::MongoDb => "MongoDB",
+                                            DatabaseKind::Sqlite => "SQLite",
                                         })
                                         .unwrap_or("SQL")
                                         .to_string();
@@ -14501,6 +14505,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         DatabaseKind::MySql => "MySQL",
                                         DatabaseKind::Postgres => "PostgreSQL",
                                         DatabaseKind::MongoDb => "MongoDB",
+                                        DatabaseKind::Sqlite => "SQLite",
                                     };
                                     let kind_items = [
                                         ("MySQL", matches!(self.connection_form.kind, DatabaseKind::MySql)),
@@ -15747,6 +15752,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     "WIN1257", "WIN1258",
                                 ],
                                 DatabaseKind::MongoDb => &[],
+                                DatabaseKind::Sqlite => &[],
                             };
                             let charset_combo_id = egui::Id::new("ddl-charset-dropdown");
                             let collation_combo_id = egui::Id::new("ddl-collation-dropdown");
@@ -15785,6 +15791,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         DatabaseKind::MySql => get_mysql_collations(&charset),
                                         DatabaseKind::Postgres => get_pg_collations(&charset),
                                         DatabaseKind::MongoDb => Vec::new(),
+                                        DatabaseKind::Sqlite => Vec::new(),
                                     };
                                     let collation_display = if collation.is_empty() {
                                         tr!("（默认）").to_string()
@@ -19057,6 +19064,7 @@ impl ConnectionFormState {
             direct_connection: self.direct_connection,
             replica_set: optional_string(&self.replica_set),
             connection_uri: optional_string(&self.connection_uri),
+            file_path: None,
         }
     }
 }
@@ -19983,6 +19991,7 @@ fn parse_explain_result(result: &QueryResult, kind: DatabaseKind) -> Vec<Explain
         DatabaseKind::Postgres => parse_explain_postgres(result),
         DatabaseKind::MySql => parse_explain_mysql(result),
         DatabaseKind::MongoDb => Vec::new(),
+        DatabaseKind::Sqlite => Vec::new(),
     }
 }
 
@@ -24116,6 +24125,12 @@ fn summary_table_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)
             (tr!("主键"), 150.0, false),
             (tr!("类型"), 100.0, false),
         ],
+        DatabaseKind::Sqlite => vec![
+            (tr!("表名"), 150.0, false),
+            (tr!("行数"), 90.0, true),
+            (tr!("主键"), 100.0, false),
+            (tr!("类型"), 100.0, false),
+        ],
     }
 }
 
@@ -24137,6 +24152,10 @@ fn summary_view_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)>
             (tr!("集合名"), 200.0, false),
             (tr!("类型"), 100.0, false),
         ],
+        DatabaseKind::Sqlite => vec![
+            (tr!("表名"), 150.0, false),
+            (tr!("类型"), 100.0, false),
+        ],
     }
 }
 
@@ -24154,6 +24173,7 @@ fn summary_routine_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, boo
             (tr!("类型"), 100.0, false),
         ],
         DatabaseKind::MongoDb => vec![],
+        DatabaseKind::Sqlite => vec![],
     }
 }
 
@@ -25517,6 +25537,13 @@ fn generate_alter_table_sql(
                     ));
                 }
                 DatabaseKind::MongoDb => {}
+                DatabaseKind::Sqlite => {
+                    // SQLite 3.25+ 支持 RENAME COLUMN
+                    stmts.push(format!(
+                        "ALTER TABLE {full_table} RENAME COLUMN {} TO {}",
+                        q(&col.original_name), q(&col.name)
+                    ));
+                }
             }
         }
 
@@ -25619,6 +25646,9 @@ fn generate_alter_table_sql(
                 }
             }
             DatabaseKind::MongoDb => {}
+            DatabaseKind::Sqlite => {
+                // SQLite 不支持 ALTER COLUMN TYPE / SET NOT NULL，仅支持 RENAME COLUMN（上面已处理）
+            }
         }
     }
 
@@ -25660,6 +25690,9 @@ fn generate_alter_table_sql(
                 }
             }
             DatabaseKind::MongoDb => {}
+            DatabaseKind::Sqlite => {
+                // SQLite 不支持表注释
+            }
         }
     }
 
@@ -25708,6 +25741,7 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
         }
         DatabaseKind::MySql => q(name),
         DatabaseKind::MongoDb => q(name),
+        DatabaseKind::Sqlite => q(name),
     };
 
     let mut lines = Vec::new();
@@ -25739,8 +25773,13 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
                 _ => {}
             }
         }
+        // SQLite: 仅当列是 auto_increment 且为主键时，列级声明 PRIMARY KEY AUTOINCREMENT
+        let sqlite_pk_autoinc = db_kind == DatabaseKind::Sqlite && col.auto_increment && col.primary_key;
+        if sqlite_pk_autoinc {
+            parts.push("PRIMARY KEY AUTOINCREMENT".into());
+        }
         lines.push(format!("    {}", parts.join(" ")));
-        if col.primary_key { pk_cols.push(q(&col.name)); }
+        if col.primary_key && !sqlite_pk_autoinc { pk_cols.push(q(&col.name)); }
     }
     if !pk_cols.is_empty() {
         lines.push(format!("    PRIMARY KEY ({})", pk_cols.join(", ")));
@@ -29121,6 +29160,7 @@ fn qualified_table_name(database_kind: DatabaseKind, table: &TableRef) -> String
                 segments.push(database.to_string());
             }
         }
+        DatabaseKind::Sqlite => {}
     }
     segments.push(quote_identifier(database_kind, &table.table));
     segments.join(".")
@@ -29144,6 +29184,7 @@ fn qualified_table_name_display(database_kind: DatabaseKind, table: &TableRef) -
                 segments.push(database.to_string());
             }
         }
+        DatabaseKind::Sqlite => {}
     }
     segments.push(table.table.clone());
     segments.join(".")
@@ -29154,6 +29195,7 @@ fn quote_identifier(database_kind: DatabaseKind, identifier: &str) -> String {
         DatabaseKind::MySql => format!("`{}`", identifier.replace('`', "``")),
         DatabaseKind::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
         DatabaseKind::MongoDb => identifier.to_string(),
+        DatabaseKind::Sqlite => format!("\"{}\"", identifier.replace('"', "\"\"")),
     }
 }
 
@@ -29162,6 +29204,7 @@ fn cast_column_to_text(database_kind: DatabaseKind, column: &str) -> String {
         DatabaseKind::MySql => format!("CAST({column} AS CHAR)"),
         DatabaseKind::Postgres => format!("CAST({column} AS TEXT)"),
         DatabaseKind::MongoDb => column.to_string(),
+        DatabaseKind::Sqlite => format!("CAST({column} AS TEXT)"),
     }
 }
 
@@ -31686,6 +31729,22 @@ fn mongo_type_suggestions() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// SQLite 类型建议列表 (类型名, 中文描述)
+fn sqlite_type_suggestions() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("INTEGER", tr!("整数, 有符号 64 位")),
+        ("TEXT", tr!("文本, 字符串")),
+        ("REAL", tr!("浮点数, 8 字节 IEEE")),
+        ("BLOB", tr!("二进制, 原样存储")),
+        ("NUMERIC", tr!("数值, 亲和性类型")),
+        ("BOOLEAN", tr!("布尔, TRUE/FALSE")),
+        ("DATE", tr!("日期, YYYY-MM-DD")),
+        ("DATETIME", tr!("日期时间, YYYY-MM-DD HH:MM:SS")),
+        ("VARCHAR(255)", tr!("变长字符串, TEXT 亲和性")),
+        ("CHAR(1)", tr!("定长字符串, TEXT 亲和性")),
+    ]
+}
+
 /// 渲染类型输入框 + 下拉选择，返回是否有变更
 fn render_type_input_with_dropdown(
     ui: &mut egui::Ui,
@@ -31698,6 +31757,7 @@ fn render_type_input_with_dropdown(
         core_domain::DatabaseKind::MySql => mysql_type_suggestions(),
         core_domain::DatabaseKind::Postgres => pg_type_suggestions(),
         core_domain::DatabaseKind::MongoDb => mongo_type_suggestions(),
+        core_domain::DatabaseKind::Sqlite => sqlite_type_suggestions(),
     };
     let mut changed = false;
     let popup_id = id_source.with("type_popup");
@@ -32195,6 +32255,7 @@ fn connection_kind_badge(kind: &DatabaseKind) -> RichText {
         DatabaseKind::MySql => "MySQL",
         DatabaseKind::Postgres => "PostgreSQL",
         DatabaseKind::MongoDb => "MongoDB",
+        DatabaseKind::Sqlite => "SQLite",
     };
     RichText::new(label).size(10.5)
 }
