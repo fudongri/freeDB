@@ -3,6 +3,7 @@ use driver_api::{ConnectionHandle, ConnectionProvider};
 use driver_mongodb::MongoDbDriver;
 use driver_mysql::MySqlDriver;
 use driver_postgres::PostgresDriver;
+use driver_sqlite::SqliteDriver;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -18,6 +19,10 @@ fn pool_key(profile_id: &str, kind: DatabaseKind, database: Option<&str>) -> Str
             Some(db) => format!("{profile_id}::{db}"),
             None => format!("{profile_id}::__no_db__"),
         },
+        DatabaseKind::Sqlite => match database {
+            Some(db) => format!("{profile_id}::sqlite:{db}"),
+            None => format!("{profile_id}::sqlite:__no_db__"),
+        },
     }
 }
 
@@ -28,6 +33,7 @@ pub struct ConnectionPool {
     pub postgres: PostgresDriver,
     pub mysql: MySqlDriver,
     pub mongodb: MongoDbDriver,
+    pub sqlite: SqliteDriver,
     keepalive_secs: u64,
 }
 
@@ -38,6 +44,7 @@ impl ConnectionPool {
             postgres: PostgresDriver,
             mysql: MySqlDriver,
             mongodb: MongoDbDriver,
+            sqlite: SqliteDriver,
             keepalive_secs,
         }
     }
@@ -47,6 +54,7 @@ impl ConnectionPool {
             DatabaseKind::Postgres => &self.postgres,
             DatabaseKind::MySql => &self.mysql,
             DatabaseKind::MongoDb => &self.mongodb,
+            DatabaseKind::Sqlite => &self.sqlite,
         }
     }
 
@@ -56,6 +64,8 @@ impl ConnectionPool {
             &self.postgres
         } else if handle.is_mongodb() {
             &self.mongodb
+        } else if handle.is_sqlite() {
+            &self.sqlite
         } else {
             &self.mysql
         };

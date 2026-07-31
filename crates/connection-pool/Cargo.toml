@@ -10,6 +10,7 @@ driver-api = { path = "../driver-api" }
 driver-mongodb = { path = "../driver-mongodb" }
 driver-mysql = { path = "../driver-mysql" }
 driver-postgres = { path = "../driver-postgres" }
+driver-sqlite = { path = "../driver-sqlite" }
 parking_lot.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true

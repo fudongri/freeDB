@@ -973,6 +973,7 @@ dependencies = [
  "driver-mongodb",
  "driver-mysql",
  "driver-postgres",
+ "driver-sqlite",
  "parking_lot",
  "tokio",
  "tokio-postgres",
