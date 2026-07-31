@@ -9,6 +9,7 @@ pub enum DatabaseKind {
     MySql,
     Postgres,
     MongoDb,
+    Sqlite,
 }
 
 impl DatabaseKind {
@@ -17,6 +18,7 @@ impl DatabaseKind {
             Self::MySql => "mysql",
             Self::Postgres => "postgres",
             Self::MongoDb => "mongodb",
+            Self::Sqlite => "sqlite",
         }
     }
 
@@ -25,6 +27,7 @@ impl DatabaseKind {
             Self::MySql => "utf8mb4",
             Self::Postgres => "UTF8",
             Self::MongoDb => "",
+            Self::Sqlite => "",
         }
     }
 
@@ -33,6 +36,7 @@ impl DatabaseKind {
             Self::MySql => "utf8mb4_unicode_ci",
             Self::Postgres => "",
             Self::MongoDb => "",
+            Self::Sqlite => "",
         }
     }
 
@@ -41,6 +45,7 @@ impl DatabaseKind {
             "mysql" => Ok(Self::MySql),
             "postgres" => Ok(Self::Postgres),
             "mongodb" => Ok(Self::MongoDb),
+            "sqlite" => Ok(Self::Sqlite),
             _ => Err(AppError::Validation(format!("unsupported database kind: {value}"))),
         }
     }
@@ -87,6 +92,7 @@ pub struct ConnectionProfileInput {
     pub direct_connection: bool,
     pub replica_set: Option<String>,
     pub connection_uri: Option<String>,
+    pub file_path: Option<String>,
 }
 
 impl Default for ConnectionProfileInput {
@@ -105,6 +111,7 @@ impl Default for ConnectionProfileInput {
             direct_connection: false,
             replica_set: None,
             connection_uri: None,
+            file_path: None,
         }
     }
 }
@@ -128,6 +135,7 @@ pub struct ConnectionProfile {
     pub direct_connection: bool,
     pub replica_set: Option<String>,
     pub connection_uri: Option<String>,
+    pub file_path: Option<String>,
 }
 
 impl ConnectionProfile {
@@ -151,6 +159,7 @@ impl ConnectionProfile {
             direct_connection: input.direct_connection,
             replica_set: input.replica_set,
             connection_uri: input.connection_uri,
+            file_path: input.file_path,
         }
     }
 }
