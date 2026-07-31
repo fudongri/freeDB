@@ -31,7 +31,7 @@ impl ConnectionStore {
         let mut statement = connection.prepare(
             "SELECT id, name, kind, group_name, host, port, username, default_database,
                     ssl_mode, sort_order, last_used_at, created_at, updated_at,
-                    direct_connection, replica_set, connection_uri
+                    direct_connection, replica_set, connection_uri, file_path
              FROM connection_profiles
              ORDER BY sort_order ASC, name ASC",
         )?;
@@ -55,8 +55,8 @@ impl ConnectionStore {
             "INSERT INTO connection_profiles (
                 id, name, kind, group_name, host, port, username, default_database,
                 ssl_mode, sort_order, last_used_at, created_at, updated_at,
-                direct_connection, replica_set, connection_uri
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                direct_connection, replica_set, connection_uri, file_path
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 profile.id,
                 profile.name,
@@ -74,6 +74,7 @@ impl ConnectionStore {
                 profile.direct_connection,
                 profile.replica_set,
                 profile.connection_uri,
+                profile.file_path,
             ],
         )?;
         Ok(())
@@ -86,7 +87,8 @@ impl ConnectionStore {
              SET name = ?2, kind = ?3, group_name = ?4, host = ?5, port = ?6,
                  username = ?7, default_database = ?8, ssl_mode = ?9,
                  last_used_at = ?10, updated_at = ?11,
-                 direct_connection = ?12, replica_set = ?13, connection_uri = ?14
+                 direct_connection = ?12, replica_set = ?13, connection_uri = ?14,
+                 file_path = ?15
              WHERE id = ?1",
             params![
                 profile.id,
@@ -103,6 +105,7 @@ impl ConnectionStore {
                 profile.direct_connection,
                 profile.replica_set,
                 profile.connection_uri,
+                profile.file_path,
             ],
         )?;
         Ok(())
@@ -123,7 +126,7 @@ impl ConnectionStore {
             .query_row(
                 "SELECT id, name, kind, group_name, host, port, username, default_database,
                         ssl_mode, sort_order, last_used_at, created_at, updated_at,
-                        direct_connection, replica_set, connection_uri
+                        direct_connection, replica_set, connection_uri, file_path
                  FROM connection_profiles WHERE id = ?1",
                 params![connection_id],
                 map_profile,
@@ -213,7 +216,12 @@ impl ConnectionStore {
             "ALTER TABLE connection_profiles ADD COLUMN connection_uri TEXT",
             [],
         );
-        // 迁移：更新 kind CHECK 约束以包含 'mongodb'
+        // 迁移：已有数据库添加 file_path 列
+        let _ = connection.execute(
+            "ALTER TABLE connection_profiles ADD COLUMN file_path TEXT",
+            [],
+        );
+        // 迁移：更新 kind CHECK 约束以包含 'mongodb' 与 'sqlite'，并补齐全部列（避免重建丢列）
         let needs_check_migration = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='connection_profiles'",
@@ -221,12 +229,12 @@ impl ConnectionStore {
                 |row| row.get::<_, String>(0),
             )
             .unwrap_or_default();
-        if !needs_check_migration.contains("'mongodb'") {
+        if !needs_check_migration.contains("'mongodb'") || !needs_check_migration.contains("'sqlite'") {
             let _ = connection.execute_batch(
                 "BEGIN;
                  CREATE TABLE _connection_profiles_new (
                      id TEXT PRIMARY KEY, name TEXT NOT NULL,
-                     kind TEXT NOT NULL CHECK (kind IN ('mysql', 'postgres', 'mongodb')),
+                     kind TEXT NOT NULL CHECK (kind IN ('mysql', 'postgres', 'mongodb', 'sqlite')),
                      group_name TEXT, host TEXT NOT NULL, port INTEGER NOT NULL,
                      username TEXT NOT NULL, default_database TEXT,
                      connect_timeout_secs INTEGER NOT NULL DEFAULT 5,
@@ -234,15 +242,18 @@ impl ConnectionStore {
                      ssh_tunnel_json TEXT NOT NULL DEFAULT 'null',
                      sort_order INTEGER NOT NULL DEFAULT 0,
                      last_used_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                     direct_connection INTEGER NOT NULL DEFAULT 0
+                     direct_connection INTEGER NOT NULL DEFAULT 0,
+                     replica_set TEXT, connection_uri TEXT, file_path TEXT
                  );
                  INSERT INTO _connection_profiles_new
                      (id, name, kind, group_name, host, port, username, default_database,
                       connect_timeout_secs, ssl_mode, sort_order,
-                      last_used_at, created_at, updated_at)
+                      last_used_at, created_at, updated_at,
+                      direct_connection, replica_set, connection_uri, file_path)
                  SELECT id, name, kind, group_name, host, port, username, default_database,
                         connect_timeout_secs, ssl_mode, sort_order,
-                        last_used_at, created_at, updated_at
+                        last_used_at, created_at, updated_at,
+                        direct_connection, replica_set, connection_uri, file_path
                  FROM connection_profiles;
                  DROP TABLE connection_profiles;
                  ALTER TABLE _connection_profiles_new RENAME TO connection_profiles;
@@ -380,6 +391,7 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
     let direct_connection: i64 = row.get(13)?;
     let replica_set: Option<String> = row.get(14)?;
     let connection_uri: Option<String> = row.get(15)?;
+    let file_path: Option<String> = row.get(16)?;
 
     Ok(ConnectionProfile {
         id: row.get(0)?,
@@ -399,6 +411,7 @@ fn map_profile(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionProfile> {
         direct_connection: direct_connection != 0,
         replica_set,
         connection_uri,
+        file_path,
     })
 }
 
