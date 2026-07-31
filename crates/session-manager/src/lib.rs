@@ -44,6 +44,7 @@ macro_rules! with_pool {
                 DatabaseKind::Postgres => &$self.pool.postgres,
                 DatabaseKind::MySql => &$self.pool.mysql,
                 DatabaseKind::MongoDb => &$self.pool.mongodb,
+                DatabaseKind::Sqlite => &$self.pool.sqlite,
             };
             match $call.await {
                 Ok(val) => {
@@ -129,6 +130,7 @@ impl SessionManager {
             DatabaseKind::MySql => &self.pool.mysql,
             DatabaseKind::Postgres => &self.pool.postgres,
             DatabaseKind::MongoDb => &self.pool.mongodb,
+            DatabaseKind::Sqlite => &self.pool.sqlite,
         }
     }
 
@@ -249,6 +251,7 @@ impl SessionManager {
                     DatabaseKind::Postgres => &self.pool.postgres,
                     DatabaseKind::MySql => &self.pool.mysql,
                     DatabaseKind::MongoDb => &self.pool.mongodb,
+                    DatabaseKind::Sqlite => &self.pool.sqlite,
                 };
                 let exec = QueryExecution {
                     connection_id: connection_id.to_string(),
@@ -323,6 +326,7 @@ impl SessionManager {
                     DatabaseKind::Postgres => &self.pool.postgres,
                     DatabaseKind::MySql => &self.pool.mysql,
                     DatabaseKind::MongoDb => &self.pool.mongodb,
+                    DatabaseKind::Sqlite => &self.pool.sqlite,
                 };
                 let exec = QueryExecution {
                     connection_id: connection_id.to_string(),
