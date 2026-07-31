@@ -269,7 +269,6 @@ fn en(key: &'static str) -> &'static str {
         "字符集:" => "Charset:",
         "创建中..." => "Creating...",
         "\u{1F4BE} 保存" => "\u{1F4BE} Save",
-        "语句预览" => "Statement Preview",
         "\u{FF0B} 添加字段" => "+ Add Column",
         "\u{FF0B} 插入字段" => "+ Insert Column",
         "\u{2190} 插入字段" => "\u{2190} Insert Column",
@@ -549,7 +548,6 @@ fn en(key: &'static str) -> &'static str {
         "取消 (Esc)" => "Cancel (Esc)",
         "重置为 1000" => "Reset to 1000",
         "暂无 DDL" => "No DDL",
-        "当前对象没有可展示的 DDL" => "No DDL for this object",
         "正在加载 DDL..." => "Loading DDL...",
         "🔍 EXPLAIN 执行计划" => "🔍 Explain Plan",
         "是 null" => "is null",
@@ -746,8 +744,6 @@ fn en(key: &'static str) -> &'static str {
         "执行 (Enter)" => "Execute (Enter)",
         "确认保存" => "Confirm Save",
         "即将执行 {} 条 SQL，修改 {} 个单元格：" => "About to execute {} SQL statement(s), modifying {} cell(s):",
-        "即将执行 {} 条 SQL，修改 {} 个单元格：" => "About to execute {} SQL statement(s), modifying {} cell(s):",
-        "执行失败" => "Execution failed",
         "已有" => "Existing",
         "首个" => "First",
         "第 {} 页" => "Page {}",
@@ -831,7 +827,6 @@ fn en(key: &'static str) -> &'static str {
         "表定义未加载" => "Table definition not loaded",
         "列约束" => "Column Constraints",
         "清除全部" => "Clear All",
-        "设置" => "Set",
         "收起" => "Collapse",
         "范围" => "Range",
         "枚举" => "Enum",
@@ -846,7 +841,6 @@ fn en(key: &'static str) -> &'static str {
         "枚举: {}..." => "Enum: {}...",
         "枚举: {}" => "Enum: {}",
         "正则: {}" => "Regex: {}",
-        "应用" => "Apply",
         "允许NULL值" => "Allow NULL",
         "使用默认值" => "Use Default",
 
@@ -860,7 +854,6 @@ fn en(key: &'static str) -> &'static str {
         "下载失败: HTTP {}" => "Download failed: HTTP {}",
         "无法创建临时文件: {}" => "Cannot create temp file: {}",
         "下载中断: {}" => "Download interrupted: {}",
-        "写入文件失败: {}" => "Failed to write file: {}",
         "挂载 DMG 失败: {}" => "Failed to mount DMG: {}",
         "挂载 DMG 失败" => "Failed to mount DMG",
         "无法备份旧版本: {}" => "Cannot backup old version: {}",
@@ -919,8 +912,4 @@ fn en(key: &'static str) -> &'static str {
 
         _ => key,
     }
-}
-
-fn zh(key: &'static str) -> &'static str {
-    key
 }
