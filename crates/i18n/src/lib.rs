@@ -435,6 +435,15 @@ fn en(key: &'static str) -> &'static str {
         // ── driver-postgres.rs ──
         "PostgreSQL 表格编辑将在后续迭代中补全" => "PostgreSQL table editing will be available in a future release",
 
+        // ── driver-sqlite.rs ──
+        "SQLite 需要文件路径" => "SQLite requires a file path",
+        "SQLite 文件不存在: {}" => "SQLite file does not exist: {}",
+        "SQLite 表格编辑请在数据视图中直接修改后保存" => "SQLite table editing: modify directly in the data view and save",
+        "SQLite 是单文件数据库，无需创建数据库" => "SQLite is a single-file database; no database creation is needed",
+        "SQLite 是单文件数据库，无需重命名数据库" => "SQLite is a single-file database; renaming databases is not needed",
+        "SQLite 是单文件数据库，无需删除数据库" => "SQLite is a single-file database; deleting databases is not needed",
+        "SQLite 不支持 Schema" => "SQLite does not support schemas",
+
         // ── app.rs 慢查询分析 ──
         "导入日志文件" => "Import Log File",
         "日志文件" => "Log Files",
