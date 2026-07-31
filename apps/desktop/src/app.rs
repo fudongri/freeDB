@@ -14548,31 +14548,34 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 });
                                 if self.connection_form.kind == DatabaseKind::Sqlite {
                                     form_grid_row(ui, tr!("文件路径"), |ui| {
-                                        ui.add_sized(
-                                            [300.0, 30.0],
-                                            TextEdit::singleline(&mut self.connection_form.file_path),
-                                        );
-                                        if mini_button(ui, tr!("浏览..."), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
-                                            if let Some(path) = rfd::FileDialog::new()
-                                                .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
-                                                .pick_file()
-                                            {
-                                                self.connection_form.file_path = path.display().to_string();
+                                        ui.horizontal(|ui| {
+                                            ui.add_sized(
+                                                [280.0, 30.0],
+                                                TextEdit::singleline(&mut self.connection_form.file_path),
+                                            );
+                                            if mini_button(ui, tr!("浏览..."), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                                if let Some(path) = rfd::FileDialog::new()
+                                                    .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
+                                                    .pick_file()
+                                                {
+                                                    self.connection_form.file_path = path.display().to_string();
+                                                }
                                             }
-                                        }
-                                        if mini_button(ui, tr!("新建空库"), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
-                                            if let Some(path) = rfd::FileDialog::new()
-                                                .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
-                                                .set_file_name("new.db")
-                                                .save_file()
+                                            let new_db_btn = mini_button(ui, tr!("新建空库"), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm));
+                                            if new_db_btn
+                                                .on_hover_text(tr!("新建空库：选择保存位置即可创建新的 SQLite 数据库文件"))
+                                                .clicked()
                                             {
-                                                self.connection_form.file_path = path.display().to_string();
+                                                if let Some(path) = rfd::FileDialog::new()
+                                                    .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
+                                                    .set_file_name("new.db")
+                                                    .save_file()
+                                                {
+                                                    self.connection_form.file_path = path.display().to_string();
+                                                }
                                             }
-                                        }
+                                        });
                                     });
-                                    ui.small(
-                                        RichText::new(tr!("新建空库：选择保存位置即可创建新的 SQLite 数据库文件")).color(palette.subtitle),
-                                    );
                                 }
                                 form_row(ui, tr!("名称"), &mut self.connection_form.name);
                                 if self.connection_form.kind != DatabaseKind::Sqlite {

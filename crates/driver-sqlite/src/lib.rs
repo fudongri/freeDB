@@ -182,38 +182,46 @@ impl DatabaseDriver for SqliteDriver {
                 ))
             })?;
             let cols = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-            // 唯一索引检测：sqlite_master 没有 unique 列，须用 PRAGMA index_list 的 unique 字段
-            // 1) 收集 unique=1 的索引名
+            // 索引检测：sqlite_master 没有 unique 列，须用 PRAGMA index_list 的 unique 字段
+            // 收集所有索引 (name, unique)，auto 索引的 sql 为 NULL 直接跳过
             let mut ilstmt = c.prepare(&format!("PRAGMA index_list({})", quote_ident(&table_name)))?;
-            let uniq_indexes: Vec<String> = ilstmt
-                .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
-                .filter(|(_, unique)| *unique == 1)
-                .map(|(name, _)| name)
-                .collect();
-            // 2) 取这些索引的 CREATE 声明（auto index 的 sql 为 NULL，跳过）
+            let index_entries: Vec<(String, bool)> = ilstmt
+                .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // 取这些索引的 CREATE 声明；uniq_sqls 仅保留唯一索引用于列级 unique 标记
             let mut uniq_sqls: Vec<String> = Vec::new();
-            for name in uniq_indexes {
+            let mut all_index_sqls: Vec<String> = Vec::new();
+            for (name, unique) in index_entries {
                 if let Some(sql) = c
                     .query_row(
                         "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1 AND sql IS NOT NULL",
                         [&name],
-                        |row| row.get(0),
+                        |row| row.get::<_, String>(0),
                     )
                     .optional()?
                 {
-                    uniq_sqls.push(sql);
+                    all_index_sqls.push(sql.clone());
+                    if unique {
+                        uniq_sqls.push(sql);
+                    }
                 }
             }
             // 建表 SQL（含视图的 sqlite_master.sql）
-            let create_sql: Option<String> = c
+            let mut create_sql: Option<String> = c
                 .query_row(
                     "SELECT sql FROM sqlite_master WHERE type IN ('table','view') AND name=?1",
                     [&table_name],
                     |row| row.get(0),
                 )
                 .unwrap_or(None);
+            // 追加独立 CREATE INDEX，供 UI 索引页解析展示（与 PostgreSQL 驱动的做法一致）
+            if let Some(sql) = create_sql.as_mut() {
+                for idx_sql in &all_index_sqls {
+                    sql.push('\n');
+                    sql.push_str(idx_sql);
+                    sql.push(';');
+                }
+            }
             Ok((cols, uniq_sqls, create_sql))
         })
         .await?;
@@ -716,6 +724,9 @@ mod tests {
         // name 列无唯一索引，不应被误判为 unique
         assert!(!def.columns[1].unique);
         assert!(def.create_sql.is_some());
+        // 独立 CREATE INDEX 应追加到 create_sql，供 UI 索引页解析展示
+        let create_sql = def.create_sql.unwrap();
+        assert!(create_sql.contains("CREATE UNIQUE INDEX idx_email ON t (email)"), "create_sql 应包含独立索引 SQL: {create_sql}");
     }
 
     #[tokio::test]

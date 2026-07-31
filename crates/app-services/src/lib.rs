@@ -771,6 +771,12 @@ impl AppServices {
     }
 
     fn require_saved_password(&self, connection_id: &str) -> Result<String> {
+        // SQLite 无需密码，直接返回空密码，避免误报"未保存密码"
+        if let Some(profile) = self.connection_store.get_connection(connection_id)? {
+            if profile.kind == DatabaseKind::Sqlite {
+                return Ok(String::new());
+            }
+        }
         self.secure_store
             .load_password(connection_id)?
             .ok_or_else(|| anyhow!("{}", tr!("该连接未保存密码，请重新编辑连接后保存密码")))
