@@ -41,7 +41,7 @@ getrandom = "0.3"
 hex = "0.4"
 egui = "0.33"
 egui_dock = "0.18"
-egui_extras = "0.33"
+egui_extras = { version = "0.33", features = ["svg"] }
 muda = "0.16"
 mongodb = "3.2"
 mysql_async = { version = "0.36", features = ["native-tls-tls"] }

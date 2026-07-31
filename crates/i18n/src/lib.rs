@@ -894,6 +894,7 @@ fn en(key: &'static str) -> &'static str {
         "默认模型" => "Default Model",
         "配置 AI 模型与密钥" => "Configure AI models and API keys",
         "自定义 URL" => "Custom URL",
+        "在侧边栏定位" => "Locate in sidebar",
 
         _ => key,
     }

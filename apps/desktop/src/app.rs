@@ -168,6 +168,7 @@ pub struct DesktopApp {
     pending_test_connection: Option<Receiver<(bool, String)>>,
     loading_connections: HashSet<String>,
     loading_nodes: HashSet<String>,
+    sidebar_locate_node: Option<String>,   // pending 滚动目标节点 ID（⊕ 定位）
     pending_node_children: Vec<Receiver<NodeChildrenResult>>,
     ddl_input_dialog: Option<DdlInputDialog>,
     ddl_pending_delete: Option<DdlPendingDelete>,
@@ -1729,6 +1730,7 @@ impl DesktopApp {
             pending_database_list: None,
             loading_connections: HashSet::new(),
             loading_nodes: HashSet::new(),
+            sidebar_locate_node: None,
             pending_node_children: Vec::new(),
             ddl_input_dialog: None,
             ddl_pending_delete: None,
@@ -5603,6 +5605,59 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     _ => {}
                 }
 
+                // ⊕ 定位：逐帧展开祖先节点，直到目标节点出现在树中
+                if let Some(ref target_id) = self.sidebar_locate_node.clone() {
+                    let conn_id = target_id.split(':').nth(1).unwrap_or("").to_string();
+                    if !conn_id.is_empty() {
+                        // 确保连接根节点已加载
+                        if !self.roots_by_connection.contains_key(&conn_id)
+                            && !self.loading_connections.contains(&conn_id)
+                        {
+                            self.load_connection_tree(&conn_id);
+                        }
+                        if self.roots_by_connection.contains_key(&conn_id) {
+                            self.expanded_nodes.insert(conn_id.clone());
+                        }
+
+                        // 解析 target_id 的 db/schema 段，用于按字段匹配祖先节点
+                        // 结构：{type}:{conn}:{db}[:{schema}]:{name}
+                        let target_parts: Vec<&str> = target_id.split(':').collect();
+                        let target_db = target_parts.get(2).copied().unwrap_or("");
+                        let target_schema = target_parts.get(3).copied().unwrap_or("");
+
+                        // 展开所有祖先节点（Database / Schema 节点无法用 ID 前缀匹配，因为
+                        // 前缀是 *-db:/*-schema: 而目标表是 *-table:/*-coll:）
+                        let all_expandable: Vec<ExplorerNode> = self.roots_by_connection
+                            .values()
+                            .flatten()
+                            .chain(self.children_by_node.values().flatten())
+                            .filter(|n| n.expandable && n.connection_id == conn_id)
+                            .cloned()
+                            .collect();
+
+                        for node in &all_expandable {
+                            let is_ancestor = match node.node_type {
+                                ExplorerNodeType::Database => {
+                                    node.database.as_deref() == Some(target_db)
+                                }
+                                ExplorerNodeType::Schema => {
+                                    node.database.as_deref() == Some(target_db)
+                                        && node.schema.as_deref() == Some(target_schema)
+                                }
+                                _ => false,
+                            };
+                            if is_ancestor {
+                                self.expanded_nodes.insert(node.id.clone());
+                                if !self.children_by_node.contains_key(&node.id)
+                                    && !self.loading_nodes.contains(&node.id)
+                                {
+                                    self.load_children(&conn_id, node);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let connection_count = self.connections.len();
 
                 // 收集每行 rect
@@ -6163,6 +6218,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return;
         }
 
+        // 节点行矩形（horizontal 闭包内赋值，供 ⊕ 定位滚动使用）
+        let mut node_row_rect = None;
+
         ui.horizontal(|ui| {
             let selected = self.selected_tree_item.as_deref() == Some(&node.id);
             ui.add_space((depth * 12) as f32);
@@ -6255,6 +6313,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 false,
                 ui.available_width() - spinner_width,
             );
+            node_row_rect = Some(response.rect);
             if is_node_loading {
                 ui.add(egui::Spinner::new().size(self.theme.fonts.xl));
             }
@@ -6779,6 +6838,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             } // end of else (non-renaming mode)
         });
+
+        // ⊕ 定位：滚动到目标节点行
+        if self.sidebar_locate_node.as_deref() == Some(&node.id) {
+            if let Some(rect) = node_row_rect {
+                ui.scroll_to_rect(rect, Some(egui::Align::Min));
+            }
+            self.sidebar_locate_node = None;
+        }
 
         let explicitly_expanded = self.expanded_nodes.contains(&node.id);
         // 展开的节点显示子节点
@@ -8408,6 +8475,42 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::OpenAiSettings => {
                 self.ai_settings_editing_index = self.ai_model_store.active_index;
                 self.is_ai_settings_open = true;
+            }
+            TabUiAction::LocateInSidebar { connection_id, db_kind, database, schema, table_name } => {
+                // 目标节点 ID（展开逻辑由 render_sidebar 每帧处理）
+                // table_name 为 None 时定位到库/模式节点
+                let target_id = match (db_kind, table_name) {
+                    (DatabaseKind::Postgres, Some(table_name)) => {
+                        let db = database.as_deref().unwrap_or("");
+                        let s = schema.as_deref().unwrap_or("public");
+                        format!("pg-table:{connection_id}:{db}:{s}:{table_name}")
+                    }
+                    (DatabaseKind::Postgres, None) => {
+                        let db = database.as_deref().unwrap_or("");
+                        match schema {
+                            Some(s) => format!("pg-schema:{connection_id}:{db}:{s}"),
+                            None => format!("pg-db:{connection_id}:{db}"),
+                        }
+                    }
+                    (DatabaseKind::MongoDb, Some(table_name)) => {
+                        let db = database.as_deref().unwrap_or("test");
+                        format!("mongo-coll:{connection_id}:{db}:{table_name}")
+                    }
+                    (DatabaseKind::MongoDb, None) => {
+                        let db = database.as_deref().unwrap_or("test");
+                        format!("mongo-db:{connection_id}:{db}")
+                    }
+                    (_, Some(table_name)) => {
+                        let db = database.as_deref().unwrap_or("");
+                        format!("mysql-table:{connection_id}:{db}:{table_name}")
+                    }
+                    (_, None) => {
+                        let db = database.as_deref().unwrap_or("");
+                        format!("mysql-db:{connection_id}:{db}")
+                    }
+                };
+                self.selected_tree_item = Some(target_id.clone());
+                self.sidebar_locate_node = Some(target_id);
             }
         }
     }
@@ -11496,6 +11599,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         fonts: &ui_theme::FontSizes,
     ) -> TabUiAction {
         let palette = mac_ui_palette_from_ui(ui);
+        let mut action = TabUiAction::None;
 
         // 根据筛选标签选择合适的列定义
         let cols = match tab.filter {
@@ -11604,6 +11708,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .inner_margin(egui::Margin::symmetric(10, 6))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                if locate_icon_button(ui, palette.text)
+                                    .on_hover_text(tr!("在侧边栏定位"))
+                                    .clicked()
+                                {
+                                    action = TabUiAction::LocateInSidebar {
+                                        connection_id: tab.connection_id.clone(),
+                                        db_kind: tab.database_kind,
+                                        database: Some(tab.database.clone()),
+                                        schema: tab.schema.clone(),
+                                        table_name: None,
+                                    };
+                                }
                                 ui.label(
                                     RichText::new(tab.title.as_str())
                                         .strong()
@@ -12330,7 +12446,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
         }
 
-        TabUiAction::None
+        action
     }
 
     fn render_schema_summary_tab(
@@ -12408,6 +12524,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .inner_margin(egui::Margin::symmetric(10, 6))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                if locate_icon_button(ui, palette.text)
+                                    .on_hover_text(tr!("在侧边栏定位"))
+                                    .clicked()
+                                {
+                                    action = TabUiAction::LocateInSidebar {
+                                        connection_id: tab.connection_id.clone(),
+                                        db_kind: tab.database_kind,
+                                        database: Some(tab.database.clone()),
+                                        schema: None,
+                                        table_name: None,
+                                    };
+                                }
                                 ui.label(RichText::new(tab.title.as_str()).strong().color(palette.text));
                                 ui.separator();
                                 let search_frame = egui::Frame::new()
@@ -12793,6 +12921,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .inner_margin(egui::Margin::symmetric(10, 6))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                if locate_icon_button(ui, palette.text)
+                                    .on_hover_text(tr!("在侧边栏定位"))
+                                    .clicked()
+                                {
+                                    action = TabUiAction::LocateInSidebar {
+                                        connection_id: tab.table.connection_id.clone(),
+                                        db_kind: tab.database_kind,
+                                        database: tab.table.database.clone(),
+                                        schema: tab.table.schema.clone(),
+                                        table_name: Some(tab.table.table.clone()),
+                                    };
+                                }
                                 ui.label(
                                     RichText::new(tab.title.as_str())
                                         .strong()
@@ -18983,6 +19123,13 @@ enum TabUiAction {
         database: Option<String>,
         schema: Option<String>,
         table: String,
+    },
+    LocateInSidebar {
+        connection_id: String,
+        db_kind: DatabaseKind,
+        database: Option<String>,
+        schema: Option<String>,
+        table_name: Option<String>,
     },
     ExecuteStructureSql(String),
     LoadSavedQuery(String),
@@ -31179,6 +31326,24 @@ fn is_long_text_type(data_type: &str) -> bool {
     )
 }
 
+
+/// 侧边栏定位图标按钮：白色 SVG 图标 tint 成标题文字色，无边框，hover 显示浅底。
+/// 图标绘制位置下移 1px，补偿 CJK 标题字形比几何中心偏下的视觉重心。
+fn locate_icon_button(ui: &mut egui::Ui, tint: egui::Color32) -> egui::Response {
+    let size = egui::vec2(26.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, ui.visuals().widgets.hovered.corner_radius, ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        egui::Image::new(egui::include_image!("../assets/svg/locate.svg"))
+            .fit_to_exact_size(egui::vec2(18.0, 18.0))
+            .tint(tint)
+            .paint_at(ui, egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 1.0), egui::vec2(18.0, 18.0)));
+    }
+    response
+}
 
 fn mini_button(ui: &mut egui::Ui, label: &str, style: ButtonStyle) -> egui::Response {
     ui.add(

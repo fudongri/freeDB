@@ -165,6 +165,7 @@ fn main() -> eframe::Result<()> {
         APP_NAME,
         options,
         Box::new(move |cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             configure_fonts(&cc.egui_ctx);
             Ok(Box::new(DesktopApp::new(runtime, services, log_buffer, menu_event_rx, native_menu, menu_file, menu_view, menu_settings, menu_tools, menu_slow_query, menu_shortcuts, menu_log, menu_lang, menu_scroll_speed, menu_theme, menu_tab_back, menu_tab_forward, menu_recent_tabs, menu_ai, menu_ai_settings, locale)))
         }),
