@@ -1376,7 +1376,9 @@ fn parse_jsonish_doc(input: &str) -> AppResult<Document> {
     let preprocessed = preprocess_mongo_json(input);
     let value: serde_json::Value = serde_json::from_str(&preprocessed)
         .map_err(|e| AppError::Query(tr!("JSON 解析错误: {}").replace("{}", &e.to_string())))?;
-    match json_value_to_bson(value) {
+    match mongodb::bson::to_bson(&value)
+        .map_err(|e| AppError::Query(tr!("BSON 转换错误: {}").replace("{}", &e.to_string())))?
+    {
         Bson::Document(doc) => Ok(doc),
         other => Ok(doc! { "_value": other }),
     }
