@@ -7213,27 +7213,30 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 } else if matches!(node.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function) {
                     actions.push(SidebarAction::OpenRoutine { node: node.clone(), force_new_tab: false });
                 } else if node.expandable {
-                    // Database/Schema 双击同时打开表汇总
-                    match node.node_type {
-                        ExplorerNodeType::Database => {
-                            actions.push(SidebarAction::OpenTableSummary {
-                                connection_id: node.connection_id.clone(),
-                                database: node.name.clone(),
-                                schema: None,
-                                db_label: node.name.clone(),
-                                ddl_target: None,
-                            });
+                    // 折叠（节点已展开）时只折叠，不打开表汇总
+                    if !self.expanded_nodes.contains(&node.id) {
+                        // Database/Schema 双击展开时同时打开表汇总
+                        match node.node_type {
+                            ExplorerNodeType::Database => {
+                                actions.push(SidebarAction::OpenTableSummary {
+                                    connection_id: node.connection_id.clone(),
+                                    database: node.name.clone(),
+                                    schema: None,
+                                    db_label: node.name.clone(),
+                                    ddl_target: None,
+                                });
+                            }
+                            ExplorerNodeType::Schema => {
+                                actions.push(SidebarAction::OpenTableSummary {
+                                    connection_id: node.connection_id.clone(),
+                                    database: node.database.clone().unwrap_or_default(),
+                                    schema: Some(node.name.clone()),
+                                    db_label: node.name.clone(),
+                                    ddl_target: None,
+                                });
+                            }
+                            _ => {}
                         }
-                        ExplorerNodeType::Schema => {
-                            actions.push(SidebarAction::OpenTableSummary {
-                                connection_id: node.connection_id.clone(),
-                                database: node.database.clone().unwrap_or_default(),
-                                schema: Some(node.name.clone()),
-                                db_label: node.name.clone(),
-                                ddl_target: None,
-                            });
-                        }
-                        _ => {}
                     }
                     actions.push(SidebarAction::ToggleNode(
                         node.connection_id.clone(),
