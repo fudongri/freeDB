@@ -25409,6 +25409,46 @@ fn table_cell_content_rect(rect: egui::Rect) -> egui::Rect {
     rect.shrink2(Vec2::new(4.0, 1.0))
 }
 
+/// 表信息页右侧 DDL 面板内容：对象名 + 复制按钮 + 格式化 DDL（或加载/错误/占位状态）
+fn render_summary_ddl_panel(
+    ui: &mut egui::Ui,
+    tab: &TableSummaryTabState,
+    colors: &ui_theme::ThemeColors,
+    fonts: &ui_theme::FontSizes,
+) {
+    let palette = mac_ui_palette_from_ui(ui);
+    if let Some(ddl_text) = &tab.ddl_text {
+        let title = match &tab.ddl_target {
+            Some(DdlTarget::Table(node)) | Some(DdlTarget::Routine(node)) => node.name.clone(),
+            None => String::new(),
+        };
+        // 对象名头部：render_definition_sql_view 不展示 title 文本，仅用于 ScrollArea id
+        if !title.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(&title).strong().color(palette.text));
+            ui.add_space(8.0);
+        }
+        render_definition_sql_view(ui, &title, ddl_text, colors, fonts);
+    } else if tab.ddl_loading {
+        ui.vertical_centered(|ui| {
+            ui.add_space(40.0);
+            ui.add(egui::Spinner::new().size(fonts.spinner_size));
+            ui.add_space(8.0);
+            ui.label(RichText::new(tr!("正在加载定义...")).color(palette.weak_text));
+        });
+    } else if let Some(error) = &tab.ddl_error {
+        ui.vertical_centered(|ui| {
+            ui.add_space(40.0);
+            ui.label(RichText::new(format!("{}: {}", tr!("加载失败"), error)).color(palette.danger));
+        });
+    } else {
+        ui.vertical_centered(|ui| {
+            ui.add_space(40.0);
+            ui.label(RichText::new(tr!("请先在表格中选择一个对象")).color(palette.weak_text));
+        });
+    }
+}
+
 fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) {
     let palette = mac_ui_palette_from_ui(ui);
     let editor = editor_palette_from_ui(ui);

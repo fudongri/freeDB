@@ -518,6 +518,7 @@ fn en(key: &'static str) -> &'static str {
         "存储过程" => "Procedure",
         "函数" => "Function",
         "正在加载定义..." => "Loading definition...",
+        "请先在表格中选择一个对象" => "Select an object in the table first",
         "当前对象没有可展示的 DDL" => "No DDL available for this object",
         "无法解析 MongoDB 命令。支持的语法: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])" => "Cannot parse MongoDB command. Supported syntax: show dbs, show collections, db.<collection>.find(), db.<collection>.aggregate([])",
         "insertOne 需要一个文档参数" => "insertOne requires a document parameter",
