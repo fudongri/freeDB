@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use crate::autocomplete::{
-    apply_autocomplete_suggestion, autocomplete_min_prefix_len, autocomplete_palette, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
+    apply_autocomplete_suggestion, autocomplete_min_prefix_len, autocomplete_palette, needs_space_padding, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
     AutocompleteState, AutocompleteSuggestion, AutocompleteUsageMemory, SchemaCache, SqlContext, SqlContextParser,
     SuggestionKind,
 };
@@ -19761,7 +19761,20 @@ impl eframe::App for DesktopApp {
                         .nth(char_idx)
                         .map(|(pos, _)| pos)
                         .unwrap_or(tab.sql.len());
-                    tab.sql.insert_str(byte_idx, &insert_text);
+
+                    // 前后空格补齐（仅依据光标相邻字符）
+                    let left = tab.sql[..byte_idx].chars().next_back();
+                    let right = tab.sql[byte_idx..].chars().next();
+                    let pad_left = left.is_some_and(needs_space_padding);
+                    let pad_right = right.is_some_and(needs_space_padding);
+                    let padded = format!(
+                        "{}{}{}",
+                        if pad_left { " " } else { "" },
+                        insert_text,
+                        if pad_right { " " } else { "" },
+                    );
+
+                    tab.sql.insert_str(byte_idx, &padded);
                     let new_char_idx = char_idx + insert_text.chars().count();
                     tab.cursor_range = Some(egui::text::CCursorRange::one(
                         egui::text::CCursor::new(new_char_idx),
