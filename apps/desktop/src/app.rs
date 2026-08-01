@@ -7495,7 +7495,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             TabUiAction::None
                         }
                         WorkspaceTab::TableSummary(tab) => {
-                            Self::render_table_summary_tab(ui, tab, &self.theme.colors, &self.theme.fonts)
+                            Self::render_table_summary_tab(ui, tab, &self.theme.fonts)
                         }
                         WorkspaceTab::SchemaSummary(tab) => {
                             Self::render_schema_summary_tab(ui, tab, &self.theme.colors, &self.theme.fonts)
@@ -11942,7 +11942,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     fn render_table_summary_tab(
         ui: &mut egui::Ui,
         tab: &mut TableSummaryTabState,
-        colors: &ui_theme::ThemeColors,
         fonts: &ui_theme::FontSizes,
     ) -> TabUiAction {
         let palette = mac_ui_palette_from_ui(ui);
@@ -12089,9 +12088,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         ],
                                     };
                                     for (f, label) in filters {
-                                        let is_active = tab.filter == f;
-                                        let style = if is_active { mini_accent_style(colors, fonts.sm) } else { mini_subtle_style(colors, fonts.sm) };
-                                        if mini_button(ui, label, style).clicked() {
+                                        if segment_button(ui, label, tab.filter == f).clicked() {
                                             tab.filter = f.clone();
                                             tab.search_filter.clear();
                                             tab.cached_filter.clear();
