@@ -6751,6 +6751,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let kind = self.database_kind_for_connection(&node.connection_id);
                         // Database node: DDL actions
                         if matches!(node.node_type, ExplorerNodeType::Database) {
+                            // 查看所有表/集合/模式信息（置顶）
+                            let summary_label = if kind == DatabaseKind::MongoDb {
+                                tr!("查看所有集合信息")
+                            } else if kind == DatabaseKind::Postgres {
+                                tr!("查看所有模式")
+                            } else {
+                                tr!("查看所有表信息")
+                            };
+                            if ui.button(summary_label).clicked() {
+                                actions.push(SidebarAction::OpenTableSummary {
+                                    connection_id: node.connection_id.clone(),
+                                    database: node.name.clone(),
+                                    schema: None,
+                                    db_label: node.name.clone(),
+                                    ddl_target: None,
+                                });
+                                ui.close();
+                            }
+                            ui.separator();
                             // 新建表 / 新建集合
                             let create_label = if kind == DatabaseKind::MongoDb {
                                 tr!("新建集合")
@@ -6800,24 +6819,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }));
                                     ui.close();
                                 }
-                            }
-                            // 查看所有表/集合/模式信息
-                            let summary_label = if kind == DatabaseKind::MongoDb {
-                                tr!("查看所有集合信息")
-                            } else if kind == DatabaseKind::Postgres {
-                                tr!("查看所有模式")
-                            } else {
-                                tr!("查看所有表信息")
-                            };
-                            if ui.button(summary_label).clicked() {
-                                actions.push(SidebarAction::OpenTableSummary {
-                                    connection_id: node.connection_id.clone(),
-                                    database: node.name.clone(),
-                                    schema: None,
-                                    db_label: node.name.clone(),
-                                    ddl_target: None,
-                                });
-                                ui.close();
                             }
                             // 转储子菜单
                             let dump_label = if kind == DatabaseKind::MongoDb {
@@ -6875,6 +6876,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                         // Schema node: DDL actions
                         if matches!(node.node_type, ExplorerNodeType::Schema) {
+                            // 查看所有表信息（置顶）
+                            if ui.button(tr!("查看所有表信息")).clicked() {
+                                actions.push(SidebarAction::OpenTableSummary {
+                                    connection_id: node.connection_id.clone(),
+                                    database: node.database.clone().unwrap_or_default(),
+                                    schema: Some(node.name.clone()),
+                                    db_label: node.name.clone(),
+                                    ddl_target: None,
+                                });
+                                ui.close();
+                            }
+                            ui.separator();
                             if ui.button(tr!("新建表")).clicked() {
                                 actions.push(SidebarAction::CreateTable {
                                     connection_id: node.connection_id.clone(),
@@ -6897,17 +6910,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     charset: String::new(),
                                     collation: String::new(),
                                 }));
-                                ui.close();
-                            }
-                            // 查看所有表信息
-                            if ui.button(tr!("查看所有表信息")).clicked() {
-                                actions.push(SidebarAction::OpenTableSummary {
-                                    connection_id: node.connection_id.clone(),
-                                    database: node.database.clone().unwrap_or_default(),
-                                    schema: Some(node.name.clone()),
-                                    db_label: node.name.clone(),
-                                    ddl_target: None,
-                                });
                                 ui.close();
                             }
                             ui.separator();
