@@ -7327,6 +7327,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut drag_source = self.tab_drag_source;
         let mut drag_target = self.tab_drag_target;
         let mut drag_target_rect = None; // 保存拖拽目标的响应区域
+        // macOS 折叠侧边栏时，标签栏让出左上角交通灯区域（约 70px 宽），
+        // 否则折叠窄条（28px）外的标签会被交通灯遮住
+        let traffic_light_pad: f32 = if cfg!(target_os = "macos") && self.sidebar_collapsed {
+            70.0 - 28.0
+        } else {
+            0.0
+        };
         // 计算标签栏的高度（padding + 标签高度 + padding + 滚动条高度）
         let tabs_height = 6.0 + 26.0 + 6.0 + 12.0; // 增加滚动条高度 inner_margin top + max tab height + inner_margin bottom + scrollbar
         let tabs_min_y = ui.cursor().top() - 2.0; // 增加上边距
@@ -7366,7 +7373,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         egui::Frame::new()
             .fill(palette.toolbar_bg)
             .stroke(Stroke::NONE)
-            .inner_margin(egui::Margin::symmetric(0, 0))
+            .inner_margin(egui::Margin { left: traffic_light_pad as i8, right: 0, top: 0, bottom: 0 })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // 向左滚动按钮
@@ -19097,7 +19104,7 @@ impl eframe::App for DesktopApp {
         let mut pending_update_action: Option<UpdateAction> = None;
         let sidebar = if self.sidebar_collapsed {
             // 折叠状态：28px 窄竖条，点击展开。使用独立 id，避免覆盖展开面板
-            // 的持久化宽度（同一 id 下 28px 会被存成面板宽度，展开时读回被钳到 180px）
+            // 的持久化宽度（同一 id 下窄条宽度会被存成面板宽度，展开时读回被钳到 180px）
             egui::SidePanel::left("sidebar-collapsed")
                 .resizable(false)
                 .exact_width(28.0)
@@ -19116,10 +19123,10 @@ impl eframe::App for DesktopApp {
                         self.sidebar_collapsed = false;
                         let _ = self.services.save_ui_state("sidebar_collapsed", "0");
                     }
-                    // 绘制展开箭头（指向右侧，示意点击展开）
+                    // 绘制展开箭头（指向右侧，示意点击展开），放在窄条右缘
                     ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
+                        egui::pos2(rect.right() - 8.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
                         "❯",
                         egui::FontId::proportional(13.0),
                         palette.weak_text,
