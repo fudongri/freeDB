@@ -109,6 +109,8 @@ pub struct DesktopApp {
     status_message: String,
     status_level: StatusLevel,
     sidebar_width: f32,
+    /// 全局 DDL 面板默认展开状态（跨会话持久化），新打开的表信息页按此初始化
+    ddl_panel_default_expanded: bool,
     is_connection_dialog_open: bool,
     editing_connection_id: Option<String>,
     connection_form: ConnectionFormState,
@@ -1660,6 +1662,12 @@ impl DesktopApp {
             .and_then(|value| value.parse::<f32>().ok())
             .map(|value| value.clamp(180.0, 300.0))
             .unwrap_or(200.0);
+        let ddl_panel_default_expanded = services
+            .load_ui_state("ddl_panel_expanded")
+            .ok()
+            .flatten()
+            .map(|value| value == "1")
+            .unwrap_or(true);
         let theme_str = services
             .load_ui_state("theme_v2")
             .ok()
@@ -1752,6 +1760,7 @@ impl DesktopApp {
             status_message: tr!("就绪").into(),
             status_level: StatusLevel::Normal,
             sidebar_width,
+            ddl_panel_default_expanded,
             is_connection_dialog_open: false,
             editing_connection_id: None,
             connection_form: ConnectionFormState::default(),
@@ -4949,7 +4958,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     cached_sort_asc: true,
                     cached_data_len: 0,
                     cached_summary_filter: SummaryFilter::Tables,
-                    ddl_panel_visible: false,
+                    ddl_panel_visible: self.ddl_panel_default_expanded,
                     ddl_panel_width: 320.0,
                     ddl_loading: false,
                     ddl_target: None,
@@ -8943,6 +8952,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     tab.active_bottom_tab = QueryBottomTab::AiChat;
                 }
             }
+            TabUiAction::SetDdlPanelExpanded(expanded) => {
+                self.ddl_panel_default_expanded = expanded;
+                let _ = self.services.save_ui_state(
+                    "ddl_panel_expanded",
+                    if expanded { "1" } else { "0" },
+                );
+            }
             TabUiAction::LocateInSidebar { connection_id, db_kind, database, schema, table_name } => {
                 // 目标节点 ID（展开逻辑由 render_sidebar 每帧处理）
                 // table_name 为 None 时定位到库/模式节点
@@ -12280,22 +12296,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         table_name: None,
                                     };
                                 }
-                                // DDL 面板开关
-                                if summary_ddl_toolbar_button(ui, palette.text)
-                                    .on_hover_text(tr!("查看 DDL 面板"))
-                                    .clicked()
-                                {
-                                    tab.ddl_panel_visible = !tab.ddl_panel_visible;
-                                    // 展开时若有选中行但尚无目标，自动加载选中行的 DDL
-                                    if tab.ddl_panel_visible && tab.ddl_target.is_none() {
-                                        if let Some(&ri) = tab.selected_indices.iter().next() {
-                                            if let Some(s) = Self::summary_display_items(tab).get(ri) {
-                                                let node = summary_to_node(s, tab);
-                                                tab.pending_actions.push(SummaryContextAction::ShowDdl { node });
-                                            }
-                                        }
-                                    }
-                                }
                                 ui.label(
                                     RichText::new(tab.title.as_str())
                                         .strong()
@@ -12364,6 +12364,31 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             .color(palette.weak_text),
                                     );
                                 }
+
+                                // DDL 面板开关：置于工具栏最右侧，展开时图标高亮
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let tint = if tab.ddl_panel_visible {
+                                        palette.accent_button_text
+                                    } else {
+                                        palette.text
+                                    };
+                                    if summary_ddl_toolbar_button(ui, tint)
+                                        .on_hover_text(tr!("查看 DDL 面板 ({}+2)", MOD_KEY))
+                                        .clicked()
+                                    {
+                                        tab.ddl_panel_visible = !tab.ddl_panel_visible;
+                                        action = TabUiAction::SetDdlPanelExpanded(tab.ddl_panel_visible);
+                                        // 展开时若有选中行但尚无目标，自动加载选中行的 DDL
+                                        if tab.ddl_panel_visible && tab.ddl_target.is_none() {
+                                            if let Some(&ri) = tab.selected_indices.iter().next() {
+                                                if let Some(s) = Self::summary_display_items(tab).get(ri) {
+                                                    let node = summary_to_node(s, tab);
+                                                    tab.pending_actions.push(SummaryContextAction::ShowDdl { node });
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
                             });
                         });
                 });
@@ -12401,7 +12426,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     .resizable(true)
                                     .default_width(tab.ddl_panel_width)
                                     .min_width(150.0)
-                                    .max_width(500.0)
+                                    .max_width(1000.0)
                                     .show_inside(ui, |ui| {
                                         ui.set_min_height(ui.available_height());
                                         render_summary_ddl_panel(ui, tab, &colors, fonts);
@@ -17224,6 +17249,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             (format!("{}+Shift+H", MOD_KEY), tr!("查找+替换")),
                             (format!("{}+W", MOD_KEY), tr!("关闭标签页")),
                             (format!("{}+Shift+W", MOD_KEY), tr!("关闭所有标签页")),
+                            (format!("{}+2", MOD_KEY), tr!("切换 DDL 面板")),
                             (format!("{}+[", MOD_KEY), tr!("标签页后退")),
                             (format!("{}+]", MOD_KEY), tr!("标签页前进")),
                             (format!("{}+R", MOD_KEY), tr!("执行查询")),
@@ -19791,6 +19817,33 @@ impl eframe::App for DesktopApp {
             self.close_workspace_tab(self.active_tab);
         }
 
+        // Keyboard shortcut: Cmd+2 切换 DDL 面板（表信息页）
+        let toggle_ddl_panel = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::Num2,
+            )) || (input.modifiers.command && input.key_pressed(egui::Key::Num2))
+        });
+        if toggle_ddl_panel {
+            if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                tab.ddl_panel_visible = !tab.ddl_panel_visible;
+                self.ddl_panel_default_expanded = tab.ddl_panel_visible;
+                let _ = self.services.save_ui_state(
+                    "ddl_panel_expanded",
+                    if tab.ddl_panel_visible { "1" } else { "0" },
+                );
+                // 展开时若有选中行但尚无目标，自动加载选中行的 DDL
+                if tab.ddl_panel_visible && tab.ddl_target.is_none() {
+                    if let Some(&ri) = tab.selected_indices.iter().next() {
+                        if let Some(s) = Self::summary_display_items(tab).get(ri) {
+                            let node = summary_to_node(s, tab);
+                            tab.pending_actions.push(SummaryContextAction::ShowDdl { node });
+                        }
+                    }
+                }
+            }
+        }
+
         // Keyboard shortcut: Cmd+[ / Cmd+] tab history navigation
         let tab_back = ctx.input_mut(|input| {
             input.consume_shortcut(&egui::KeyboardShortcut::new(
@@ -20195,6 +20248,7 @@ enum TabUiAction {
     SwitchAiModel(usize),
     OpenAiSettings,
     OpenAiChat,
+    SetDdlPanelExpanded(bool),
 }
 
 #[derive(Clone)]
@@ -25607,7 +25661,11 @@ fn render_summary_ddl_panel(
         // 对象名头部：render_definition_sql_view 不展示 title 文本，仅用于 ScrollArea id
         if !title.is_empty() {
             ui.add_space(4.0);
-            ui.label(RichText::new(&title).strong().color(palette.text));
+            // 标题左缩进 12px，与下方代码区左内边距对齐
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(RichText::new(&title).strong().color(palette.text));
+            });
             ui.add_space(8.0);
         }
         render_definition_sql_view(ui, &title, ddl_text, colors, fonts);
@@ -25634,7 +25692,7 @@ fn render_summary_ddl_panel(
 fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) {
     let palette = mac_ui_palette_from_ui(ui);
     let editor = editor_palette_from_ui(ui);
-    let code_font_size = 13.0;
+    let code_font_size = 11.0;
     let formatted_sql = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| format_definition_sql(create_sql))) {
         Ok(sql) => sql,
         Err(_) => {
@@ -25665,7 +25723,7 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
                     }
                 });
 
-            ui.add_space(8.0);
+            ui.add_space(2.0);
 
             let row_height = 18.0;
             egui::Frame::new()
@@ -25678,7 +25736,7 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
                         .show(ui, |ui| {
                             egui::Frame::new()
                                 .fill(editor.panel_bg)
-                                .inner_margin(egui::Margin::symmetric(12, 10))
+                                .inner_margin(egui::Margin::symmetric(12, 4))
                                 .show(ui, |ui| {
                                     ui.set_min_height(
                                         (line_count as f32 * row_height).max(
@@ -25687,12 +25745,13 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
                                     );
                                     {
                                         let (dv, lv) = read_theme_variants(ui);
-                                        ui.label(sql_highlight_job_with_font_size(
+                                        ui.add(egui::Label::new(sql_highlight_job_with_font_size(
                                             &formatted_sql,
                                             ui.visuals(),
                                             code_font_size,
                                             dv, lv,
-                                        ));
+                                        ))
+                                        .wrap_mode(egui::TextWrapMode::Extend));
                                     }
                                 });
                         });
