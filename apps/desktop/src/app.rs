@@ -3090,6 +3090,38 @@ impl DesktopApp {
             self.pending_routine_definition.remove(&tab_id);
         }
 
+        // Poll DDL panel load results
+        let mut finished_ddl = Vec::new();
+        for (tab_id, receiver) in &self.pending_ddl_load {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::TableSummary(ts) if ts.id == result.tab_id)
+                    }) {
+                        tab.ddl_loading = false;
+                        match result.result {
+                            Ok(text) => tab.ddl_text = Some(text),
+                            Err(e) => tab.ddl_error = Some(e),
+                        }
+                    }
+                    finished_ddl.push(tab_id.clone());
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::TableSummary(ts) if ts.id == *tab_id)
+                    }) {
+                        tab.ddl_loading = false;
+                        tab.ddl_error = Some(tr!("加载失败：任务异常终止").to_string());
+                    }
+                    finished_ddl.push(tab_id.clone());
+                }
+            }
+        }
+        for tab_id in finished_ddl {
+            self.pending_ddl_load.remove(&tab_id);
+        }
+
         // 轮询 SHOW PROCESSLIST 异步结果
         if let Some(ref mut rx) = self.pending_processlist {
             if let Ok(result) = rx.try_recv() {
@@ -7779,8 +7811,54 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     tab.needs_reload = true;
                                 }
                             }
-                            // 占位：实际的 ShowDdl 加载逻辑在后续任务接入
-                            SummaryContextAction::ShowDdl { .. } => {}
+                            SummaryContextAction::ShowDdl { node } => {
+                                let is_routine = matches!(node.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function);
+                                if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                                    tab.ddl_panel_visible = true;
+                                    tab.ddl_loading = true;
+                                    tab.ddl_text = None;
+                                    tab.ddl_error = None;
+                                    tab.ddl_target = Some(if is_routine {
+                                        DdlTarget::Routine(node.clone())
+                                    } else {
+                                        DdlTarget::Table(node.clone())
+                                    });
+                                    let tab_id = tab.id.clone();
+                                    let connection_id = node.connection_id.clone();
+                                    let database = node.database.clone();
+                                    let schema = node.schema.clone();
+                                    let name = node.name.clone();
+                                    let services = self.services.clone();
+                                    let (sender, receiver) = mpsc::channel();
+                                    self.pending_ddl_load.insert(tab_id.clone(), receiver);
+                                    let is_proc = matches!(node.node_type, ExplorerNodeType::Procedure);
+                                    self.runtime.handle().spawn(async move {
+                                        let result = if is_routine {
+                                            let routine = core_domain::RoutineRef {
+                                                connection_id,
+                                                database,
+                                                schema,
+                                                name,
+                                                is_procedure: is_proc,
+                                            };
+                                            services.load_routine_definition(&routine).await.map(|d| d.create_sql.unwrap_or_default())
+                                        } else {
+                                            let table = TableRef {
+                                                connection_id,
+                                                database,
+                                                schema,
+                                                table: name,
+                                                is_view: matches!(node.node_type, ExplorerNodeType::View),
+                                            };
+                                            services.load_table_definition(&table).await.map(|d| d.create_sql.unwrap_or_default())
+                                        };
+                                        let _ = sender.send(DdlLoadResult {
+                                            tab_id,
+                                            result: result.map_err(|e| e.to_string()),
+                                        });
+                                    });
+                                }
+                            }
                             SummaryContextAction::LoadRoutines => {
                                 if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
                                     tab.loading = true;
@@ -12545,10 +12623,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 tr!("查看表定义")
                                                             };
                                                             if ui.button(def_label).clicked() {
-                                                                tab.pending_actions.push(SummaryContextAction::OpenTable {
+                                                                tab.pending_actions.push(SummaryContextAction::ShowDdl {
                                                                     node: node.clone(),
-                                                                    load_data: false,
-                                                                    force_new_tab: false,
                                                                 });
                                                                 ui.close();
                                                             }
