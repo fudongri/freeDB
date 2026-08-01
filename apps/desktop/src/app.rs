@@ -8454,6 +8454,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::CopyActiveTableRowsAsInsertWithoutPk(row_indices) => {
                 self.copy_active_table_rows_as_insert(ctx, &row_indices, true);
             }
+            TabUiAction::CopyActiveTableRowsAsUpdate(row_indices) => {
+                self.copy_active_table_rows_as_update(ctx, &row_indices);
+            }
             TabUiAction::CopyActiveTableRowsAsTsv(row_indices, include_header) => {
                 self.copy_active_table_rows_as_tsv(ctx, &row_indices, include_header);
             }
@@ -9888,6 +9891,76 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             tr!("已复制 {} 条记录的 INSERT 语句", row_indices.len())
         } else {
             tr!("已复制为 INSERT 语句").into()
+        };
+    }
+
+    fn copy_active_table_rows_as_update(&mut self, ctx: &egui::Context, row_indices: &[usize]) {
+        let Some((database_kind, table, definition, rows)) =
+            self.active_table_row_contexts(row_indices)
+        else {
+            return;
+        };
+        let has_primary_key = definition.as_ref().is_some_and(|item| {
+            item.columns.iter().any(|column| column.primary_key)
+        });
+        if !has_primary_key {
+            return;
+        }
+        let pk_cols: std::collections::HashSet<String> = definition
+            .as_ref()
+            .map(|def| {
+                def.columns
+                    .iter()
+                    .filter(|c| c.primary_key)
+                    .map(|c| c.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let set_columns = definition
+            .as_ref()
+            .map(|item| item.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>())
+            .filter(|columns| !columns.is_empty())
+            .unwrap_or_else(|| rows.first().map(|row| row.keys().cloned().collect()).unwrap_or_default())
+            .into_iter()
+            .filter(|column| !pk_cols.contains(column))
+            .collect::<Vec<_>>();
+        let text = if database_kind == DatabaseKind::MongoDb {
+            let mongo_types = self.tabs.get(self.active_tab)
+                .and_then(|tab| match tab {
+                    WorkspaceTab::Table(t) => Some(&t.preview.as_ref()?.mongo_types),
+                    _ => None,
+                });
+            build_mongo_update_commands(
+                &table,
+                &set_columns,
+                &rows,
+                row_indices,
+                mongo_types,
+                definition.as_ref(),
+            )
+        } else {
+            build_update_sql_for_existing_rows(
+                database_kind,
+                &table,
+                definition.as_ref(),
+                &set_columns,
+                &rows,
+            )
+        };
+        let Some(text) = text else {
+            return;
+        };
+        ctx.copy_text(text);
+        self.status_message = if database_kind == DatabaseKind::MongoDb {
+            if row_indices.len() > 1 {
+                tr!("已复制 {} 条记录的 updateOne 命令", row_indices.len())
+            } else {
+                tr!("已复制为 updateOne 命令").into()
+            }
+        } else if row_indices.len() > 1 {
+            tr!("已复制 {} 条记录的 UPDATE 语句", row_indices.len())
+        } else {
+            tr!("已复制为 UPDATE 语句").into()
         };
     }
 
@@ -19769,6 +19842,7 @@ enum TabUiAction {
     DeleteActiveTableRows(Vec<usize>),
     CopyActiveTableRowsAsInsert(Vec<usize>),
     CopyActiveTableRowsAsInsertWithoutPk(Vec<usize>),
+    CopyActiveTableRowsAsUpdate(Vec<usize>),
     CopyActiveTableRowsAsTsv(Vec<usize>, bool),
     CopyActiveTableRowsAsJson(Vec<usize>),
     CopyQueryRowsAsTsv(Vec<usize>, Vec<String>, bool),
@@ -23141,6 +23215,21 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     ui.close();
                                                 }
                                             });
+                                            let has_pk = tab.definition.as_ref().is_some_and(|def| {
+                                                def.columns.iter().any(|c| c.primary_key)
+                                            });
+                                            let update_label = if tab.database_kind == DatabaseKind::MongoDb {
+                                                tr!("复制为 updateOne 命令")
+                                            } else {
+                                                tr!("复制为 UPDATE 语句")
+                                            };
+                                            if ui.add_enabled(has_pk, egui::Button::new(update_label)).clicked() {
+                                                action =
+                                                    TabUiAction::CopyActiveTableRowsAsUpdate(
+                                                        selected_row_indices.clone(),
+                                                    );
+                                                ui.close();
+                                            }
                                             if ui.button(tr!("复制为 JSON")).clicked() {
                                                 action =
                                                     TabUiAction::CopyActiveTableRowsAsJson(
@@ -23639,6 +23728,21 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                         ui.close();
                                                     }
                                                 });
+                                                let has_pk = tab.definition.as_ref().is_some_and(|def| {
+                                                    def.columns.iter().any(|c| c.primary_key)
+                                                });
+                                                let update_label = if tab.database_kind == DatabaseKind::MongoDb {
+                                                    tr!("复制为 updateOne 命令")
+                                                } else {
+                                                    tr!("复制为 UPDATE 语句")
+                                                };
+                                                if ui.add_enabled(has_pk, egui::Button::new(update_label)).clicked() {
+                                                    action =
+                                                        TabUiAction::CopyActiveTableRowsAsUpdate(
+                                                            selected_row_indices.clone(),
+                                                        );
+                                                    ui.close();
+                                                }
                                                 if ui.button(tr!("复制为 JSON")).clicked() {
                                                     action =
                                                         TabUiAction::CopyActiveTableRowsAsJson(
@@ -30017,6 +30121,80 @@ fn build_insert_sql_for_existing_rows(
     )
 }
 
+fn build_update_sql_for_existing_rows(
+    database_kind: DatabaseKind,
+    table: &TableRef,
+    definition: Option<&TableDefinition>,
+    set_columns: &[String],
+    rows: &[BTreeMap<String, QueryCellValue>],
+) -> Option<String> {
+    let statements = rows
+        .iter()
+        .map(|row| {
+            let where_clause = build_table_row_match_clause(database_kind, definition, row, table)?;
+            let set_clauses = set_columns
+                .iter()
+                .map(|column| {
+                    format!(
+                        "{} = {}",
+                        quote_identifier(database_kind, column),
+                        row.get(column)
+                            .map(query_cell_sql_literal)
+                            .unwrap_or_else(|| "NULL".into())
+                    )
+                })
+                .collect::<Vec<_>>();
+            Some(format!(
+                "UPDATE {}\nSET {}\nWHERE {};",
+                qualified_table_name(database_kind, table),
+                set_clauses.join(",\n    "),
+                where_clause
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if statements.is_empty() {
+        return None;
+    }
+    Some(statements.join("\n\n"))
+}
+
+fn build_mongo_update_commands(
+    table: &TableRef,
+    set_columns: &[String],
+    rows: &[BTreeMap<String, QueryCellValue>],
+    row_indices: &[usize],
+    mongo_types: Option<&HashMap<(usize, String), MongoValue>>,
+    definition: Option<&TableDefinition>,
+) -> Option<String> {
+    let coll = &table.table;
+    let cell_type = |row_idx: usize, col: &str| -> Option<MongoValue> {
+        mongo_types.and_then(|mt| mt.get(&(row_idx, col.to_string())).copied())
+    };
+    let commands = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let orig_idx = row_indices.get(i).copied().unwrap_or(0);
+            let filter = build_mongo_row_match_doc(definition, row)?;
+            let fields = set_columns
+                .iter()
+                .filter_map(|col| {
+                    let value = row.get(col)?;
+                    Some(format!("{}: {}", col, mongo_cell_literal(value, cell_type(orig_idx, col))))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(format!(
+                "db.{coll}.updateOne({{ {filter} }}, {{ $set: {{ {fields} }} }})"
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if commands.is_empty() {
+        return None;
+    }
+    Some(commands.join("\n\n"))
+}
+
 fn build_insert_sql_for_pending_row(
     database_kind: DatabaseKind,
     table: &TableRef,
@@ -30136,19 +30314,12 @@ fn build_table_row_match_clause(
     if key_columns.is_empty() {
         return None;
     }
-    let key_column_count = key_columns.len();
-    let has_primary_key = definition.is_some_and(|item| item.columns.iter().any(|c| c.primary_key));
-
     let predicates = key_columns
         .into_iter()
         .map(|column| build_table_row_value_match(database_kind, &column, row.get(&column)))
         .collect::<Option<Vec<_>>>()?;
 
-    let mut clause = predicates.join("\n  AND ");
-    if key_column_count != row.len() || has_primary_key {
-        clause = format!("({clause})");
-    }
-    Some(clause)
+    Some(predicates.join("\n  AND "))
 }
 
 fn build_table_row_value_match(
