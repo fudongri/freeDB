@@ -919,6 +919,7 @@ fn en(key: &'static str) -> &'static str {
         "配置 AI 模型与密钥" => "Configure AI models and API keys",
         "自定义 URL" => "Custom URL",
         "在侧边栏定位" => "Locate in sidebar",
+        "查看 DDL 面板" => "View DDL Panel",
         "整数, 有符号 64 位" => "INTEGER, signed 64-bit",
         "文本, 字符串" => "TEXT, string",
         "浮点数, 8 字节 IEEE" => "REAL, 8-byte IEEE float",

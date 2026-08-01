@@ -12135,6 +12135,22 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         table_name: None,
                                     };
                                 }
+                                // DDL 面板开关
+                                if summary_ddl_toolbar_button(ui, palette.text)
+                                    .on_hover_text(tr!("查看 DDL 面板"))
+                                    .clicked()
+                                {
+                                    tab.ddl_panel_visible = !tab.ddl_panel_visible;
+                                    // 展开时若有选中行但尚无目标，自动加载选中行的 DDL
+                                    if tab.ddl_panel_visible && tab.ddl_target.is_none() {
+                                        if let Some(&ri) = tab.selected_indices.iter().next() {
+                                            if let Some(s) = Self::summary_display_items(tab).get(ri) {
+                                                let node = summary_to_node(s, tab);
+                                                tab.pending_actions.push(SummaryContextAction::ShowDdl { node });
+                                            }
+                                        }
+                                    }
+                                }
                                 ui.label(
                                     RichText::new(tab.title.as_str())
                                         .strong()
@@ -32551,6 +32567,23 @@ fn locate_icon_button(ui: &mut egui::Ui, tint: egui::Color32) -> egui::Response 
             painter.rect_filled(rect, ui.visuals().widgets.hovered.corner_radius, ui.visuals().widgets.hovered.weak_bg_fill);
         }
         egui::Image::new(egui::include_image!("../assets/svg/locate.svg"))
+            .fit_to_exact_size(egui::vec2(18.0, 18.0))
+            .tint(tint)
+            .paint_at(ui, egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 1.0), egui::vec2(18.0, 18.0)));
+    }
+    response
+}
+
+/// 表信息页 DDL 面板开关图标按钮：白色 SVG tint 成标题色，hover 显示浅底，与侧边栏定位按钮一致
+fn summary_ddl_toolbar_button(ui: &mut egui::Ui, tint: egui::Color32) -> egui::Response {
+    let size = egui::vec2(26.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, ui.visuals().widgets.hovered.corner_radius, ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        egui::Image::new(egui::include_image!("../assets/svg/layout.svg"))
             .fit_to_exact_size(egui::vec2(18.0, 18.0))
             .tint(tint)
             .paint_at(ui, egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 1.0), egui::vec2(18.0, 18.0)));
