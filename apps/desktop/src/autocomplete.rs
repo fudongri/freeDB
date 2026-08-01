@@ -17,6 +17,11 @@ fn is_identifier_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+/// 拖拽插入 SQL 时，判断光标相邻字符是否需要补空格分隔。
+pub(crate) fn needs_space_padding(c: char) -> bool {
+    !(c.is_whitespace() || matches!(c, '(' | ')' | ',' | '.' | ';' | '\'' | '"' | '`'))
+}
+
 fn compact_object_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
@@ -2792,5 +2797,46 @@ mod tests {
     fn context_parser_general_at_unrecognized_position() {
         let c = SqlContextParser::parse("SEL", 3);
         assert_eq!(c, SqlContext::General);
+    }
+
+    #[test]
+    fn needs_space_padding_identifier_chars() {
+        assert!(needs_space_padding('a'));
+        assert!(needs_space_padding('Z'));
+        assert!(needs_space_padding('0'));
+        assert!(needs_space_padding('_'));
+    }
+
+    #[test]
+    fn needs_space_padding_whitespace() {
+        assert!(!needs_space_padding(' '));
+        assert!(!needs_space_padding('\n'));
+        assert!(!needs_space_padding('\t'));
+        assert!(!needs_space_padding('\r'));
+    }
+
+    #[test]
+    fn needs_space_padding_delimiters() {
+        assert!(!needs_space_padding('('));
+        assert!(!needs_space_padding(')'));
+        assert!(!needs_space_padding(','));
+        assert!(!needs_space_padding('.'));
+        assert!(!needs_space_padding(';'));
+    }
+
+    #[test]
+    fn needs_space_padding_quotes() {
+        assert!(!needs_space_padding('\''));
+        assert!(!needs_space_padding('"'));
+        assert!(!needs_space_padding('`'));
+    }
+
+    #[test]
+    fn needs_space_padding_operators() {
+        assert!(needs_space_padding('='));
+        assert!(needs_space_padding('>'));
+        assert!(needs_space_padding('+'));
+        assert!(needs_space_padding('-'));
+        assert!(needs_space_padding('*'));
     }
 }
