@@ -21134,7 +21134,20 @@ fn render_result_table(
                         .header(30.0, |mut header| {
                             // Row number header
                             header.col(|ui| {
-                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                let (_, clicked, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                if clicked {
+                                    select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
+                                    // 全选/取消全选行时清除列选中
+                                    selected_columns.clear();
+                                    ui.ctx().request_repaint();
+                                }
+                                // Cmd+A → 全选行（无矩形选区时）
+                                if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                                    if cell_selection_anchor.is_none() {
+                                        select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
+                                        selected_columns.clear();
+                                    }
+                                }
                                 let cell_rect = ui.max_rect();
                                 column_right_edges.push(cell_rect.right() - 1.0);
                                 if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) { is_hovering_header = true; hovered_header_col_idx = Some(0); }
@@ -21825,7 +21838,25 @@ fn render_editable_result_table(
                     let table = table
                         .header(30.0, |mut header| {
                             header.col(|ui| {
-                                let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                let (_, clicked, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                if clicked {
+                                    select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
+                                    // 全选/取消全选行时清除列选中和矩形选区
+                                    selected_columns.clear();
+                                    clear_query_cell_selection(
+                                        cell_selection_anchor, cell_selection_current,
+                                        cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                        cell_selection_drag_started,
+                                    );
+                                    ui.ctx().request_repaint();
+                                }
+                                // Cmd+A → 全选行（无矩形选区时）
+                                if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                                    if cell_selection_anchor.is_none() {
+                                        select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
+                                        selected_columns.clear();
+                                    }
+                                }
                                 let cell_rect = ui.max_rect();
                                 let resize_handle_x = cell_rect.right() - 3.0;
                                 let resize_handle_rect = egui::Rect::from_min_max(
@@ -22866,7 +22897,26 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                             // Row number header
                             if show_row_number {
                                 header.col(|ui| {
-                                    let _ = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                    let (_, clicked, _, _) = table_header_cell(ui, &palette, "#", false, None, false, false, None, false, false);
+                                    if clicked {
+                                        if let Some(preview) = tab.preview.as_ref() {
+                                            select_all_preview_rows(tab, preview.rows.len());
+                                        }
+                                        // 全选/取消全选行时清除列选中和矩形选区
+                                        tab.selected_columns.clear();
+                                        clear_table_cell_selection(tab);
+                                        ui.ctx().request_repaint();
+                                    }
+                                    // Cmd+A → 全选行（无矩形选区时；pending insert 模式行号列隐藏，此处不执行）
+                                    if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                                        if tab.cell_selection_anchor.is_none() {
+                                            if let Some(preview) = tab.preview.as_ref() {
+                                                select_all_preview_rows(tab, preview.rows.len());
+                                            }
+                                            tab.selected_columns.clear();
+                                            clear_table_cell_selection(tab);
+                                        }
+                                    }
                                     let cell_rect = ui.max_rect();
                                     column_right_edges.push(cell_rect.right() - 1.0);
                                     let resize_handle_x = cell_rect.right() - 3.0;
@@ -24786,6 +24836,23 @@ fn set_single_preview_selection(tab: &mut TableTabState, row_index: usize) {
     tab.selection_anchor_row = Some(row_index);
 }
 
+/// 全选/取消全选数据页所有行（选中行数 == 总行数时视为已全选，切换为清除）
+fn select_all_preview_rows(tab: &mut TableTabState, row_count: usize) {
+    if tab.selected_preview_rows.len() == row_count {
+        tab.selected_preview_rows.clear();
+        tab.selected_preview_row = None;
+        tab.selection_anchor_row = None;
+    } else {
+        tab.selected_preview_rows.clear();
+        for i in 0..row_count {
+            tab.selected_preview_rows.insert(i);
+        }
+        tab.selected_preview_row = row_count.checked_sub(1);
+        tab.selection_anchor_row = Some(0);
+    }
+    normalize_preview_selection(tab);
+}
+
 fn toggle_preview_selection(tab: &mut TableTabState, row_index: usize) {
     if !tab.selected_preview_rows.remove(&row_index) {
         tab.selected_preview_rows.insert(row_index);
@@ -25071,6 +25138,28 @@ fn normalize_query_selection(
     if anchor.is_none() {
         *anchor = *selected_row;
     }
+}
+
+/// 全选/取消全选查询结果页所有行（选中行数 == 总行数时视为已全选，切换为清除）
+fn select_all_query_rows(
+    selected_rows: &mut BTreeSet<usize>,
+    selected_row: &mut Option<usize>,
+    anchor: &mut Option<usize>,
+    row_count: usize,
+) {
+    if selected_rows.len() == row_count {
+        selected_rows.clear();
+        *selected_row = None;
+        *anchor = None;
+    } else {
+        selected_rows.clear();
+        for i in 0..row_count {
+            selected_rows.insert(i);
+        }
+        *selected_row = row_count.checked_sub(1);
+        *anchor = Some(0);
+    }
+    normalize_query_selection(selected_rows, selected_row, anchor);
 }
 
 fn query_selected_row_indices(
@@ -28235,7 +28324,7 @@ fn table_header_cell(
         ui.next_auto_id(),
         egui::Sense::click_and_drag(),
     );
-    if sortable && cell_response.clicked() {
+    if cell_response.clicked() {
         column_clicked = true;
     }
     cell_response.context_menu(|ui| {
