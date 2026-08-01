@@ -128,6 +128,7 @@ pub struct DesktopApp {
     sidebar_enter_pressed: bool,
     sidebar_esc_pressed: bool,
     sidebar_active_only: bool,                 // 仅显示活跃（已展开树）的连接
+    sidebar_collapsed: bool,                   // 侧边栏折叠（跨会话持久化）
     active_connections: HashMap<String, HashSet<String>>, // 活跃连接 → 已打开的数据库 id 集合
     sidebar_drag_source: Option<String>,       // 正在被拖拽的连接 id
     sidebar_drag_y: f32,                       // 拖拽时鼠标 Y 坐标
@@ -1662,6 +1663,12 @@ impl DesktopApp {
             .and_then(|value| value.parse::<f32>().ok())
             .map(|value| value.clamp(180.0, 300.0))
             .unwrap_or(200.0);
+        let sidebar_collapsed = services
+            .load_ui_state("sidebar_collapsed")
+            .ok()
+            .flatten()
+            .map(|value| value == "1")
+            .unwrap_or(false);
         let ddl_panel_default_expanded = services
             .load_ui_state("ddl_panel_expanded")
             .ok()
@@ -1777,6 +1784,7 @@ impl DesktopApp {
             sidebar_enter_pressed: false,
             sidebar_esc_pressed: false,
             sidebar_active_only: false,
+            sidebar_collapsed,
             active_connections: HashMap::new(),
             sidebar_drag_source: None,
             sidebar_drag_y: 0.0,
@@ -5685,6 +5693,41 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if ao_resp.clicked() {
             self.sidebar_active_only = !self.sidebar_active_only;
         }
+        // 侧边栏折叠按钮（"仅活跃"左侧，复用 layout.svg 图标）
+        cursor_x -= 10.0;
+        let col_icon_w = 26.0;
+        cursor_x -= col_icon_w;
+        let col_rect = egui::Rect::from_min_size(
+            egui::pos2(cursor_x, title_btn_y),
+            Vec2::new(col_icon_w, title_btn_h),
+        );
+        let col_resp = ui.allocate_rect(col_rect, egui::Sense::click());
+        let col_fill = if col_resp.hovered() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            ui.visuals().widgets.hovered.weak_bg_fill
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(col_rect, title_btn_cr, col_fill);
+        let col_tint = if self.sidebar_collapsed {
+            palette.accent_button_text
+        } else {
+            palette.text
+        };
+        egui::Image::new(egui::include_image!("../assets/svg/layout.svg"))
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
+            .tint(col_tint)
+            .paint_at(ui, egui::Rect::from_center_size(col_rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
+        if col_resp.clicked() {
+            self.sidebar_collapsed = !self.sidebar_collapsed;
+            let _ = self.services.save_ui_state("sidebar_collapsed", if self.sidebar_collapsed { "1" } else { "0" });
+        }
+        let col_tooltip = if self.sidebar_collapsed {
+            tr!("展开侧边栏 ({}+1)", MOD_KEY)
+        } else {
+            tr!("折叠侧边栏 ({}+1)", MOD_KEY)
+        };
+        col_resp.on_hover_text(col_tooltip);
         // 更新 badge — 标题栏区域（交通灯同一排），绝对定位
         if let Some(ref state) = self.update_state {
             if !self.update_dismissed {
@@ -17249,6 +17292,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             (format!("{}+Shift+H", MOD_KEY), tr!("查找+替换")),
                             (format!("{}+W", MOD_KEY), tr!("关闭标签页")),
                             (format!("{}+Shift+W", MOD_KEY), tr!("关闭所有标签页")),
+                            (format!("{}+1", MOD_KEY), tr!("切换侧边栏")),
                             (format!("{}+2", MOD_KEY), tr!("切换 DDL 面板")),
                             (format!("{}+[", MOD_KEY), tr!("标签页后退")),
                             (format!("{}+]", MOD_KEY), tr!("标签页前进")),
@@ -19051,14 +19095,46 @@ impl eframe::App for DesktopApp {
             self.sidebar_esc_pressed = false;
         }
         let mut pending_update_action: Option<UpdateAction> = None;
-        let sidebar = egui::SidePanel::left("sidebar")
-            .resizable(true)
-            .default_width(self.sidebar_width)
-            .min_width(180.0)
-            .max_width(half_screen)
-            .show_separator_line(false)
-            .frame(egui::Frame::new().fill(palette.sidebar_bg).inner_margin(egui::Margin { left: 0, right: 0, top: 28, bottom: 0 }))
-            .show(ctx, |ui| self.render_sidebar(ui, &mut pending_update_action));
+        let sidebar = if self.sidebar_collapsed {
+            // 折叠状态：28px 窄竖条，点击展开。使用独立 id，避免覆盖展开面板
+            // 的持久化宽度（同一 id 下 28px 会被存成面板宽度，展开时读回被钳到 180px）
+            egui::SidePanel::left("sidebar-collapsed")
+                .resizable(false)
+                .exact_width(28.0)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(palette.sidebar_bg))
+                .show(ctx, |ui| {
+                    let palette = mac_ui_palette_from_ui(ui);
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(28.0, ui.available_height().max(28.0)),
+                        egui::Sense::click(),
+                    );
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if response.clicked() {
+                        self.sidebar_collapsed = false;
+                        let _ = self.services.save_ui_state("sidebar_collapsed", "0");
+                    }
+                    // 绘制展开箭头（指向右侧，示意点击展开）
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "❯",
+                        egui::FontId::proportional(13.0),
+                        palette.weak_text,
+                    );
+                })
+        } else {
+            egui::SidePanel::left("sidebar")
+                .resizable(true)
+                .default_width(self.sidebar_width)
+                .min_width(180.0)
+                .max_width(half_screen)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(palette.sidebar_bg).inner_margin(egui::Margin { left: 0, right: 0, top: 28, bottom: 0 }))
+                .show(ctx, |ui| self.render_sidebar(ui, &mut pending_update_action))
+        };
         // macOS: 在侧边栏顶部标题栏区域支持窗口拖拽
         #[cfg(target_os = "macos")]
         {
@@ -19092,7 +19168,9 @@ impl eframe::App for DesktopApp {
             Some(UpdateAction::Retry) => self.retry_update(),
             None => {}
         }
-        self.sidebar_width = sidebar.response.rect.width().clamp(180.0, half_screen);
+        if !self.sidebar_collapsed {
+            self.sidebar_width = sidebar.response.rect.width().clamp(180.0, half_screen);
+        }
         if ctx.input(|input| input.pointer.any_pressed()) && !sidebar.response.hovered() {
             self.sidebar_has_focus = false;
         }
@@ -19842,6 +19920,21 @@ impl eframe::App for DesktopApp {
                     }
                 }
             }
+        }
+
+        // Keyboard shortcut: Cmd+1 切换侧边栏折叠
+        let toggle_sidebar = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::Num1,
+            )) || (input.modifiers.command && input.key_pressed(egui::Key::Num1))
+        });
+        if toggle_sidebar {
+            self.sidebar_collapsed = !self.sidebar_collapsed;
+            let _ = self.services.save_ui_state(
+                "sidebar_collapsed",
+                if self.sidebar_collapsed { "1" } else { "0" },
+            );
         }
 
         // Keyboard shortcut: Cmd+[ / Cmd+] tab history navigation
