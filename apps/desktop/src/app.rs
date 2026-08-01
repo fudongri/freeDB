@@ -3289,6 +3289,32 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         false
     }
 
+    /// 表信息页 Cmd+C：复制选中行的表/视图/存储过程/函数名
+    fn copy_summary_selected_names(&mut self, ctx: &egui::Context) -> bool {
+        let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get(self.active_tab) else {
+            return false;
+        };
+        if tab.selected_indices.is_empty() {
+            return false;
+        }
+        let items = match tab.filter {
+            SummaryFilter::Tables | SummaryFilter::Views => &tab.table_summaries,
+            SummaryFilter::Procedures | SummaryFilter::Functions => &tab.routine_summaries,
+        };
+        let mut names: Vec<String> = tab.selected_indices.iter()
+            .filter_map(|&i| items.get(i))
+            .map(|s| s.name.clone())
+            .collect();
+        if names.is_empty() {
+            return false;
+        }
+        names.sort();
+        let text = names.join("\n");
+        ctx.copy_text(text.clone());
+        self.status_message = tr!("已复制 {}", text);
+        true
+    }
+
     fn clear_column_and_row_selection(&mut self) {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
@@ -18833,7 +18859,9 @@ impl eframe::App for DesktopApp {
             });
         }
         if cmd_c {
-            if self.sidebar_has_focus && self.selected_tree_item.is_some() {
+            if self.copy_summary_selected_names(ctx) {
+                // 表信息页：复制选中表名
+            } else if self.sidebar_has_focus && self.selected_tree_item.is_some() {
                 let _ = self.copy_selected_sidebar_item(ctx);
             } else if !self.sidebar_has_focus {
                 // 矩形选区优先
