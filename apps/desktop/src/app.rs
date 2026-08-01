@@ -11968,10 +11968,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let sa = &items[a];
                     let sb = &items[b];
                     let (na, nb) = match col_name {
-                        "行数" | "文档数" => (sa.row_count.map(|v| v as f64), sb.row_count.map(|v| v as f64)),
-                        "总大小" => (sa.total_size.map(|v| v as f64), sb.total_size.map(|v| v as f64)),
-                        "数据大小" => (sa.data_size.map(|v| v as f64), sb.data_size.map(|v| v as f64)),
-                        "索引大小" => (sa.index_size.map(|v| v as f64), sb.index_size.map(|v| v as f64)),
+                        _ if col_name == tr!("行数") || col_name == tr!("文档数") => (sa.row_count.map(|v| v as f64), sb.row_count.map(|v| v as f64)),
+                        _ if col_name == tr!("总大小") => (sa.total_size.map(|v| v as f64), sb.total_size.map(|v| v as f64)),
+                        _ if col_name == tr!("数据大小") => (sa.data_size.map(|v| v as f64), sb.data_size.map(|v| v as f64)),
+                        _ if col_name == tr!("索引大小") => (sa.index_size.map(|v| v as f64), sb.index_size.map(|v| v as f64)),
                         _ => {
                             let va = summary_cell_value(sa, sort_col, &cols);
                             let vb = summary_cell_value(sb, sort_col, &cols);
@@ -25064,19 +25064,20 @@ fn estimate_summary_column_widths(
 }
 
 fn summary_cell_value(summary: &driver_api::TableSummary, col_index: usize, cols: &[(&str, f32, bool)]) -> String {
+    // cols 里的列名已被 tr! 翻译成当前语言，比较时也要用翻译后的结果
     let col_name = cols.get(col_index).map(|c| c.0).unwrap_or_default();
     match col_name {
-        "表名" | "集合名" => summary.name.clone(),
-        "类型" => summary.table_type.clone(),
-        "行数" | "文档数" => summary.row_count.map_or(String::new(), |v| format_count(v)),
-        "总大小" => summary.total_size.map_or(String::new(), |v| format_bytes(v as u64)),
-        "数据大小" => summary.data_size.map_or(String::new(), |v| format_bytes(v as u64)),
-        "索引大小" => summary.index_size.map_or(String::new(), |v| format_bytes(v as u64)),
-        "引擎" => summary.engine.clone().unwrap_or_default(),
-        "排序规则" => summary.collation.clone().unwrap_or_default(),
-        "主键" => summary.primary_keys.join(", "),
-        "注释" => summary.comment.clone().unwrap_or_default(),
-        "创建时间" => summary.create_time.as_ref().map_or(String::new(), |v| {
+        _ if col_name == tr!("表名") || col_name == tr!("集合名") => summary.name.clone(),
+        _ if col_name == tr!("类型") => summary.table_type.clone(),
+        _ if col_name == tr!("行数") || col_name == tr!("文档数") => summary.row_count.map_or(String::new(), |v| format_count(v)),
+        _ if col_name == tr!("总大小") => summary.total_size.map_or(String::new(), |v| format_bytes(v as u64)),
+        _ if col_name == tr!("数据大小") => summary.data_size.map_or(String::new(), |v| format_bytes(v as u64)),
+        _ if col_name == tr!("索引大小") => summary.index_size.map_or(String::new(), |v| format_bytes(v as u64)),
+        _ if col_name == tr!("引擎") => summary.engine.clone().unwrap_or_default(),
+        _ if col_name == tr!("排序规则") => summary.collation.clone().unwrap_or_default(),
+        _ if col_name == tr!("主键") => summary.primary_keys.join(", "),
+        _ if col_name == tr!("注释") => summary.comment.clone().unwrap_or_default(),
+        _ if col_name == tr!("创建时间") => summary.create_time.as_ref().map_or(String::new(), |v| {
             if v.len() >= 19 { v[..19].to_string() } else { v.clone() }
         }),
         _ => String::new(),
