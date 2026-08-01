@@ -10160,7 +10160,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         action = TabUiAction::StopExecution;
                                     }
                                 }
-                                if toolbar_button(ui, tr!("查看历史查询"), subtle_button_style(colors, fonts.md)).clicked()
+                                if toolbar_button(ui, tr!("历史"), subtle_button_style(colors, fonts.md)).clicked()
                                 {
                                     if tab.connection_id.is_some() {
                                         tab.active_bottom_tab = QueryBottomTab::History;
@@ -10189,7 +10189,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         action = TabUiAction::ShowStatusError(tr!("请先选择一个连接后再保存查询").into());
                                     }
                                 }
-                                if toolbar_button(ui, tr!("格式化"), subtle_button_style(colors, fonts.md)).clicked() {
+                                if toolbar_button(ui, tr!("美化"), subtle_button_style(colors, fonts.md)).clicked() {
                                     let conn_id = tab.connection_id.as_deref();
                                     let db_kind = conn_id.and_then(|cid|
                                         connections.iter().find(|c| c.id == cid).map(|c| c.kind)
