@@ -73,6 +73,10 @@ winres = "0.1"
 # 改为累加字符位置，O(N)。升级到 0.35 会连带大量 API 变更，故用 patch 保留 0.33。
 [patch.crates-io]
 egui = { path = "third_party/egui" }
+# 本地修补 epaint：显式设置 TextFormat.line_height 后 valign 失效（差值恒为 0），
+# 字形贴行顶、行距全堆在行底。改为按字体行高 font_height 计算差值，让 valign 生效，
+# 用于 SQL 编辑器行间距垂直居中。默认（未设 line_height）行为不变。
+epaint = { path = "third_party/epaint" }
 
 [profile.release]
 lto = true

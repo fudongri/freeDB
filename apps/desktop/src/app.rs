@@ -34116,6 +34116,10 @@ fn sql_highlight_job_with_font_size(
     job
 }
 
+/// SQL 编辑器行距：附加在字体行高之上。
+/// 文本 line_height、行号 gutter、光标、自动补全锚点共用此值，修改时需保持各处一致以对齐行号。
+const QUERY_EDITOR_LINE_SPACING: f32 = 5.0;
+
 #[derive(Clone, Copy)]
 struct EditorPalette {
     panel_bg: Color32,
@@ -34249,7 +34253,7 @@ fn check_autocomplete_triggers(
         let cursor_screen_rect = if let Some(cursor_range) = &editor_output.cursor_range {
             let font_id = FontId::new(fonts.code, FontFamily::Monospace);
             let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
-            let gutter_row_height = row_height + 2.0;
+            let gutter_row_height = row_height + QUERY_EDITOR_LINE_SPACING;
             let cursor_rect = egui::text_selection::text_cursor_state::cursor_rect(
                 galley, &cursor_range.primary, gutter_row_height,
             );
@@ -34356,7 +34360,7 @@ fn render_query_editor(
             .width()
     });
     let gutter_width = (gutter_text_width + 28.0).max(56.0);
-    let gutter_row_height = row_height + 2.0;
+    let gutter_row_height = row_height + QUERY_EDITOR_LINE_SPACING;
 
     // ── 查找/替换栏 ──
     let find_bar_height = if tab.find.open {
@@ -34404,6 +34408,9 @@ fn render_query_editor(
         job.wrap.max_width = wrap_width;
         for section in &mut job.sections {
             section.format.line_height = Some(gutter_row_height);
+            // 垂直居中：配合本地 epaint patch，让字距在字形上下均匀分布
+            // （否则默认 Bottom 对齐会把额外行距全堆在行底，与行号中心错位）
+            section.format.valign = egui::Align::Center;
         }
         ui.fonts_mut(|fonts| fonts.layout_job(job))
     };
