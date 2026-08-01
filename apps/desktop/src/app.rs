@@ -10640,7 +10640,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     strip.cell(|ui| {
                         egui::Frame::new()
                             .fill(chrome.workspace_bg)
-                            .stroke(Stroke::new(1.0, chrome.soft_border))
+                            .stroke(Stroke::NONE)
                             .corner_radius(chrome.radius_lg)
                             .inner_margin(egui::Margin::symmetric(10, 6))
                             .show(ui, |ui| {
@@ -10801,14 +10801,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 });
                             });
                             ui.add_space(4.0);
-                            // 分割线
-                            let sep_rect = ui.available_rect_before_wrap();
-                            let sep_y = sep_rect.top();
-                            ui.painter().line_segment(
-                                [egui::pos2(sep_rect.left(), sep_y), egui::pos2(sep_rect.right(), sep_y)],
-                                Stroke::new(1.0, chrome.soft_border),
-                            );
-                            ui.add_space(6.0);
 
                             match tab.active_bottom_tab {
                                 QueryBottomTab::Results => {
