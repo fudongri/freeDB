@@ -43,7 +43,8 @@ impl HistoryStore {
     }
 
     pub fn append(&self, connection_id: &str, sql_text: &str, elapsed_ms: u128, success: bool) -> Result<()> {
-        const MAX_HISTORY_PER_CONNECTION: i64 = 10_000;
+        // 全局最多保留 500 条历史，超出自动删除最老的记录
+        const MAX_HISTORY: i64 = 500;
         let connection = self.connection.lock();
         connection.execute(
             "INSERT INTO query_history (id, connection_id, sql_text, executed_at, elapsed_ms, success)
@@ -52,24 +53,23 @@ impl HistoryStore {
         )?;
         // 自动裁剪超出上限的历史记录
         connection.execute(
-            "DELETE FROM query_history WHERE connection_id = ?1 AND id NOT IN (
-                SELECT id FROM query_history WHERE connection_id = ?1 ORDER BY executed_at DESC LIMIT ?2
+            "DELETE FROM query_history WHERE id NOT IN (
+                SELECT id FROM query_history ORDER BY executed_at DESC LIMIT ?1
             )",
-            params![connection_id, MAX_HISTORY_PER_CONNECTION],
+            params![MAX_HISTORY],
         )?;
         Ok(())
     }
 
-    pub fn list_by_connection(&self, connection_id: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+    pub fn list_all(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
             "SELECT id, connection_id, sql_text, executed_at, elapsed_ms, success
              FROM query_history
-             WHERE connection_id = ?1
              ORDER BY executed_at DESC
-             LIMIT ?2",
+             LIMIT ?1",
         )?;
-        let rows = statement.query_map(params![connection_id, limit as i64], |row| {
+        let rows = statement.query_map(params![limit as i64], |row| {
             Ok(HistoryEntry {
                 id: row.get(0)?,
                 connection_id: row.get(1)?,
@@ -85,12 +85,9 @@ impl HistoryStore {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn clear_by_connection(&self, connection_id: &str) -> Result<usize> {
+    pub fn clear_all(&self) -> Result<usize> {
         let connection = self.connection.lock();
-        let deleted = connection.execute(
-            "DELETE FROM query_history WHERE connection_id = ?1",
-            params![connection_id],
-        )?;
+        let deleted = connection.execute("DELETE FROM query_history", [])?;
         Ok(deleted)
     }
 

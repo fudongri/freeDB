@@ -295,22 +295,33 @@ impl AppServices {
     }
 
     pub async fn execute_sql(&self, execution: QueryExecution) -> Result<QueryResult> {
+        self.execute_sql_inner(execution, true).await
+    }
+
+    /// 执行 SQL 但不记录查询历史（表数据预览/编辑、DDL、生成数据等非查询编辑器场景）
+    pub async fn execute_sql_no_history(&self, execution: QueryExecution) -> Result<QueryResult> {
+        self.execute_sql_inner(execution, false).await
+    }
+
+    async fn execute_sql_inner(&self, execution: QueryExecution, record_history: bool) -> Result<QueryResult> {
         let profile = self.require_connection(&execution.connection_id)?;
         let password = self.require_saved_password(&execution.connection_id)?;
         let result = self
             .session_manager
             .execute_sql(&profile, &password, execution.clone())
             .await;
-        let (elapsed_ms, success) = match &result {
-            Ok(r) => (r.elapsed_ms, true),
-            Err(_) => (0, false),
-        };
-        if let Err(error) = self.history_store.append(&execution.connection_id, &execution.sql, elapsed_ms, success) {
-            warn!(
-                connection_id = execution.connection_id.as_str(),
-                error = %error,
-                "failed to persist query history"
-            );
+        if record_history {
+            let (elapsed_ms, success) = match &result {
+                Ok(r) => (r.elapsed_ms, true),
+                Err(_) => (0, false),
+            };
+            if let Err(error) = self.history_store.append(&execution.connection_id, &execution.sql, elapsed_ms, success) {
+                warn!(
+                    connection_id = execution.connection_id.as_str(),
+                    error = %error,
+                    "failed to persist query history"
+                );
+            }
         }
         result.map_err(into_anyhow)
     }
@@ -321,6 +332,26 @@ impl AppServices {
         connection_id: &str,
         database: Option<&str>,
         statements: Vec<String>,
+    ) -> Vec<Result<QueryResult>> {
+        self.execute_sql_batch_inner(connection_id, database, statements, true).await
+    }
+
+    /// 批量执行 SQL 但不记录查询历史（DDL 等非查询编辑器场景）
+    pub async fn execute_sql_batch_no_history(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        statements: Vec<String>,
+    ) -> Vec<Result<QueryResult>> {
+        self.execute_sql_batch_inner(connection_id, database, statements, false).await
+    }
+
+    async fn execute_sql_batch_inner(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        statements: Vec<String>,
+        record_history: bool,
     ) -> Vec<Result<QueryResult>> {
         let profile = match self.require_connection(connection_id) {
             Ok(p) => p,
@@ -335,17 +366,19 @@ impl AppServices {
             .execute_sql_batch(&profile, &password, connection_id, database, statements.clone())
             .await;
         // 记录历史
-        for (stmt, result) in statements.iter().zip(results.iter()) {
-            let (elapsed_ms, success) = match result {
-                Ok(r) => (r.elapsed_ms, true),
-                Err(_) => (0, false),
-            };
-            if let Err(error) = self.history_store.append(connection_id, stmt, elapsed_ms, success) {
-                warn!(
-                    connection_id = connection_id,
-                    error = %error,
-                    "failed to persist query history"
-                );
+        if record_history {
+            for (stmt, result) in statements.iter().zip(results.iter()) {
+                let (elapsed_ms, success) = match result {
+                    Ok(r) => (r.elapsed_ms, true),
+                    Err(_) => (0, false),
+                };
+                if let Err(error) = self.history_store.append(connection_id, stmt, elapsed_ms, success) {
+                    warn!(
+                        connection_id = connection_id,
+                        error = %error,
+                        "failed to persist query history"
+                    );
+                }
             }
         }
         results.into_iter().map(|r| r.map_err(into_anyhow)).collect()
@@ -409,14 +442,12 @@ impl AppServices {
             .map_err(into_anyhow)
     }
 
-    pub fn list_query_history(&self, connection_id: &str, limit: usize) -> Result<Vec<history_store::HistoryEntry>> {
-        Ok(self
-            .history_store
-            .list_by_connection(connection_id, limit)?)
+    pub fn list_all_query_history(&self, limit: usize) -> Result<Vec<history_store::HistoryEntry>> {
+        Ok(self.history_store.list_all(limit)?)
     }
 
-    pub fn clear_query_history(&self, connection_id: &str) -> Result<usize> {
-        Ok(self.history_store.clear_by_connection(connection_id)?)
+    pub fn clear_all_query_history(&self) -> Result<usize> {
+        Ok(self.history_store.clear_all()?)
     }
 
     pub fn save_query(

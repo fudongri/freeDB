@@ -154,6 +154,8 @@ pub struct DesktopApp {
     pending_routine_definition: HashMap<String, Receiver<RoutineDefinitionLoadResult>>,
     pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
     pending_file_load: Option<Receiver<FileLoadResult>>,
+    /// 异步查询历史刷新结果接收器（未选连接时加载全部历史）
+    pending_query_history: Option<(String, Receiver<QueryHistoryLoadResult>)>,
     generate_data_receiver: Option<Receiver<GenerateDataEvent>>,
     generate_data_cancel: Option<Arc<AtomicBool>>,
     pending_query_definition: Option<Receiver<QueryDefinitionLoadResult>>,
@@ -480,6 +482,8 @@ impl SlowQueryBottomTab {
 
 type ProcesslistLoadResult = Result<Vec<core_domain::ProcessInfo>, String>;
 type FileLoadResult = Result<(Vec<slowlog_parser::FingerprintStats>, Vec<slowlog_parser::SlowQueryEntry>, std::path::PathBuf), String>;
+/// 查询历史异步加载结果：connection_id + 历史列表
+type QueryHistoryLoadResult = (String, Vec<(String, String, chrono::DateTime<chrono::Utc>, u128, bool)>);
 
 const MAX_RECENT_TABS: usize = 50;
 const MAX_FILTER_SORT_HISTORY: usize = 20;
@@ -721,7 +725,7 @@ struct QueryTabState {
     /// When dragging, cursors are generated from start_line to current_line.
     option_drag_start: Option<OptionDragStart>,
     result: Option<QueryResult>,
-    history: Vec<(String, chrono::DateTime<chrono::Utc>, u128, bool)>,  // (sql_text, executed_at, elapsed_ms, success)
+    history: Vec<(String, String, chrono::DateTime<chrono::Utc>, u128, bool)>,  // (connection_id, sql_text, executed_at, elapsed_ms, success)
     saved_queries: Vec<SavedQueryEntry>,
     all_saved_queries: Vec<SavedQueryEntry>,
     messages: Vec<String>,
@@ -783,6 +787,8 @@ struct QueryTabState {
     ai_streaming_text: String,
     /// AI 是否正在流式输出
     ai_is_streaming: bool,
+    /// 历史列表是否正在异步加载
+    history_loading: bool,
     /// 流式完成通知接收器
     ai_done_rx: Option<tokio::sync::oneshot::Receiver<Result<String, ai_service::AiError>>>,
     /// AI 对话输入框内容
@@ -851,6 +857,7 @@ impl Clone for QueryTabState {
             ai_conversation: self.ai_conversation.clone(),
             ai_streaming_text: self.ai_streaming_text.clone(),
             ai_is_streaming: self.ai_is_streaming,
+            history_loading: self.history_loading,
             ai_done_rx: None,
             ai_input: self.ai_input.clone(),
             md_cache: CommonMarkCache::default(),
@@ -1766,6 +1773,7 @@ impl DesktopApp {
             pending_routine_definition: HashMap::new(),
             pending_processlist: None,
             pending_file_load: None,
+            pending_query_history: None,
             generate_data_receiver: None,
             generate_data_cancel: None,
             pending_query_definition: None,
@@ -3097,6 +3105,30 @@ impl DesktopApp {
 
         self.poll_sql_dump();
 
+        // 轮询查询历史异步刷新结果
+        if let Some((tab_id, receiver)) = self.pending_query_history.take() {
+            match receiver.try_recv() {
+                Ok((result_tab_id, history)) => {
+                    if let Some(WorkspaceTab::Query(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::Query(q) if q.id == result_tab_id)
+                    }) {
+                        tab.history = history;
+                        tab.history_loading = false;
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_query_history = Some((tab_id, receiver));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    if let Some(WorkspaceTab::Query(tab)) = self.tabs.iter_mut().find(|t| {
+                        matches!(t, WorkspaceTab::Query(q) if q.id == tab_id)
+                    }) {
+                        tab.history_loading = false;
+                    }
+                }
+            }
+        }
+
         // 轮询集合统计信息懒加载结果
         for tab in self.tabs.iter_mut() {
             if let WorkspaceTab::TableSummary(ts) = tab {
@@ -3838,7 +3870,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 };
                 let (definition, preview) = tokio::join!(
                     services.load_table_definition(&table),
-                    services.execute_sql(execution),
+                    services.execute_sql_no_history(execution),
                 );
                 tracing::info!("[UI] open_table_tab 整体耗时: {}ms", t_ui.elapsed().as_millis());
                 let _ = sender.send(TablePreviewLoadResult {
@@ -4269,7 +4301,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             database: table.database.clone(),
             sql: cmd,
         };
-        match services.execute_sql(execution).await {
+        match services.execute_sql_no_history(execution).await {
             Ok(result) => {
                 let mut field_types: Vec<(String, String)> = Vec::new();
                 let has_data = !result.rows.is_empty();
@@ -4443,11 +4475,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             let (definition, preview) = if reload_definition {
                 let (def, prev) = tokio::join!(
                     services.load_table_definition(&table),
-                    services.execute_sql(execution),
+                    services.execute_sql_no_history(execution),
                 );
                 (Some(def.map_err(|error| error.to_string())), prev.map_err(|error| error.to_string()))
             } else {
-                (None, services.execute_sql(execution).await.map_err(|error| error.to_string()))
+                (None, services.execute_sql_no_history(execution).await.map_err(|error| error.to_string()))
             };
             tracing::info!("[UI] refresh_table_preview 整体耗时: {}ms (reload_def={})", t_ui.elapsed().as_millis(), reload_definition);
             let _ = sender.send(TablePreviewLoadResult {
@@ -8215,13 +8247,32 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ctx.copy_text(text);
                 self.status_message = status_message;
             }
-            TabUiAction::RefreshQueryHistory(connection_id) => {
-                let (history, saved_queries, all_saved_queries) = load_query_library(&self.services, &connection_id);
-                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.history = history;
-                    tab.saved_queries = saved_queries;
-                    tab.all_saved_queries = all_saved_queries;
+            TabUiAction::RefreshQueryHistory => {
+                let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) else {
+                    return;
+                };
+                if tab.history_loading {
+                    return;
                 }
+                let tab_id = tab.id.clone();
+                tab.history_loading = true;
+                let services = self.services.clone();
+                let handle = self.runtime.handle().clone();
+                let (sender, receiver) = mpsc::channel();
+                self.pending_query_history = Some((tab_id.clone(), receiver));
+                // 本地历史查询很快，保证 spinner 至少显示一小段，避免一闪而过
+                let started_at = std::time::Instant::now();
+                handle.spawn(async move {
+                    let history = services.list_all_query_history(500).unwrap_or_default()
+                        .into_iter()
+                        .map(|e| (e.connection_id, e.sql_text, e.executed_at, e.elapsed_ms, e.success))
+                        .collect();
+                    let elapsed_ms = started_at.elapsed().as_millis();
+                    if elapsed_ms < 350 {
+                        tokio::time::sleep(std::time::Duration::from_millis(350 - elapsed_ms as u64)).await;
+                    }
+                    let _ = sender.send((tab_id, history));
+                });
             }
             TabUiAction::OpenSaveQueryDialog(connection_id) => {
                 self.open_save_query_dialog(&connection_id);
@@ -8973,7 +9024,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         };
         let connection_id = tab.table.connection_id.clone();
         let database = tab.table.database.clone();
-        match self.runtime.block_on(self.services.execute_sql(QueryExecution {
+        match self.runtime.block_on(self.services.execute_sql_no_history(QueryExecution {
             connection_id,
             database,
             sql,
@@ -9017,7 +9068,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.pending_create_table = Some(receiver);
 
         handle.spawn(async move {
-            let result = services.execute_sql(QueryExecution {
+            let result = services.execute_sql_no_history(QueryExecution {
                 connection_id,
                 database,
                 sql,
@@ -9258,7 +9309,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 if has_variable_definition(&var_name, &trigger.all_statements) {
                     // 执行 SELECT @var 获取完整 SQL
                     let select_sql = format!("SELECT {}", var_name);
-                    match self.runtime.block_on(self.services.execute_sql(QueryExecution {
+                    match self.runtime.block_on(self.services.execute_sql_no_history(QueryExecution {
                         connection_id: trigger.connection_id.clone(),
                         database: trigger.database.clone(),
                         sql: select_sql,
@@ -9393,7 +9444,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             DatabaseKind::Sqlite => return None,
         };
 
-        let result = self.runtime.block_on(self.services.execute_sql(QueryExecution {
+        let result = self.runtime.block_on(self.services.execute_sql_no_history(QueryExecution {
             connection_id: partial.connection_id.clone(),
             database: trigger.database.clone(),
             sql,
@@ -10161,18 +10212,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                                 if query_toolbar_button(ui, tr!("历史"), subtle_button_style(colors, fonts.md)).clicked()
                                 {
-                                    if tab.connection_id.is_some() {
-                                        tab.active_bottom_tab = QueryBottomTab::History;
-                                        // 如果底部面板被隐藏，重置编辑器高度
-                                        if tab.editor_height.is_some() && tab.editor_height.unwrap() > 300.0 {
-                                            tab.editor_height = Some(200.0);
-                                        }
-                                        // 如果底部面板折叠，展开它
-                                        tab.bottom_panel_collapsed = false;
-                                    } else {
-                                        tab.messages.push(tr!("请先选择一个连接后再查看历史查询").into());
-                                        tab.active_bottom_tab = QueryBottomTab::Messages;
+                                    // 历史面板统一展示所有连接的历史
+                                    tab.history = load_all_query_history(&services);
+                                    tab.active_bottom_tab = QueryBottomTab::History;
+                                    // 如果底部面板被隐藏，重置编辑器高度
+                                    if tab.editor_height.is_some() && tab.editor_height.unwrap() > 300.0 {
+                                        tab.editor_height = Some(200.0);
                                     }
+                                    // 如果底部面板折叠，展开它
+                                    tab.bottom_panel_collapsed = false;
                                 }
                                 if query_toolbar_button(ui, tr!("保存查询"), subtle_button_style(colors, fonts.md))
                                     .on_hover_text(tr!("保存查询 ({}+S)", MOD_KEY))
@@ -10861,41 +10909,32 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     egui::ScrollArea::vertical()
                                         .id_salt(format!("query-history-{}", tab.id))
                                         .show(ui, |ui| {
-                                            if tab.history.is_empty() {
+                                            ui.horizontal(|ui| {
+                                                let refresh_enabled = !tab.history_loading;
+                                                let refresh_btn = toolbar_button(ui, tr!("刷新"), ghost_button_style(colors, fonts.md));
+                                                if refresh_enabled && refresh_btn.clicked() {
+                                                    action = TabUiAction::RefreshQueryHistory;
+                                                }
+                                                if toolbar_button(ui, tr!("清空历史"), ghost_button_style(colors, fonts.md)).clicked() {
+                                                    let _ = services.clear_all_query_history();
+                                                    tab.history.clear();
+                                                }
+                                            });
+                                            ui.add_space(4.0);
+                                            if tab.history_loading {
+                                                ui.vertical_centered(|ui| {
+                                                    ui.add_space(60.0);
+                                                    ui.add(egui::Spinner::new().size(chrome.fonts.lg));
+                                                    ui.add_space(8.0);
+                                                    ui.label(RichText::new(tr!("加载中...")).color(chrome.weak_text));
+                                                });
+                                            } else if tab.history.is_empty() {
                                                 render_query_empty_state(
                                                     ui,
                                                     tr!("暂无执行历史"),
                                                     tr!("执行过的语句会显示在这里，方便再次使用"),
                                                 );
                                             } else {
-                                                ui.horizontal(|ui| {
-                                                    ui.small(
-                                                        RichText::new(tr!("{} 条记录", tab.history.len()))
-                                                            .color(chrome.weak_text),
-                                                    );
-                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                        if toolbar_button(ui, tr!("清空历史"), subtle_button_style(colors, fonts.md)).clicked() {
-                                                            if let Some(conn_id) = &tab.connection_id {
-                                                                let _ = services.clear_query_history(conn_id);
-                                                            }
-                                                            tab.history.clear();
-                                                        }
-                                                        if toolbar_button(ui, tr!("刷新"), subtle_button_style(colors, fonts.md)).clicked() {
-                                                            if let Some(conn_id) = &tab.connection_id {
-                                                                let (history, saved_queries, all_saved_queries) =
-                                                                    load_query_library(&services, conn_id);
-                                                                tab.history = history;
-                                                                tab.saved_queries = saved_queries;
-                                                                tab.all_saved_queries = all_saved_queries;
-                                                            }
-                                                        }
-                                                    });
-                                                });
-                                                ui.add_space(4.0);
-                                                let conn_name = tab.connection_id.as_ref()
-                                                    .and_then(|cid| connections.iter().find(|c| &c.id == cid))
-                                                    .map(|c| c.name.clone())
-                                                    .unwrap_or_default();
                                                 let db_name = tab.database.clone().unwrap_or_default();
                                                 let available_width = ui.available_width();
                                                 let table = egui_extras::TableBuilder::new(ui)
@@ -10919,7 +10958,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         header.col(|ui| { ui.label(RichText::new(tr!("操作")).size(chrome.fonts.xs).color(chrome.weak_text)); });
                                                     })
                                                     .body(|mut body| {
-                                                        for (sql_text, executed_at, elapsed_ms, success) in &tab.history {
+                                                        for (history_conn_id, sql_text, executed_at, elapsed_ms, success) in &tab.history {
                                                             let time_str = executed_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string();
                                                             let elapsed_str = if *elapsed_ms >= 1000 {
                                                                 format!("{:.1}s", *elapsed_ms as f64 / 1000.0)
@@ -10927,6 +10966,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 format!("{}ms", elapsed_ms)
                                                             };
                                                             let preview = compact_query_preview(sql_text);
+                                                            let row_conn_name = connections.iter()
+                                                                .find(|c| &c.id == history_conn_id)
+                                                                .map(|c| c.name.clone())
+                                                                .unwrap_or_default();
                                                             body.row(24.0, |mut row| {
                                                                 row.col(|ui| { ui.label(RichText::new(&time_str).size(chrome.fonts.xs).color(chrome.weak_text)); });
                                                                 row.col(|ui| { ui.label(RichText::new(&elapsed_str).size(chrome.fonts.xs)); });
@@ -10938,7 +10981,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     }
                                                                 });
                                                                 row.col(|ui| {
-                                                                    ui.label(RichText::new(truncate_ui_label(&conn_name, 15)).size(chrome.fonts.xs).color(chrome.weak_text));
+                                                                    ui.label(RichText::new(truncate_ui_label(&row_conn_name, 15)).size(chrome.fonts.xs).color(chrome.weak_text));
                                                                 });
                                                                 row.col(|ui| {
                                                                     ui.label(RichText::new(truncate_ui_label(&db_name, 15)).size(chrome.fonts.xs).color(chrome.weak_text));
@@ -10948,7 +10991,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 });
                                                                 row.col(|ui| {
                                                                     let sql_clone = sql_text.clone();
-                                                                    if mini_button(ui, tr!("查看"), mini_subtle_style(colors, fonts.sm)).clicked() {
+                                                                    if mini_button(ui, tr!("查看"), mini_borderless_style(colors, fonts.sm, colors.subtle_button_text)).clicked() {
                                                                         tab.sql = sql_clone;
                                                                     }
                                                                 });
@@ -16508,7 +16551,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         _ => format!("DROP {} `{}`", if is_view { "VIEW" } else { "TABLE" }, name.replace('`', "``")),
                     };
                     let db = Some(database);
-                    services.execute_sql(core_domain::QueryExecution {
+                    services.execute_sql_no_history(core_domain::QueryExecution {
                         connection_id,
                         database: db,
                         sql: qualified,
@@ -16531,7 +16574,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         _ => format!("TRUNCATE TABLE `{}`", name.replace('`', "``")),
                     };
                     let db = Some(database);
-                    services.execute_sql(core_domain::QueryExecution {
+                    services.execute_sql_no_history(core_domain::QueryExecution {
                         connection_id,
                         database: db,
                         sql,
@@ -16591,7 +16634,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         }
                     }
                     let db = Some(database);
-                    let results = services.execute_sql_batch(&connection_id, db.as_deref(), statements).await;
+                    let results = services.execute_sql_batch_no_history(&connection_id, db.as_deref(), statements).await;
                     results.into_iter().collect::<std::result::Result<Vec<_>, _>>().map(|_| ())
                 }
                 DdlAction::DropRoutine { connection_id, database, schema, name, is_procedure, kind } => {
@@ -16606,7 +16649,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         _ => format!("DROP {} `{}`", routine_type, name.replace('`', "``")),
                     };
                     let db = Some(database);
-                    services.execute_sql(core_domain::QueryExecution {
+                    services.execute_sql_no_history(core_domain::QueryExecution {
                         connection_id,
                         database: db,
                         sql: qualified,
@@ -16661,7 +16704,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         database: table.database.clone(),
                         sql: cmd,
                     };
-                    match services.execute_sql(execution).await {
+                    match services.execute_sql_no_history(execution).await {
                         Ok(_) => {
                             completed += count;
                             let _ = sender.send(GenerateDataEvent::Progress { completed, total });
@@ -16690,7 +16733,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             database: table.database.clone(),
                             sql: q,
                         };
-                        if let Ok(result) = services.execute_sql(exec).await {
+                        if let Ok(result) = services.execute_sql_no_history(exec).await {
                             if let Some(row) = result.rows.first() {
                                 if let Some(cell) = row.get("max_val") {
                                     let val = cell.display_text();
@@ -16717,7 +16760,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         database: table.database.clone(),
                         sql,
                     };
-                    match services.execute_sql(execution).await {
+                    match services.execute_sql_no_history(execution).await {
                         Ok(_) => {
                             completed += count;
                             retry_count = 0;
@@ -19667,6 +19710,7 @@ impl QueryTabState {
             ai_conversation: Vec::new(),
             ai_streaming_text: String::new(),
             ai_is_streaming: false,
+            history_loading: false,
             ai_done_rx: None,
             ai_input: String::new(),
             md_cache: CommonMarkCache::default(),
@@ -19834,7 +19878,7 @@ enum TabUiAction {
     ExecuteQuery(ExecuteMode),
     ExplainQuery(ExecuteMode),
     StopExecution,
-    RefreshQueryHistory(String),
+    RefreshQueryHistory,
     OpenSaveQueryDialog(String),
     UpdateSelectedSavedQuery(String),
     ShowStatusError(String),
@@ -30557,7 +30601,7 @@ async fn execute_batch_save(data: BatchSaveData, services: AppServices) -> Batch
                 "db.{}.updateOne({{ {} }}, {{ $set: {{ {} }} }})",
                 data.table.table, match_doc, field_entries.join(", ")
             );
-            match services.execute_sql(QueryExecution {
+            match services.execute_sql_no_history(QueryExecution {
                 connection_id: data.table.connection_id.clone(),
                 database: data.table.database.clone(),
                 sql,
@@ -30601,7 +30645,7 @@ async fn execute_batch_save(data: BatchSaveData, services: AppServices) -> Batch
                 pk_quoted,
                 in_values,
             );
-            match services.execute_sql(QueryExecution {
+            match services.execute_sql_no_history(QueryExecution {
                 connection_id: data.table.connection_id.clone(),
                 database: data.table.database.clone(),
                 sql,
@@ -30636,7 +30680,7 @@ async fn execute_batch_save(data: BatchSaveData, services: AppServices) -> Batch
                 set_clauses.join(",\n    "),
                 where_clause
             );
-            match services.execute_sql(QueryExecution {
+            match services.execute_sql_no_history(QueryExecution {
                 connection_id: data.table.connection_id.clone(),
                 database: data.table.database.clone(),
                 sql,
@@ -33175,15 +33219,24 @@ fn compact_query_preview(sql: &str) -> String {
 fn load_query_library(
     services: &AppServices,
     connection_id: &str,
-) -> (Vec<(String, chrono::DateTime<chrono::Utc>, u128, bool)>, Vec<SavedQueryEntry>, Vec<SavedQueryEntry>) {
+) -> (Vec<(String, String, chrono::DateTime<chrono::Utc>, u128, bool)>, Vec<SavedQueryEntry>, Vec<SavedQueryEntry>) {
     (
-        services.list_query_history(connection_id, 300).unwrap_or_default()
+        services.list_all_query_history(500).unwrap_or_default()
             .into_iter()
-            .map(|e| (e.sql_text, e.executed_at, e.elapsed_ms, e.success))
+            .map(|e| (e.connection_id, e.sql_text, e.executed_at, e.elapsed_ms, e.success))
             .collect(),
         services.list_saved_queries(connection_id).unwrap_or_default(),
         services.list_all_saved_queries().unwrap_or_default(),
     )
+}
+
+fn load_all_query_history(
+    services: &AppServices,
+) -> Vec<(String, String, chrono::DateTime<chrono::Utc>, u128, bool)> {
+    services.list_all_query_history(500).unwrap_or_default()
+        .into_iter()
+        .map(|e| (e.connection_id, e.sql_text, e.executed_at, e.elapsed_ms, e.success))
+        .collect()
 }
 
 fn tab_icon_symbol(tab: &impl TabKindMarker) -> &'static str {
