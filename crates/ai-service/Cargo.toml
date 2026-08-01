@@ -11,9 +11,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [dependencies]
 async-trait.workspace = true
 futures-util.workspace = true
+i18n = { path = "../i18n" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

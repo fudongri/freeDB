@@ -4,6 +4,8 @@ pub mod openai;
 pub mod prompt;
 pub mod tools;
 
+use std::fmt;
+
 use tokio::sync::mpsc;
 
 /// 工具定义 — 注册给 AI 的可调用工具
@@ -92,18 +94,25 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AiError {
-    #[error("网络错误: {0}")]
     NetworkError(String),
-    #[error("API Key 无效或权限不足")]
     AuthError,
-    #[error("请求频率超限，请稍后重试")]
     RateLimitExceeded,
-    #[error("响应解析失败: {0}")]
     InvalidResponse(String),
-    #[error("AI 服务错误: {0}")]
     ProviderError(String),
+}
+
+impl fmt::Display for AiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AiError::NetworkError(e) => write!(f, "{}", i18n::tr!("网络错误: {}", e)),
+            AiError::AuthError => write!(f, "{}", i18n::tr!("API Key 无效或权限不足")),
+            AiError::RateLimitExceeded => write!(f, "{}", i18n::tr!("请求频率超限，请稍后重试")),
+            AiError::InvalidResponse(e) => write!(f, "{}", i18n::tr!("响应解析失败: {}", e)),
+            AiError::ProviderError(e) => write!(f, "{}", i18n::tr!("AI 服务错误: {}", e)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

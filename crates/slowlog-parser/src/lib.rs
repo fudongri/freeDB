@@ -58,7 +58,7 @@ pub enum SlowLogError {
 impl std::fmt::Display for SlowLogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SlowLogError::ParseError(msg) => write!(f, "解析错误: {}", msg),
+            SlowLogError::ParseError(msg) => write!(f, "{}", i18n::tr!("解析错误: {}", msg)),
         }
     }
 }

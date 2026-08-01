@@ -1965,7 +1965,7 @@ impl DesktopApp {
         self.is_connection_dialog_open = true;
         self.editing_connection_id = None;
         let mut form = ConnectionFormState::from_profile(profile);
-        form.name = format!("{} (副本)", profile.name);
+        form.name = tr!("{} (副本)", profile.name);
         if profile.password_saved {
             if let Ok(Some(password)) = self.services.load_password(&profile.id) {
                 form.password = password;
@@ -3923,7 +3923,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }).await;
             let load_result = match result {
                 Ok(inner) => inner.map_err(|e| e.to_string()),
-                Err(join_err) => Err(format!("任务执行失败: {}", join_err)),
+                Err(join_err) => Err(tr!("任务执行失败: {}", join_err)),
             };
             tracing::info!(routine = %routine_label, ok = load_result.is_ok(), "routine定义加载完成");
             let _ = sender.send(RoutineDefinitionLoadResult {
@@ -6121,7 +6121,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         } else {
                             let tab_id = format!("schema-summary-{}", uuid::Uuid::new_v4());
                             let conn_name = self.connections.iter().find(|c| c.id == connection_id).map(|c| c.name.as_str()).unwrap_or(&connection_id);
-                            let label = format!("{}@{} 模式列表", db_label, conn_name);
+                            let label = tr!("{}@{} 模式列表", db_label, conn_name);
                             let state = SchemaSummaryTabState {
                                 id: tab_id.clone(),
                                 title: label,
@@ -6178,9 +6178,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let tab_id = format!("table-summary-{}", uuid::Uuid::new_v4());
                     let conn_name = self.connections.iter().find(|c| c.id == connection_id).map(|c| c.name.as_str()).unwrap_or(&connection_id);
                     let label = if database_kind == DatabaseKind::MongoDb {
-                        format!("{}@{} 集合信息", db_label, conn_name)
+                        tr!("{}@{} 集合信息", db_label, conn_name)
                     } else {
-                        format!("{}@{} 表信息", db_label, conn_name)
+                        tr!("{}@{} 表信息", db_label, conn_name)
                     };
                     let state = TableSummaryTabState {
                         id: tab_id.clone(),
@@ -7782,7 +7782,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 } else {
                                     let tab_id = format!("table-summary-{}", uuid::Uuid::new_v4());
                                     let conn_name = self.connections.iter().find(|c| c.id == connection_id).map(|c| c.name.as_str()).unwrap_or(&connection_id);
-                                    let label = format!("{}@{} 表信息", db_label, conn_name);
+                                    let label = tr!("{}@{} 表信息", db_label, conn_name);
                                     let state = TableSummaryTabState {
                                         id: tab_id.clone(),
                                         title: label,
@@ -8095,7 +8095,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             .collect();
                         serde_json::to_string(&results).unwrap_or_default()
                     }
-                    _ => "未知工具".to_string(),
+                    _ => tr!("未知工具").to_string(),
                 }
             }
         };
@@ -11281,7 +11281,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                             .collect();
                                                                         serde_json::to_string(&results).unwrap_or_default()
                                                                     }
-                                                                    _ => "未知工具".to_string(),
+                                                                    _ => tr!("未知工具").to_string(),
                                                                 }
                                                             }
                                                         };
@@ -12776,9 +12776,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         // 列定义：模式名、拥有者、表数量
         let cols: Vec<(&str, f32, bool)> = vec![
-            ("模式名", 200.0, false),
-            ("拥有者", 160.0, false),
-            ("表数量", 60.0, false),
+            (tr!("模式名"), 200.0, false),
+            (tr!("拥有者"), 160.0, false),
+            (tr!("表数量"), 60.0, false),
         ];
 
         // 过滤/排序缓存
@@ -13401,7 +13401,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         action = TabUiAction::ExportActiveResult(ExportFormat::Xlsx);
                                                         ui.close();
                                                     }
-                                                    let sql_label = if tab.database_kind == DatabaseKind::MongoDb { "脚本" } else { "SQL" };
+                                                    let sql_label = if tab.database_kind == DatabaseKind::MongoDb { tr!("脚本") } else { tr!("SQL") };
                                                     if ui.button(sql_label).clicked() {
                                                         action = TabUiAction::ExportActiveResult(ExportFormat::Sql);
                                                         ui.close();
@@ -13736,7 +13736,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                             // NULL 开关（仅 nullable 列可操作）
                                                                                             if col.nullable {
                                                                                                 let mut allow_null = tab.generate_data_null_columns.contains(col_name);
-                                                                                                let resp = ui.checkbox(&mut allow_null, "允许NULL值");
+                                                                                                let resp = ui.checkbox(&mut allow_null, tr!("允许NULL值"));
                                                                                                 if resp.changed() {
                                                                                                     if allow_null {
                                                                                                         tab.generate_data_null_columns.insert(col_name.clone());
@@ -13745,7 +13745,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                                                     }
                                                                                                 }
                                                                                             } else {
-                                                                                                ui.add_enabled(false, egui::Checkbox::new(&mut false, "允许NULL值"));
+                                                                                                ui.add_enabled(false, egui::Checkbox::new(&mut false, tr!("允许NULL值")));
                                                                                             }
                                                                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                                                                 let is_default = tab.generate_data_default_columns.contains(col_name);
@@ -16827,7 +16827,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     if let Err(e) = result {
                         if let Some(last) = tab.ai_conversation.last_mut() {
                             if matches!(last.role, AiRole::Assistant) {
-                                last.content = format!("错误: {}", e);
+                                last.content = tr!("错误: {}", e);
                             }
                         }
                     }
@@ -18480,7 +18480,7 @@ fn render_raw_entries_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, pale
         .column(egui_extras::Column::auto().at_least(70.0))
         .column(egui_extras::Column::remainder().at_least(200.0));
 
-    let header_labels = [tr!("时间"), tr!("用户"), tr!("查询耗时(s)"), tr!("发送行"), tr!("扫描行"), "SQL"];
+    let header_labels = [tr!("时间"), tr!("用户"), tr!("查询耗时(s)"), tr!("发送行"), tr!("扫描行"), tr!("SQL")];
     table.header(30.0, |mut header| {
         for label in &header_labels {
             header.col(|ui| {
@@ -26010,13 +26010,17 @@ fn render_table_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState, defin
         tab.structure_col_widths.clone()
     } else {
         tab.structure_resize_drag = None;
-        vec![42.0, 200.0, 130.0, 60.0, 150.0, 150.0, 100.0]
+        if get_locale() == Locale::En {
+            vec![42.0, 200.0, 140.0, 90.0, 150.0, 150.0, 125.0]
+        } else {
+            vec![42.0, 200.0, 130.0, 85.0, 150.0, 150.0, 115.0]
+        }
     };
     if show_auto_increment && structure_col_widths.len() < 8 {
         structure_col_widths.push(110.0);
     }
     if show_on_update && structure_col_widths.len() < 9 {
-        structure_col_widths.push(110.0);
+        structure_col_widths.push(if get_locale() == Locale::En { 150.0 } else { 140.0 });
     }
 
     egui::Frame::new()
@@ -27861,13 +27865,17 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
         tab.structure_col_widths.clone()
     } else {
         tab.structure_resize_drag = None;
-        vec![42.0, 200.0, 130.0, 60.0, 140.0, 150.0, 100.0]
+        if get_locale() == Locale::En {
+            vec![42.0, 200.0, 140.0, 90.0, 140.0, 150.0, 125.0]
+        } else {
+            vec![42.0, 200.0, 130.0, 85.0, 140.0, 150.0, 115.0]
+        }
     };
     if show_auto_increment && structure_col_widths.len() < 8 {
         structure_col_widths.push(110.0);
     }
     if show_on_update && structure_col_widths.len() < 9 {
-        structure_col_widths.push(120.0);
+        structure_col_widths.push(if get_locale() == Locale::En { 150.0 } else { 140.0 });
     }
     if structure_col_widths.len() < 7 + show_auto_increment as usize + show_on_update as usize + 1 {
         structure_col_widths.push(60.0);
@@ -28336,7 +28344,8 @@ fn table_header_cell(
                 };
                 ui.add(
                     egui::Label::new(label_text)
-                        .selectable(false),
+                        .selectable(false)
+                        .truncate(),
                 );
                 // 更新时刷新标记
                 if on_update_current_timestamp {
@@ -30609,13 +30618,13 @@ async fn execute_batch_save(data: BatchSaveData, services: AppServices) -> Batch
         // 无主键或多主键：逐行 UPDATE
         for (row_index, cols) in &data.changes_by_row {
             let Some(row) = data.rows.get(*row_index) else {
-                last_error = Some("行索引越界".to_string());
+                last_error = Some(tr!("行索引越界").to_string());
                 continue;
             };
             let Some(where_clause) =
                 build_table_row_match_clause(data.database_kind, data.definition.as_ref(), row, &data.table)
             else {
-                last_error = Some("无法构建 WHERE 条件".to_string());
+                last_error = Some(tr!("无法构建 WHERE 条件").to_string());
                 continue;
             };
             let set_clauses: Vec<String> = cols.iter().map(|(col, chg)| {

@@ -926,6 +926,80 @@ fn en(key: &'static str) -> &'static str {
         "变长字符串, TEXT 亲和性" => "VARCHAR, TEXT affinity",
         "定长字符串, TEXT 亲和性" => "CHAR, TEXT affinity",
 
+        // ── MongoDB 类型建议 ──
+        "字符串, 文本数据" => "String, text data",
+        "32位整数, -2^31 ~ 2^31-1" => "32-bit integer, -2^31 ~ 2^31-1",
+        "64位整数, -2^63 ~ 2^63-1" => "64-bit integer, -2^63 ~ 2^63-1",
+        "双精度浮点数, IEEE 754" => "Double, IEEE 754",
+        "布尔, true/false" => "Boolean, true/false",
+        "对象ID, 12字节唯一标识" => "ObjectID, 12-byte unique identifier",
+        "日期时间, UTC 日期时间" => "Date, UTC datetime",
+        "数组, 值的有序列表" => "Array, ordered list of values",
+        "嵌入文档, 子文档" => "Embedded document, sub-document",
+        "128位十进制, 精确数值" => "128-bit decimal, exact numeric value",
+        "时间戳, MongoDB 内部时间戳" => "Timestamp, MongoDB internal timestamp",
+        "正则表达式, 模式匹配" => "Regex, pattern matching",
+        "JavaScript, JS 代码" => "JavaScript, JS code",
+        "空值, null" => "Null, null",
+
+        // ── 表结构编辑 ──
+        "注释:" => "Comment:",
+        "表注释:" => "Table comment:",
+        "表注释" => "Table comment",
+        "ON UPDATE" => "ON UPDATE",
+        "更新时刷新" => "Refresh on update",
+
+        // ── 结果表头 / 进程列表 ──
+        "时间" => "Time",
+        "用户" => "User",
+        "命令" => "Command",
+        "时间(s)" => "Time(s)",
+        "SQL" => "SQL",
+
+        // ── 新增记录 ──
+        "保存新增" => "Save New",
+        "取消新增" => "Cancel New",
+
+        // ── MongoDB 命令复制 ──
+        "复制为 insertMany 命令" => "Copy as insertMany command",
+
+        // ── 表数据视图 ──
+        "正在加载字段..." => "Loading fields...",
+        "加载失败" => "Load failed",
+
+        // ── 通用按钮 ──
+        "执行" => "Execute",
+        "确认" => "Confirm",
+        "自定义" => "Custom",
+
+        // ── 连接测试 ──
+        "连接失败" => "Connection failed",
+        "连接测试失败: 后台任务异常终止" => "Connection test failed: background task terminated unexpectedly",
+
+        // ── 配置文件导入 ──
+        "配置文件中没有数据" => "No data found in the configuration file",
+
+        // ── app.rs 新增 ──
+        "{} (副本)" => "{} (copy)",
+        "错误: {}" => "Error: {}",
+        "任务执行失败: {}" => "Task execution failed: {}",
+        "{}@{} 模式列表" => "{}@{} schemas",
+        "{}@{} 集合信息" => "{}@{} collections",
+        "{}@{} 表信息" => "{}@{} tables",
+        "未知工具" => "Unknown tool",
+        "模式名" => "Schema",
+        "拥有者" => "Owner",
+        "表数量" => "Table Count",
+        "脚本" => "Script",
+        "行索引越界" => "Row index out of bounds",
+
+        // ── ai-service / slowlog-parser ──
+        "工具调用超过最大轮次" => "Maximum tool call rounds exceeded",
+        "解析错误: {}" => "Parse error: {}",
+        "BSON 转换错误: {}" => "BSON conversion error: {}",
+        "启动安装程序失败（UAC 提权被拒绝或取消）" => "Failed to launch installer (UAC elevation denied or cancelled)",
+        "保存排序失败: {}" => "Failed to save sort: {}",
+
         _ => key,
     }
 }

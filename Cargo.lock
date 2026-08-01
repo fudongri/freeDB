@@ -153,11 +153,11 @@ version = "1.1.7"
 dependencies = [
  "async-trait",
  "futures-util",
+ "i18n",
  "mockito",
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -5517,6 +5517,7 @@ dependencies = [
 name = "slowlog-parser"
 version = "1.1.7"
 dependencies = [
+ "i18n",
  "regex",
 ]
 

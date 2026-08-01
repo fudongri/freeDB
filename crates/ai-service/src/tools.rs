@@ -52,7 +52,7 @@ pub async fn chat_with_tools(
         }
     }
 
-    Err(AiError::ProviderError("工具调用超过最大轮次".into()))
+    Err(AiError::ProviderError(i18n::tr!("工具调用超过最大轮次").to_string()))
 }
 pub fn tool_definitions() -> Vec<ToolDef> {
     vec![

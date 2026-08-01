@@ -5,4 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+i18n = { path = "../i18n" }
 regex = "1"
