@@ -12248,6 +12248,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 return;
                             }
 
+                            // 右侧 DDL 面板（展开时）
+                            if tab.ddl_panel_visible {
+                                let (dv, lv) = read_theme_variants(ui);
+                                let colors = ui_theme::Theme::from_visuals(ui.visuals(), dv, lv).colors;
+                                egui::SidePanel::right(format!("ddl_panel_{}", tab.id))
+                                    .resizable(true)
+                                    .default_width(tab.ddl_panel_width)
+                                    .min_width(150.0)
+                                    .max_width(500.0)
+                                    .show_inside(ui, |ui| {
+                                        ui.set_min_height(ui.available_height());
+                                        render_summary_ddl_panel(ui, tab, &colors, fonts);
+                                    });
+                            }
+
                             // 外层水平 ScrollArea（与数据表格一致），TableBuilder 负责垂直滚动
                             egui::ScrollArea::horizontal()
                                 .id_salt(format!("ts-hscroll-{}", tab.id))
