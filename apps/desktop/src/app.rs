@@ -6216,7 +6216,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
                 SidebarAction::OpenTable { node, load_data, force_new_tab } => self.open_table_tab(&node, load_data, force_new_tab),
                 SidebarAction::OpenRoutine { node, force_new_tab } => self.open_routine_tab(&node, force_new_tab),
-                SidebarAction::OpenTableSummary { connection_id, database, schema, db_label } => {
+                SidebarAction::OpenTableSummary { connection_id, database, schema, db_label, ddl_target } => {
                     let database_kind = self.database_kind_for_connection(&connection_id);
                     // PostgreSQL 双击数据库（schema=None）→ 打开 schema 列表
                     if database_kind == DatabaseKind::Postgres && schema.is_none() {
@@ -6353,6 +6353,57 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     });
                     } // end else (new tab)
                     } // end else (not PostgreSQL schema routing)
+
+                    // ---- 追加：ddl_target 设置与异步加载 ----
+                    if let Some(target) = ddl_target {
+                        if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
+                            tab.ddl_panel_visible = true;
+                            tab.ddl_loading = true;
+                            tab.ddl_text = None;
+                            tab.ddl_error = None;
+                            tab.ddl_target = Some(if matches!(target.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function) {
+                                DdlTarget::Routine(target.clone())
+                            } else {
+                                DdlTarget::Table(target.clone())
+                            });
+                            let tab_id = tab.id.clone();
+                            let node = target.clone();
+                            let services = self.services.clone();
+                            let (sender, receiver) = mpsc::channel();
+                            self.pending_ddl_load.insert(tab_id.clone(), receiver);
+                            let is_routine = matches!(node.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function);
+                            let is_proc = matches!(node.node_type, ExplorerNodeType::Procedure);
+                            let connection_id = node.connection_id.clone();
+                            let database = node.database.clone();
+                            let schema = node.schema.clone();
+                            let name = node.name.clone();
+                            self.runtime.handle().spawn(async move {
+                                let result = if is_routine {
+                                    let routine = core_domain::RoutineRef {
+                                        connection_id,
+                                        database,
+                                        schema,
+                                        name,
+                                        is_procedure: is_proc,
+                                    };
+                                    services.load_routine_definition(&routine).await.map(|d| d.create_sql.unwrap_or_default())
+                                } else {
+                                    let table = TableRef {
+                                        connection_id,
+                                        database,
+                                        schema,
+                                        table: name,
+                                        is_view: matches!(node.node_type, ExplorerNodeType::View),
+                                    };
+                                    services.load_table_definition(&table).await.map(|d| d.create_sql.unwrap_or_default())
+                                };
+                                let _ = sender.send(DdlLoadResult {
+                                    tab_id,
+                                    result: result.map_err(|e| e.to_string()),
+                                });
+                            });
+                        }
+                    }
                 }
                 SidebarAction::RefreshConnection(connection_id) => {
                     self.collapse_connection_tree(&connection_id);
@@ -6696,6 +6747,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     database: node.name.clone(),
                                     schema: None,
                                     db_label: node.name.clone(),
+                                    ddl_target: None,
                                 });
                                 ui.close();
                             }
@@ -6786,6 +6838,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     database: node.database.clone().unwrap_or_default(),
                                     schema: Some(node.name.clone()),
                                     db_label: node.name.clone(),
+                                    ddl_target: None,
                                 });
                                 ui.close();
                             }
@@ -6835,7 +6888,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             tr!("查看表定义")
                         };
                         if ui.button(def_label).clicked() {
-                            actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: false, force_new_tab: false });
+                            actions.push(SidebarAction::OpenTableSummary {
+                                connection_id: node.connection_id.clone(),
+                                database: node.database.clone().unwrap_or_default(),
+                                schema: node.schema.clone(),
+                                db_label: node.database.clone().unwrap_or_default(),
+                                ddl_target: Some(node.clone()),
+                            });
                             ui.close();
                         }
                         if ui.button(tr!("在新标签页中打开")).clicked() {
@@ -7000,7 +7059,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let is_proc = matches!(node.node_type, ExplorerNodeType::Procedure);
                         let def_label = if is_proc { tr!("查看存储过程定义") } else { tr!("查看函数定义") };
                         if ui.button(def_label).clicked() {
-                            actions.push(SidebarAction::OpenRoutine { node: node.clone(), force_new_tab: false });
+                            actions.push(SidebarAction::OpenTableSummary {
+                                connection_id: node.connection_id.clone(),
+                                database: node.database.clone().unwrap_or_default(),
+                                schema: node.schema.clone(),
+                                db_label: node.database.clone().unwrap_or_default(),
+                                ddl_target: Some(node.clone()),
+                            });
                             ui.close();
                         }
                         if ui.button(tr!("在新标签页中打开")).clicked() {
@@ -7086,6 +7151,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 database: node.name.clone(),
                                 schema: None,
                                 db_label: node.name.clone(),
+                                ddl_target: None,
                             });
                         }
                         ExplorerNodeType::Schema => {
@@ -7094,6 +7160,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 database: node.database.clone().unwrap_or_default(),
                                 schema: Some(node.name.clone()),
                                 db_label: node.name.clone(),
+                                ddl_target: None,
                             });
                         }
                         _ => {}
@@ -20038,6 +20105,7 @@ enum SidebarAction {
         database: String,
         schema: Option<String>,
         db_label: String,
+        ddl_target: Option<ExplorerNode>,
     },
 }
 
