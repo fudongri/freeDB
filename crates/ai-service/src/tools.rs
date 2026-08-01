@@ -17,19 +17,21 @@ pub async fn chat_with_tools(
     let mut final_text = String::new();
 
     for _round in 0..MAX_TOOL_ROUNDS {
-        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
-
-        let tool_calls = provider
-            .chat_stream_with_tools(messages.clone(), tools.clone(), stream_tx)
-            .await?;
-
-        // 收集流式文本
-        while let Some(chunk) = stream_rx.recv().await {
-            final_text.push_str(&chunk);
-            if let Some(ref tx) = tx {
-                let _ = tx.send(chunk);
+        // 有外部流式通道时直接实时转发，避免"先完整接收再排空"导致回答整块出现
+        let tool_calls = if let Some(outer) = &tx {
+            provider
+                .chat_stream_with_tools(messages.clone(), tools.clone(), outer.clone())
+                .await?
+        } else {
+            let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+            let calls = provider
+                .chat_stream_with_tools(messages.clone(), tools.clone(), stream_tx)
+                .await?;
+            while let Some(chunk) = stream_rx.recv().await {
+                final_text.push_str(&chunk);
             }
-        }
+            calls
+        };
 
         if tool_calls.is_empty() {
             return Ok(final_text);
