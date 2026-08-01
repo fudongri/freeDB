@@ -1925,7 +1925,15 @@ pub(crate) fn apply_autocomplete_suggestion(
 ) -> (String, usize) {
     let (token_start, token_end) = SqlContextParser::current_token_bounds(sql, cursor_char_index);
     let replace_start = prefix_start_index.min(token_start);
-    let replace_end = token_end.max(cursor_char_index);
+
+    // 只有当补全文本覆盖整个 token 时才向前扩展到 token_end，
+    // 否则保留光标后的标识符字符，避免误删用户想保留的内容。
+    let token = &sql[char_to_byte_index(sql, token_start)..char_to_byte_index(sql, token_end)];
+    let replace_end = if replacement.to_lowercase().starts_with(&token.to_lowercase()) {
+        token_end
+    } else {
+        cursor_char_index
+    };
 
     let before = &sql[..char_to_byte_index(sql, replace_start)];
     let after = &sql[char_to_byte_index(sql, replace_end)..];
@@ -2593,6 +2601,30 @@ mod tests {
         let (sql, cursor) = apply_autocomplete_suggestion("SELECT na|me FROM users".replace('|', "").as_str(), 9, 7, "name", None);
         assert_eq!(sql, "SELECT name FROM users");
         assert_eq!(cursor, 11);
+    }
+
+    #[test]
+    fn apply_autocomplete_keeps_content_after_cursor_when_token_not_covered() {
+        // 光标在标识符中间，补全文本不覆盖整个 token：光标后的内容必须保留。
+        let (sql, cursor) = apply_autocomplete_suggestion("SELECT * FROM public|_users".replace('|', "").as_str(), 20, 14, "public", None);
+        assert_eq!(sql, "SELECT * FROM public_users");
+        assert_eq!(cursor, 20);
+    }
+
+    #[test]
+    fn apply_autocomplete_keeps_content_after_cursor_for_table() {
+        // 表名同样适用：选 "users" 时保留光标后的 "_archive"。
+        let (sql, cursor) = apply_autocomplete_suggestion("SELECT * FROM users|_archive".replace('|', "").as_str(), 19, 14, "users", None);
+        assert_eq!(sql, "SELECT * FROM users_archive");
+        assert_eq!(cursor, 19);
+    }
+
+    #[test]
+    fn apply_autocomplete_replaces_full_token_when_covered() {
+        // 补全文本覆盖整个 token（"public" 以 "pub" 开头）：正常补全到 token_end。
+        let (sql, cursor) = apply_autocomplete_suggestion("SELECT * FROM pub", 17, 14, "public", None);
+        assert_eq!(sql, "SELECT * FROM public");
+        assert_eq!(cursor, 20);
     }
 
     #[test]
