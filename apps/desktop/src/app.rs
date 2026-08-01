@@ -12639,6 +12639,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             toggle_summary_selection(tab, ri);
                                                         } else {
                                                             set_single_summary_selection(tab, ri);
+                                                            // 面板可见时，单机选中行 → 联动展示该行 DDL
+                                                            if tab.ddl_panel_visible {
+                                                                if let Some(s) = Self::summary_display_items(tab).get(ri) {
+                                                                    let node = summary_to_node(s, tab);
+                                                                    tab.pending_actions.push(SummaryContextAction::ShowDdl { node });
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     // 首列 tooltip
