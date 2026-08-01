@@ -5528,7 +5528,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             Color32::TRANSPARENT
         };
         ui.painter().rect_filled(nq_rect, title_btn_cr, nq_fill);
-        ui.painter().rect_stroke(nq_rect, title_btn_cr, nq_style.stroke, egui::StrokeKind::Outside);
         ui.painter().text(nq_rect.center(), Align2::CENTER_CENTER, nq_label, nq_font, nq_style.text);
         if nq_resp.clicked() {
             self.new_query_from_selected_node();
@@ -5554,7 +5553,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             Color32::TRANSPARENT
         };
         ui.painter().rect_filled(ao_rect, title_btn_cr, ao_fill);
-        ui.painter().rect_stroke(ao_rect, title_btn_cr, ao_style.stroke, egui::StrokeKind::Outside);
         ui.painter().text(ao_rect.center(), Align2::CENTER_CENTER, ao_label, ao_font, ao_style.text);
         if ao_resp.clicked() {
             self.sidebar_active_only = !self.sidebar_active_only;
@@ -5584,7 +5582,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         } else {
                             ui.painter().rect_filled(badge_rect, cr, accent.fill);
                         }
-                        ui.painter().rect_stroke(badge_rect, cr, Stroke::new(1.0, palette.selection_stroke), egui::StrokeKind::Outside);
                         ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, &label, font, palette.selection_stroke);
                         if response.clicked() {
                             *pending_update_action = Some(UpdateAction::StartDownload);
@@ -5607,7 +5604,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             let progress_rect = egui::Rect::from_min_size(badge_rect.min, Vec2::new(fill_w, badge_rect.height()));
                             ui.painter().rect_filled(progress_rect, cr, accent.fill.linear_multiply(1.3));
                         }
-                        ui.painter().rect_stroke(badge_rect, cr, Stroke::new(1.0, palette.selection_stroke), egui::StrokeKind::Outside);
                         ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, &pct_text, font, palette.selection_stroke);
                     }
                     UpdateState::ReadyToApply { .. } => {
@@ -5626,7 +5622,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         } else {
                             ui.painter().rect_filled(badge_rect, cr, accent.fill);
                         }
-                        ui.painter().rect_stroke(badge_rect, cr, Stroke::new(1.0, palette.selection_stroke), egui::StrokeKind::Outside);
                         ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, label, font, palette.selection_stroke);
                         if response.clicked() {
                             *pending_update_action = Some(UpdateAction::Apply);
@@ -5644,7 +5639,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let response = ui.allocate_rect(badge_rect, egui::Sense::click());
                         let colors = &self.theme.colors;
                         let err_fill = colors.error_badge_fill;
-                        let err_stroke = colors.error_badge_stroke;
                         let err_text = colors.error_badge_text;
                         if response.hovered() {
                             ui.painter().rect_filled(badge_rect, cr, err_fill.linear_multiply(1.15));
@@ -5652,7 +5646,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         } else {
                             ui.painter().rect_filled(badge_rect, cr, err_fill);
                         }
-                        ui.painter().rect_stroke(badge_rect, cr, Stroke::new(1.0, err_stroke), egui::StrokeKind::Outside);
                         ui.painter().text(badge_rect.center(), Align2::CENTER_CENTER, label, font, err_text);
                         if response.clicked() {
                             *pending_update_action = Some(UpdateAction::Retry);
@@ -10127,7 +10120,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .fill(chrome.toolbar_bg)
                         .stroke(Stroke::NONE)
                         .corner_radius(chrome.radius_sm)
-                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .inner_margin(egui::Margin { left: 14, right: 14, top: 5, bottom: 10 })
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
                             // 第一行：执行按钮
@@ -10139,17 +10132,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 let exec_kind = if is_executing { subtle_button_style(colors, fonts.md) } else { accent_muted_button_style(colors, fonts.md) };
 
                                 if exec_all_enabled {
-                                    if toolbar_button(ui, tr!("执行全部"), exec_kind)
+                                    if query_toolbar_button(ui, tr!("执行全部"), exec_kind)
                                         .on_hover_text(tr!("执行全部 ({}+R)", MOD_KEY))
                                         .clicked()
                                     {
                                         action = TabUiAction::ExecuteQuery(ExecuteMode::Whole);
                                     }
                                 } else {
-                                    toolbar_button(ui, tr!("执行全部"), exec_kind);
+                                    query_toolbar_button(ui, tr!("执行全部"), exec_kind);
                                 }
                                 if exec_sel_enabled {
-                                    if toolbar_button(ui, tr!("执行选中语句"), exec_kind)
+                                    if query_toolbar_button(ui, tr!("执行选中语句"), exec_kind)
                                         .on_hover_text(tr!("执行选中语句 ({}+R)", MOD_KEY))
                                         .clicked()
                                     {
@@ -10158,15 +10151,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         action = TabUiAction::ExecuteQuery(ExecuteMode::Selection(selected));
                                     }
                                 } else {
-                                    toolbar_button(ui, tr!("执行选中语句"), exec_kind);
+                                    query_toolbar_button(ui, tr!("执行选中语句"), exec_kind);
                                 }
                                 // 停止按钮：执行中显示
                                 if is_executing {
-                                    if toolbar_button(ui, tr!("停止"), danger_button_style(colors, fonts.md)).clicked() {
+                                    if query_toolbar_button(ui, tr!("停止"), danger_button_style(colors, fonts.md)).clicked() {
                                         action = TabUiAction::StopExecution;
                                     }
                                 }
-                                if toolbar_button(ui, tr!("历史"), subtle_button_style(colors, fonts.md)).clicked()
+                                if query_toolbar_button(ui, tr!("历史"), subtle_button_style(colors, fonts.md)).clicked()
                                 {
                                     if tab.connection_id.is_some() {
                                         tab.active_bottom_tab = QueryBottomTab::History;
@@ -10181,7 +10174,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         tab.active_bottom_tab = QueryBottomTab::Messages;
                                     }
                                 }
-                                if toolbar_button(ui, tr!("保存查询"), subtle_button_style(colors, fonts.md))
+                                if query_toolbar_button(ui, tr!("保存查询"), subtle_button_style(colors, fonts.md))
                                     .on_hover_text(tr!("保存查询 ({}+S)", MOD_KEY))
                                     .clicked()
                                 {
@@ -10195,7 +10188,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         action = TabUiAction::ShowStatusError(tr!("请先选择一个连接后再保存查询").into());
                                     }
                                 }
-                                if toolbar_button(ui, tr!("美化"), subtle_button_style(colors, fonts.md)).clicked() {
+                                if query_toolbar_button(ui, tr!("美化"), subtle_button_style(colors, fonts.md)).clicked() {
                                     let conn_id = tab.connection_id.as_deref();
                                     let db_kind = conn_id.and_then(|cid|
                                         connections.iter().find(|c| c.id == cid).map(|c| c.kind)
@@ -10208,7 +10201,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                                 // EXPLAIN 按钮（放在格式化后面）
                                 if !is_executing {
-                                    if toolbar_button(ui, tr!("解释"), subtle_button_style(colors, fonts.md))
+                                    if query_toolbar_button(ui, tr!("解释"), subtle_button_style(colors, fonts.md))
                                         .on_hover_text(tr!("EXPLAIN 执行计划")).clicked()
                                     {
                                         let selected = tab.cursor_range
@@ -10234,10 +10227,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 let btn = ui.add(
                                     egui::Button::new(RichText::new(format!("{btn_label} ▾")).size(chrome.fonts.md).color(chrome.text))
                                         .fill(Color32::TRANSPARENT)
-                                        .stroke(Stroke::new(1.0, chrome.secondary_button_stroke))
+                                        .stroke(Stroke::NONE)
                                         .corner_radius(chrome.radius_lg)
                                         .min_size(Vec2::new(120.0, 26.0)),
                                 );
+                                if btn.hovered() {
+                                    ui.painter().rect_filled(btn.rect, chrome.radius_lg, chrome.secondary_button_stroke.linear_multiply(0.15));
+                                }
                                 let ai_menu_id = egui::Id::new("ai_menu").with(&tab.id);
                                 let is_open = ui.data_mut(|d| d.get_temp::<bool>(ai_menu_id).unwrap_or(false));
                                 if btn.clicked() {
@@ -10303,7 +10299,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     ui.data_mut(|d| d.insert_temp(ai_menu_id.with("rect"), area_resp.response.rect));
                                 }
                             });
-                            ui.add_space(10.0);
+                            ui.add_space(15.0);
                             // 第二行：连接 + 数据库
                             ui.horizontal(|ui| {
                                 ui.set_min_width(ui.available_width());
@@ -10318,7 +10314,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 for c in connections {
                                     conn_items.push((&c.name, tab.connection_id.as_deref() == Some(&c.id)));
                                 }
-                                if let Some(sel) = toolbar_dropdown(ui, combo_id, &selected_connection_label, 200.0, &conn_items) {
+                                if let Some(sel) = toolbar_dropdown_with_border(ui, combo_id, &selected_connection_label, 200.0, &conn_items, Color32::from_rgba_unmultiplied(chrome.secondary_button_stroke.r(), chrome.secondary_button_stroke.g(), chrome.secondary_button_stroke.b(), 120)) {
                                     if sel == 0 {
                                         tab.connection_id = None;
                                     } else if let Some(c) = connections.get(sel - 1) {
@@ -10355,7 +10351,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         db_items.push((db, tab.database.as_deref() == Some(db.as_str())));
                                     }
                                 }
-                                if let Some(sel) = toolbar_dropdown(ui, db_combo_id, &db_label, 180.0, &db_items) {
+                                if let Some(sel) = toolbar_dropdown_with_border(ui, db_combo_id, &db_label, 180.0, &db_items, Color32::from_rgba_unmultiplied(chrome.secondary_button_stroke.r(), chrome.secondary_button_stroke.g(), chrome.secondary_button_stroke.b(), 120)) {
                                     if sel == 0 {
                                         tab.database = None;
                                     } else if let Some(dbs) = databases {
@@ -32115,6 +32111,25 @@ fn toolbar_button(
     toolbar_button_sized(ui, label, style, None, true)
 }
 
+/// 查询页工具栏按钮：无边框，hover 时显示弱背景高亮（与侧边栏一致）
+fn query_toolbar_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    style: ButtonStyle,
+) -> egui::Response {
+    let response = ui.add(
+        egui::Button::new(RichText::new(label).size(style.font_size).color(style.text))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .corner_radius(style.corner_radius)
+            .min_size(Vec2::new(style.min_width, style.min_height)),
+    );
+    if response.hovered() {
+        ui.painter().rect_filled(response.rect, style.corner_radius, style.stroke.color.linear_multiply(0.15));
+    }
+    response
+}
+
 fn toolbar_button_disabled(
     ui: &mut egui::Ui,
     label: &str,
@@ -32160,11 +32175,35 @@ fn toolbar_dropdown(
     items: &[(&str, bool)],
 ) -> Option<usize> {
     let palette = mac_ui_palette_from_ui(ui);
+    toolbar_dropdown_impl(ui, id, label, width, items, palette.secondary_button_stroke)
+}
+
+/// 带自定义边框色的下拉框：连接/数据库选择器使用更淡的边框
+fn toolbar_dropdown_with_border(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    label: &str,
+    width: f32,
+    items: &[(&str, bool)],
+    border_color: Color32,
+) -> Option<usize> {
+    toolbar_dropdown_impl(ui, id, label, width, items, border_color)
+}
+
+fn toolbar_dropdown_impl(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    label: &str,
+    width: f32,
+    items: &[(&str, bool)],
+    border_color: Color32,
+) -> Option<usize> {
+    let palette = mac_ui_palette_from_ui(ui);
     let btn_label = format!("{label} ▾");
     let btn = ui.add(
         egui::Button::new(RichText::new(btn_label).size(palette.fonts.md).color(palette.text))
             .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, palette.secondary_button_stroke))
+            .stroke(Stroke::new(1.0, border_color))
             .corner_radius(palette.radius_lg)
             .min_size(Vec2::new(width, 22.0)),
     );
