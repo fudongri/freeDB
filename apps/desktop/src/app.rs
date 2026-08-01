@@ -152,6 +152,7 @@ pub struct DesktopApp {
     pending_schema_summary: Option<(String, Receiver<SchemaSummaryLoadResult>)>,
     pending_routine_summary: Option<(String, Receiver<TableSummaryLoadResult>)>,
     pending_routine_definition: HashMap<String, Receiver<RoutineDefinitionLoadResult>>,
+    pending_ddl_load: HashMap<String, Receiver<DdlLoadResult>>,
     pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
     pending_file_load: Option<Receiver<FileLoadResult>>,
     /// 异步查询历史刷新结果接收器（未选连接时加载全部历史）
@@ -299,6 +300,12 @@ struct TableSummaryLoadResult {
     result: Result<Vec<driver_api::TableSummary>, String>,
 }
 
+/// 表信息页 DDL 面板异步加载结果
+struct DdlLoadResult {
+    tab_id: String,
+    result: Result<String, String>,
+}
+
 struct SchemaSummaryLoadResult {
     tab_id: String,
     result: Result<Vec<driver_api::SchemaSummary>, String>,
@@ -311,6 +318,13 @@ struct RoutineDefinitionLoadResult {
 
 #[derive(Clone, PartialEq)]
 enum SummaryFilter { Tables, Views, Procedures, Functions }
+
+/// DDL 面板当前展示的目标对象
+#[derive(Clone)]
+enum DdlTarget {
+    Table(ExplorerNode),
+    Routine(ExplorerNode),
+}
 
 #[derive(Clone)]
 struct TableSummaryTabState {
@@ -348,6 +362,13 @@ struct TableSummaryTabState {
     cached_sort_asc: bool,
     cached_data_len: usize,
     cached_summary_filter: SummaryFilter,
+    // 右侧 DDL 面板状态
+    ddl_panel_visible: bool,
+    ddl_panel_width: f32,
+    ddl_loading: bool,
+    ddl_target: Option<DdlTarget>,
+    ddl_text: Option<String>,
+    ddl_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -390,6 +411,7 @@ enum SummaryContextAction {
     RenameTable { connection_id: String, database: String, schema: Option<String>, old_name: String, new_name: String, is_view: bool, kind: DatabaseKind },
     NewTable { connection_id: String, database: String, schema: Option<String> },
     Reload,
+    ShowDdl { node: ExplorerNode },
     LoadCollectionStats { connection_id: String, database: String, collections: Vec<String> },
     LoadRoutines,
 }
@@ -1771,6 +1793,7 @@ impl DesktopApp {
             pending_schema_summary: None,
             pending_routine_summary: None,
             pending_routine_definition: HashMap::new(),
+            pending_ddl_load: HashMap::new(),
             pending_processlist: None,
             pending_file_load: None,
             pending_query_history: None,
@@ -4894,6 +4917,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     cached_sort_asc: true,
                     cached_data_len: 0,
                     cached_summary_filter: SummaryFilter::Tables,
+                    ddl_panel_visible: false,
+                    ddl_panel_width: 320.0,
+                    ddl_loading: false,
+                    ddl_target: None,
+                    ddl_text: None,
+                    ddl_error: None,
                 };
                 self.tabs.push(WorkspaceTab::TableSummary(state));
                 self.active_tab = self.tabs.len().saturating_sub(1);
@@ -6267,6 +6296,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         cached_sort_asc: true,
                         cached_data_len: 0,
                         cached_summary_filter: SummaryFilter::Tables,
+                        ddl_panel_visible: false,
+                        ddl_panel_width: 320.0,
+                        ddl_loading: false,
+                        ddl_target: None,
+                        ddl_text: None,
+                        ddl_error: None,
                     };
                     self.tabs.push(WorkspaceTab::TableSummary(state));
                     self.active_tab = self.tabs.len().saturating_sub(1);
@@ -7744,6 +7779,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     tab.needs_reload = true;
                                 }
                             }
+                            // 占位：实际的 ShowDdl 加载逻辑在后续任务接入
+                            SummaryContextAction::ShowDdl { .. } => {}
                             SummaryContextAction::LoadRoutines => {
                                 if let Some(WorkspaceTab::TableSummary(tab)) = self.tabs.get_mut(self.active_tab) {
                                     tab.loading = true;
@@ -7868,6 +7905,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         cached_sort_asc: true,
                                         cached_data_len: 0,
                                         cached_summary_filter: SummaryFilter::Tables,
+                                        ddl_panel_visible: false,
+                                        ddl_panel_width: 320.0,
+                                        ddl_loading: false,
+                                        ddl_target: None,
+                                        ddl_text: None,
+                                        ddl_error: None,
                                     };
                                     self.tabs.push(WorkspaceTab::TableSummary(state));
                                     self.active_tab = self.tabs.len().saturating_sub(1);
