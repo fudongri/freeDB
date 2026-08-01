@@ -34415,7 +34415,7 @@ fn render_query_editor(
     );
     let editor_rect = egui::Rect::from_min_size(
         ui.cursor().min + egui::vec2(gutter_width, 0.0),
-        egui::vec2(ui.available_width(), remaining_editor_height),
+        egui::vec2((ui.available_width() - gutter_width).max(0.0), remaining_editor_height),
     );
 
     let mut gutter_rows: Vec<(f32, usize)> = Vec::new();
