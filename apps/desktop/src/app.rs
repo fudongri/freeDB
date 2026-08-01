@@ -348,6 +348,8 @@ struct TableSummaryTabState {
     routine_summaries: Vec<driver_api::TableSummary>,
     needs_reload: bool,
     pending_open_table: Option<usize>, // 行索引，双击时设置
+    pending_select_table: Option<(String, SummaryFilter)>, // 侧边栏"查看定义"打开后待选中的对象名 + 期望筛选标签
+    pending_scroll_row: Option<usize>, // 待滚动到该行（cached_sorted_indices 中的位置，消费后清除）
     pending_actions: Vec<SummaryContextAction>,
     col_widths: Vec<f32>,
     resize_drag: Option<(usize, f32)>,
@@ -4950,6 +4952,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     routine_summaries: Vec::new(),
                     needs_reload: false,
                     pending_open_table: None,
+                    pending_select_table: None,
+                    pending_scroll_row: None,
                     pending_actions: Vec::new(),
                     col_widths: Vec::new(),
                     resize_drag: None,
@@ -6364,6 +6368,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         routine_summaries: Vec::new(),
                         needs_reload: false,
                         pending_open_table: None,
+                        pending_select_table: None,
+                        pending_scroll_row: None,
                         pending_actions: Vec::new(),
                         col_widths: Vec::new(),
                         resize_drag: None,
@@ -6418,6 +6424,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             } else {
                                 DdlTarget::Table(target.clone())
                             });
+                            // 侧边栏"查看定义"打开后，待数据加载完成自动选中该对象
+                            tab.pending_select_table = Some((
+                                target.name.clone(),
+                                match target.node_type {
+                                    ExplorerNodeType::Procedure => SummaryFilter::Procedures,
+                                    ExplorerNodeType::Function => SummaryFilter::Functions,
+                                    ExplorerNodeType::View => SummaryFilter::Views,
+                                    _ => SummaryFilter::Tables,
+                                },
+                            ));
                             let tab_id = tab.id.clone();
                             let node = target.clone();
                             let services = self.services.clone();
@@ -8093,6 +8109,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         routine_summaries: Vec::new(),
                                         needs_reload: false,
                                         pending_open_table: None,
+                                        pending_select_table: None,
+                                        pending_scroll_row: None,
                                         pending_actions: Vec::new(),
                                         col_widths: Vec::new(),
                                         resize_drag: None,
@@ -12314,6 +12332,35 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
         let sorted_indices = tab.cached_sorted_indices.clone();
 
+        // 侧边栏"查看定义"打开的待选中对象：数据加载完成后自动定位并选中
+        if let Some((target_name, target_filter)) = tab.pending_select_table.clone() {
+            if tab.filter != target_filter {
+                // 切换筛选标签（触发缓存重算），本次不匹配，下帧重试
+                tab.filter = target_filter.clone();
+                tab.search_filter.clear();
+                tab.cached_filter.clear();
+                tab.cached_data_len = 0;
+                tab.col_widths.clear();
+                tab.sort_column = None;
+                tab.selected_indices.clear();
+                if matches!(target_filter, SummaryFilter::Procedures | SummaryFilter::Functions)
+                    && !tab.routines_loaded
+                {
+                    tab.pending_actions.push(SummaryContextAction::LoadRoutines);
+                }
+            } else if !tab.loading {
+                // 数据已就绪，按名匹配并选中、滚动
+                let items = Self::summary_display_items(tab);
+                if let Some(pos) = items.iter().position(|s| s.name == target_name) {
+                    set_single_summary_selection(tab, pos);
+                    if let Some(vi) = sorted_indices.iter().position(|&ri| ri == pos) {
+                        tab.pending_scroll_row = Some(vi);
+                    }
+                }
+                tab.pending_select_table = None;
+            }
+        }
+
         let total = match tab.filter {
             SummaryFilter::Tables | SummaryFilter::Views => tab.table_summaries.len(),
             SummaryFilter::Procedures | SummaryFilter::Functions => tab.routine_summaries.len(),
@@ -12512,6 +12559,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 .resizable(false)
                                 .drag_to_scroll(false)
                                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+                            if let Some(scroll_row) = tab.pending_scroll_row.take() {
+                                table = table.scroll_to_row(scroll_row, None);
+                            }
 
                             let col_count = tab.col_widths.len();
                             for (i, w) in tab.col_widths.iter().enumerate() {
