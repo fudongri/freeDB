@@ -68,6 +68,12 @@ urlencoding = "2.1"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 winres = "0.1"
 
+# 本地修补 egui：双击选词在长文本上是 O(N²)（0.33.3 的 ccursor_previous_word
+# 对每个 word 调用 char_index_from_byte_index 从头扫描）。按 egui 0.35 的修复
+# 改为累加字符位置，O(N)。升级到 0.35 会连带大量 API 变更，故用 patch 保留 0.33。
+[patch.crates-io]
+egui = { path = "third_party/egui" }
+
 [profile.release]
 lto = true
 codegen-units = 1
