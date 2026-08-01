@@ -8679,6 +8679,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.ai_settings_editing_index = self.ai_model_store.active_index;
                 self.is_ai_settings_open = true;
             }
+            TabUiAction::OpenAiChat => {
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.bottom_panel_collapsed = false;
+                    tab.active_bottom_tab = QueryBottomTab::AiChat;
+                }
+            }
             TabUiAction::LocateInSidebar { connection_id, db_kind, database, schema, table_name } => {
                 // 目标节点 ID（展开逻辑由 render_sidebar 每帧处理）
                 // table_name 为 None 时定位到库/模式节点
@@ -10216,6 +10222,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                                 // AI 助手下拉按钮
                                 let ai_items: Vec<&str> = vec![
+                                    tr!("打开 AI 助手面板"),
                                     tr!("优化语句"),
                                     tr!("解释语句"),
                                     tr!("数据质量检查"),
@@ -10281,10 +10288,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     );
                                                     if response.clicked() {
                                                         action = match i {
-                                                            0 => TabUiAction::AiOptimize,
-                                                            1 => TabUiAction::AiExplain,
-                                                            2 => TabUiAction::AiDataQuality,
-                                                            3 => TabUiAction::AiDataAnalysis,
+                                                            0 => TabUiAction::OpenAiChat,
+                                                            1 => TabUiAction::AiOptimize,
+                                                            2 => TabUiAction::AiExplain,
+                                                            3 => TabUiAction::AiDataQuality,
+                                                            4 => TabUiAction::AiDataAnalysis,
                                                             _ => TabUiAction::OpenAiSettings,
                                                         };
                                                         ui.data_mut(|d| d.insert_temp(ai_menu_id, false));
@@ -19903,6 +19911,7 @@ enum TabUiAction {
     AiDataAnalysis,
     SwitchAiModel(usize),
     OpenAiSettings,
+    OpenAiChat,
 }
 
 #[derive(Clone)]
