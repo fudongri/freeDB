@@ -11023,6 +11023,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         .stroke(Stroke::NONE)
                                                         .inner_margin(egui::Margin::symmetric(10, 6))
                                                         .show(ui, |ui| {
+                                                            // 撑满整行宽度，让背景色铺满面板
+                                                            ui.set_min_width(ui.available_width());
                                                             ui.label(
                                                                 RichText::new(prefix)
                                                                     .size(chrome.fonts.sm)
@@ -11035,6 +11037,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             ui.style_mut().visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
                                                             CommonMarkViewer::new().show(ui, &mut tab.md_cache, &msg.content);
                                                             ui.style_mut().visuals.widgets.noninteractive.bg_stroke = prev_stroke;
+                                                            // AI 回复下方提供复制按钮，复制原始 Markdown 内容
+                                                            if matches!(msg.role, AiRole::Assistant) {
+                                                                ui.add_space(2.0);
+                                                                ui.horizontal(|ui| {
+                                                                    ui.add_space(ui.available_width() - 60.0);
+                                                                    let copy_btn = mini_button(
+                                                                        ui,
+                                                                        tr!("📋 复制"),
+                                                                        mini_borderless_style(colors, chrome.fonts.sm, chrome.weak_text),
+                                                                    );
+                                                                    if copy_btn.clicked() {
+                                                                        ui.ctx().copy_text(msg.content.clone());
+                                                                        show_copied_tooltip(ui, copy_btn.rect.center());
+                                                                    }
+                                                                    if copy_btn.hovered() {
+                                                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                                    }
+                                                                });
+                                                            }
                                                         });
                                                 }
                                                 if tab.ai_is_streaming {
@@ -11075,11 +11096,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             } else {
                                                 ui.available_width()
                                             };
+                                            // 输入框随内容自动增高（类似 Claude Code），最多 8 行后滚动
+                                            let line_count = tab.ai_input.matches('\n').count() + 1;
+                                            let wrap_estimate = tab.ai_input.chars().count() / 50 + 1;
+                                            let input_rows = (line_count.max(wrap_estimate)).clamp(2, 8);
                                             ui.add(
                                                 egui::TextEdit::multiline(&mut tab.ai_input)
-                                                    .desired_rows(2)
+                                                    .desired_rows(input_rows)
                                                     .desired_width(text_w)
-                                                    .hint_text(tr!("继续提问… (/clear 清空)")),
+                                                    .hint_text(RichText::new(tr!("继续提问… (/clear 清空)")).color(ui.visuals().weak_text_color())),
                                             );
                                             if tab.ai_is_streaming {
                                                 let stop_btn = ui.add(
