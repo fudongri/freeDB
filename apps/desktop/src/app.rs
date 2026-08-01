@@ -12278,7 +12278,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }
                                 })
                                 .body(|mut body| {
-                                    for &ri in &sorted_indices {
+                                    // 虚拟化渲染：仅布局/绘制可视区行，滚动体验与数据页一致
+                                    body.rows(28.0, sorted_indices.len(), |mut row| {
+                                        let vi = row.index();
+                                        let ri = sorted_indices[vi];
                                         let row_selected = summary_row_selected(tab, ri);
                                         let fill = if row_selected {
                                             blend_color(palette.selection_bg, palette.card_bg, 0.18)
@@ -12286,7 +12289,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             palette.card_bg
                                         };
 
-                                        body.row(28.0, |mut row| {
                                             for (col_idx, &(_, _, is_numeric)) in cols.iter().enumerate() {
                                                 row.col(|ui| {
                                                     let rect = ui.max_rect();
@@ -12718,7 +12720,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 });
                                             }
                                         });
-                                    }
                                 });
                                 // 写回列宽和拖拽状态，鼠标松开时清除拖拽
                                 tab.col_widths = local_widths;
