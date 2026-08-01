@@ -19766,6 +19766,9 @@ impl eframe::App for DesktopApp {
                     tab.cursor_range = Some(egui::text::CCursorRange::one(
                         egui::text::CCursor::new(new_char_idx),
                     ));
+                    // 拖拽插入内容时不触发智能提示
+                    tab.autocomplete.dismiss();
+                    tab.autocomplete.last_keystroke = None;
                     // 请求焦点并设置光标到插入内容之后
                     tab.editor_focus_requested = true;
                     tab.autocomplete_cursor_target = Some(new_char_idx);
@@ -34167,6 +34170,17 @@ fn check_autocomplete_triggers(
     // 多光标模式下禁用智能提示
     if !tab.extra_cursors.is_empty() {
         tab.autocomplete.dismiss();
+        return;
+    }
+
+    // 粘贴内容时不触发智能提示（Event::Paste 或 Cmd/Ctrl+V）
+    let pasted = ui.input(|i| {
+        i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+            || (i.modifiers.command && i.key_pressed(egui::Key::V))
+    });
+    if pasted {
+        tab.autocomplete.dismiss();
+        tab.autocomplete.last_keystroke = None;
         return;
     }
 
