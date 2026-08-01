@@ -60,11 +60,11 @@ if clicked {
 }
 ```
 
-在矩形选区键盘处理块（23416 行）**外**新增 cmd+a 检测：
+在矩形选区键盘处理块（23416 行）**外**新增 cmd+a 检测。注意 pending insert 模式（`tab.pending_insert_row.is_some()`）时行号列隐藏、无法点击 `#`，cmd+a 也应跳过该模式保持一致：
 
 ```rust
 if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
-    if tab.cell_selection_anchor.is_none() {
+    if tab.cell_selection_anchor.is_none() && tab.pending_insert_row.is_none() {
         let row_count = tab.preview.as_ref().map(|p| p.rows.len()).unwrap_or(0);
         select_all_preview_rows(tab, row_count);
         tab.selected_columns.clear();
@@ -86,7 +86,7 @@ if clicked {
 }
 ```
 
-在表格渲染 body 之前（或合适位置）新增 cmd+a 检测：
+在 `#` 表头块内（toggle 全选行逻辑之后）新增 cmd+a 检测，与 toggle 逻辑集中、可访问全部所需引用：
 
 ```rust
 if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
