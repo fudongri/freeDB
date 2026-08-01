@@ -33933,7 +33933,7 @@ fn editor_palette_from_ui(ui: &egui::Ui) -> EditorPalette {
 }
 
 fn sql_highlight_job(sql: &str, visuals: &egui::Visuals, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> egui::text::LayoutJob {
-    sql_highlight_job_with_font_size(sql, visuals, 15.0, dark_variant, light_variant)
+    sql_highlight_job_with_font_size(sql, visuals, 13.0, dark_variant, light_variant)
 }
 
 fn sql_highlight_job_from_ui(ui: &egui::Ui, sql: &str) -> egui::text::LayoutJob {

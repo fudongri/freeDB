@@ -17,7 +17,7 @@ pub struct FontSizes {
     pub lg: f32,
     /// 13.0 — 输入框、右键菜单项（HIG Menu Item）
     pub xl: f32,
-    /// 15.0 — SQL 代码编辑器
+    /// 13.0 — SQL 代码编辑器
     pub code: f32,
     /// 18.0 — 对话框标题
     pub heading: f32,
@@ -41,7 +41,7 @@ impl Default for FontSizes {
             md: 13.0,
             lg: 13.0,
             xl: 13.0,
-            code: 15.0,
+            code: 13.0,
             heading: 18.0,
             title: 22.0,
             hero: 36.0,
