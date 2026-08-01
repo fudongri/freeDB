@@ -19775,7 +19775,10 @@ impl eframe::App for DesktopApp {
                     );
 
                     tab.sql.insert_str(byte_idx, &padded);
-                    let new_char_idx = char_idx + insert_text.chars().count();
+                    // 光标放在插入内容之后（不含后置空格），需计入前置补的空格
+                    let new_char_idx = char_idx
+                        + usize::from(pad_left)
+                        + insert_text.chars().count();
                     tab.cursor_range = Some(egui::text::CCursorRange::one(
                         egui::text::CCursor::new(new_char_idx),
                     ));
