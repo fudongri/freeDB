@@ -188,6 +188,13 @@ pub struct DesktopApp {
     is_recent_tabs_open: bool,
     recent_tabs: Vec<RecentTabEntry>,
     recent_tabs_popup_rect: Option<egui::Rect>,
+    // 数据页筛选/排序历史（按表隔离）
+    filter_history: HashMap<String, Vec<TableFilterHistoryEntry>>,
+    sort_history: HashMap<String, Vec<TableSortHistoryEntry>>,
+    is_filter_history_open: bool,
+    is_sort_history_open: bool,
+    filter_history_popup_rect: Option<egui::Rect>,
+    sort_history_popup_rect: Option<egui::Rect>,
     scroll_speed: f32,
     log_buffer: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     menu_event_rx: Option<Receiver<muda::MenuEvent>>,
@@ -475,17 +482,51 @@ type ProcesslistLoadResult = Result<Vec<core_domain::ProcessInfo>, String>;
 type FileLoadResult = Result<(Vec<slowlog_parser::FingerprintStats>, Vec<slowlog_parser::SlowQueryEntry>, std::path::PathBuf), String>;
 
 const MAX_RECENT_TABS: usize = 50;
+const MAX_FILTER_SORT_HISTORY: usize = 20;
 const MAX_AI_CONVERSATION_LEN: usize = 50;
 const MAX_DISPLAY_TEXT_LEN: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum RecentTabEntry {
-    Query { connection_id: Option<String>, database: Option<String>, title: String, sql: String, #[serde(default)] saved_query_id: Option<String> },
-    Table { connection_id: String, database: Option<String>, schema: Option<String>, table_name: String, is_view: bool },
-    CreateTable { connection_id: String, database: String, schema: Option<String> },
-    TableSummary { connection_id: String, database: String, schema: Option<String>, title: String },
-    SchemaSummary { connection_id: String, database: String, title: String },
-    Routine { connection_id: String, database: Option<String>, schema: Option<String>, name: String, is_procedure: bool },
+    Query { connection_id: Option<String>, database: Option<String>, title: String, sql: String, #[serde(default)] saved_query_id: Option<String>, #[serde(default)] recorded_at: Option<chrono::DateTime<chrono::Utc>> },
+    Table { connection_id: String, database: Option<String>, schema: Option<String>, table_name: String, is_view: bool, #[serde(default)] recorded_at: Option<chrono::DateTime<chrono::Utc>> },
+    CreateTable { connection_id: String, database: String, schema: Option<String>, #[serde(default)] recorded_at: Option<chrono::DateTime<chrono::Utc>> },
+    TableSummary { connection_id: String, database: String, schema: Option<String>, title: String, #[serde(default)] recorded_at: Option<chrono::DateTime<chrono::Utc>> },
+    SchemaSummary { connection_id: String, database: String, title: String, #[serde(default)] recorded_at: Option<chrono::DateTime<chrono::Utc>> },
+    Routine { connection_id: String, database: Option<String>, schema: Option<String>, name: String, is_procedure: bool, #[serde(default)] recorded_at: Option<chrono::DateTime<chrono::Utc>> },
+}
+
+/// 一条筛选历史记录（按表隔离）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TableFilterHistoryEntry {
+    connection_id: String,
+    database: Option<String>,
+    schema: Option<String>,
+    table: String,
+    state: TableFilterState,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 一条排序历史记录（按表隔离）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TableSortHistoryEntry {
+    connection_id: String,
+    database: Option<String>,
+    schema: Option<String>,
+    table: String,
+    state: TableSortState,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 表维度 key，用于在 HashMap 中按表隔离历史
+fn table_history_key(connection_id: &str, database: &Option<String>, schema: &Option<String>, table: &str) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        connection_id,
+        database.as_deref().unwrap_or(""),
+        schema.as_deref().unwrap_or(""),
+        table
+    )
 }
 
 fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
@@ -496,6 +537,7 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
             title: t.title.clone(),
             sql: t.sql.clone(),
             saved_query_id: t.selected_saved_query_id.clone(),
+            recorded_at: Some(chrono::Utc::now()),
         }),
         WorkspaceTab::Table(t) => Some(RecentTabEntry::Table {
             connection_id: t.table.connection_id.clone(),
@@ -503,22 +545,26 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
             schema: t.table.schema.clone(),
             table_name: t.table.table.clone(),
             is_view: t.table.is_view,
+            recorded_at: Some(chrono::Utc::now()),
         }),
         WorkspaceTab::CreateTable(t) => Some(RecentTabEntry::CreateTable {
             connection_id: t.connection_id.clone(),
             database: t.database.clone(),
             schema: t.schema.clone(),
+            recorded_at: Some(chrono::Utc::now()),
         }),
         WorkspaceTab::TableSummary(t) => Some(RecentTabEntry::TableSummary {
             connection_id: t.connection_id.clone(),
             database: t.database.clone(),
             schema: t.schema.clone(),
             title: t.title.clone(),
+            recorded_at: Some(chrono::Utc::now()),
         }),
         WorkspaceTab::SchemaSummary(t) => Some(RecentTabEntry::SchemaSummary {
             connection_id: t.connection_id.clone(),
             database: t.database.clone(),
             title: t.title.clone(),
+            recorded_at: Some(chrono::Utc::now()),
         }),
         WorkspaceTab::Routine(t) => Some(RecentTabEntry::Routine {
             connection_id: t.routine.connection_id.clone(),
@@ -526,6 +572,7 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
             schema: t.routine.schema.clone(),
             name: t.routine.name.clone(),
             is_procedure: t.routine.is_procedure,
+            recorded_at: Some(chrono::Utc::now()),
         }),
         WorkspaceTab::Dashboard => None,
         WorkspaceTab::SlowQuery(_) => None,
@@ -535,15 +582,15 @@ fn recent_entry_from_tab(tab: &WorkspaceTab) -> Option<RecentTabEntry> {
 
 fn recent_tab_matches(a: &RecentTabEntry, b: &RecentTabEntry) -> bool {
     match (a, b) {
-        (RecentTabEntry::Query { connection_id: a_conn, database: a_db, title: a_title, saved_query_id: a_sqid, sql: a_sql },
-         RecentTabEntry::Query { connection_id: b_conn, database: b_db, title: b_title, saved_query_id: b_sqid, sql: b_sql }) =>
+        (RecentTabEntry::Query { connection_id: a_conn, database: a_db, title: a_title, saved_query_id: a_sqid, sql: a_sql, .. },
+         RecentTabEntry::Query { connection_id: b_conn, database: b_db, title: b_title, saved_query_id: b_sqid, sql: b_sql, .. }) =>
             if a_sqid.is_some() { a_sqid == b_sqid }
             else { a_conn == b_conn && a_db == b_db && a_sql == b_sql },
         (RecentTabEntry::Table { connection_id: a_conn, database: a_db, schema: a_schema, table_name: a_tbl, .. },
          RecentTabEntry::Table { connection_id: b_conn, database: b_db, schema: b_schema, table_name: b_tbl, .. }) =>
             a_conn == b_conn && a_db == b_db && a_schema == b_schema && a_tbl == b_tbl,
-        (RecentTabEntry::CreateTable { connection_id: a_conn, database: a_db, schema: a_schema },
-         RecentTabEntry::CreateTable { connection_id: b_conn, database: b_db, schema: b_schema }) =>
+        (RecentTabEntry::CreateTable { connection_id: a_conn, database: a_db, schema: a_schema, .. },
+         RecentTabEntry::CreateTable { connection_id: b_conn, database: b_db, schema: b_schema, .. }) =>
             a_conn == b_conn && a_db == b_db && a_schema == b_schema,
         (RecentTabEntry::TableSummary { connection_id: a_conn, database: a_db, schema: a_schema, .. },
          RecentTabEntry::TableSummary { connection_id: b_conn, database: b_db, schema: b_schema, .. }) =>
@@ -1004,7 +1051,7 @@ impl Default for TableSortState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TableSortClause {
     column: Option<String>,
     descending: bool,
@@ -1021,7 +1068,7 @@ impl Default for TableSortClause {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TableSortState {
     clauses: Vec<TableSortClause>,
 }
@@ -1191,12 +1238,12 @@ impl EditorFindState {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TableFilterState {
     clauses: Vec<TableFilterClause>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TableFilterClause {
     joiner: TableFilterJoiner,
     column: Option<String>,
@@ -1207,7 +1254,8 @@ struct TableFilterClause {
     enabled: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum TableFilterJoiner {
     And,
     Or,
@@ -1225,7 +1273,8 @@ enum TableHeaderCopyAction {
     CopyAsInCondition,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum TableFilterOperator {
     #[default]
     Eq,
@@ -1752,6 +1801,12 @@ impl DesktopApp {
             is_recent_tabs_open: false,
             recent_tabs: Vec::new(),
             recent_tabs_popup_rect: None,
+            filter_history: HashMap::new(),
+            sort_history: HashMap::new(),
+            is_filter_history_open: false,
+            is_sort_history_open: false,
+            filter_history_popup_rect: None,
+            sort_history_popup_rect: None,
             scroll_speed,
             log_buffer,
             menu_event_rx,
@@ -1805,6 +1860,18 @@ impl DesktopApp {
             RecentTabEntry::Query { sql, .. } => !sql.trim().is_empty(),
             _ => true,
         });
+
+        // 加载数据页筛选/排序历史
+        if let Ok(Some(json)) = app.services.load_ui_state("table_filter_history") {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, Vec<TableFilterHistoryEntry>>>(&json) {
+                app.filter_history = map;
+            }
+        }
+        if let Ok(Some(json)) = app.services.load_ui_state("table_sort_history") {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, Vec<TableSortHistoryEntry>>>(&json) {
+                app.sort_history = map;
+            }
+        }
 
         // 启动后台更新检查
         {
@@ -4551,6 +4618,76 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
+    /// 记录数据页的筛选条件到历史（按表隔离，每表上限 20 条）
+    fn record_table_filter_history(
+        &mut self,
+        connection_id: &str,
+        database: &Option<String>,
+        schema: &Option<String>,
+        table: &str,
+        state: &TableFilterState,
+    ) {
+        // 仅记录有效条件（存在启用且完整填写的条件）
+        if table_filter_summary(state).is_none() {
+            return;
+        }
+        let key = table_history_key(connection_id, database, schema, table);
+        let entry = TableFilterHistoryEntry {
+            connection_id: connection_id.to_string(),
+            database: database.clone(),
+            schema: schema.clone(),
+            table: table.to_string(),
+            state: state.clone(),
+            recorded_at: chrono::Utc::now(),
+        };
+        // 去重：同表同条件不重复记录，仅更新时间戳并移到最前
+        let entry_json = serde_json::to_string(&entry.state).unwrap_or_default();
+        let list = self.filter_history.entry(key).or_default();
+        list.retain(|e| serde_json::to_string(&e.state).unwrap_or_default() != entry_json);
+        list.insert(0, entry);
+        if list.len() > MAX_FILTER_SORT_HISTORY {
+            list.truncate(MAX_FILTER_SORT_HISTORY);
+        }
+        if let Ok(json) = serde_json::to_string(&self.filter_history) {
+            let _ = self.services.save_ui_state("table_filter_history", &json);
+        }
+    }
+
+    /// 记录数据页的排序条件到历史（按表隔离，每表上限 20 条）
+    fn record_table_sort_history(
+        &mut self,
+        connection_id: &str,
+        database: &Option<String>,
+        schema: &Option<String>,
+        table: &str,
+        state: &TableSortState,
+    ) {
+        // 仅记录有效条件（存在启用且完整填写的条件）
+        if table_sort_summary(state).is_none() {
+            return;
+        }
+        let key = table_history_key(connection_id, database, schema, table);
+        let entry = TableSortHistoryEntry {
+            connection_id: connection_id.to_string(),
+            database: database.clone(),
+            schema: schema.clone(),
+            table: table.to_string(),
+            state: state.clone(),
+            recorded_at: chrono::Utc::now(),
+        };
+        // 去重：同表同条件不重复记录，仅更新时间戳并移到最前
+        let entry_json = serde_json::to_string(&entry.state).unwrap_or_default();
+        let list = self.sort_history.entry(key).or_default();
+        list.retain(|e| serde_json::to_string(&e.state).unwrap_or_default() != entry_json);
+        list.insert(0, entry);
+        if list.len() > MAX_FILTER_SORT_HISTORY {
+            list.truncate(MAX_FILTER_SORT_HISTORY);
+        }
+        if let Ok(json) = serde_json::to_string(&self.sort_history) {
+            let _ = self.services.save_ui_state("table_sort_history", &json);
+        }
+    }
+
     fn reopen_recent_tab(&mut self, entry: &RecentTabEntry) {
         // 确保连接已建立（复用侧边栏展开连接的逻辑）
         let cid = match entry {
@@ -4593,7 +4730,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                 }
             }
-            RecentTabEntry::Table { connection_id, database, schema, table_name, is_view } => {
+            RecentTabEntry::Table { connection_id, database, schema, table_name, is_view, .. } => {
                 let node = ExplorerNode {
                     id: String::new(),
                     connection_id: connection_id.clone(),
@@ -4607,7 +4744,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 };
                 self.open_table_tab(&node, true, false);
             }
-            RecentTabEntry::CreateTable { connection_id, database, schema } => {
+            RecentTabEntry::CreateTable { connection_id, database, schema, .. } => {
                 let kind = self.database_kind_for_connection(connection_id);
                 let state = CreateTableState {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -4652,7 +4789,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.active_tab = self.tabs.len().saturating_sub(1);
                 self.scroll_tabs_to_end = true;
             }
-            RecentTabEntry::TableSummary { connection_id, database, schema, title } => {
+            RecentTabEntry::TableSummary { connection_id, database, schema, title, .. } => {
                 if let Some(idx) = self.tabs.iter().position(|t| {
                     matches!(t, WorkspaceTab::TableSummary(ts) if
                         ts.connection_id == *connection_id
@@ -4720,7 +4857,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     });
                 });
             }
-            RecentTabEntry::SchemaSummary { connection_id, database, title } => {
+            RecentTabEntry::SchemaSummary { connection_id, database, title, .. } => {
                 if let Some(idx) = self.tabs.iter().position(|t| {
                     matches!(t, WorkspaceTab::SchemaSummary(ts) if
                         ts.connection_id == *connection_id
@@ -4774,7 +4911,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     });
                 });
             }
-            RecentTabEntry::Routine { connection_id, database, schema, name, is_procedure } => {
+            RecentTabEntry::Routine { connection_id, database, schema, name, is_procedure, .. } => {
                 let kind = self.database_kind_for_connection(connection_id);
                 let node_type = if *is_procedure { ExplorerNodeType::Procedure } else { ExplorerNodeType::Function };
                 let node = ExplorerNode {
@@ -7733,6 +7870,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             (format!("{} + /", MOD_KEY), tr!("切换注释")),
             (format!("{} + J", MOD_KEY), tr!("自动补全")),
             (format!("{} + E", MOD_KEY), tr!("最近打开的标签页")),
+            (format!("{} + P", MOD_KEY), tr!("历史筛选/排序")),
         ];
 
         let title_height = 48.0;
@@ -8110,6 +8248,42 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             TabUiAction::RefreshActiveTable { reload_definition } => {
                 self.pending_refresh_active_table = Some(reload_definition);
+                ctx.request_repaint();
+            }
+            TabUiAction::RecordFilterHistory {
+                connection_id,
+                database,
+                schema,
+                table,
+                state,
+            } => {
+                self.record_table_filter_history(
+                    &connection_id, &database, &schema, &table, &state,
+                );
+                self.pending_refresh_active_table = Some(false);
+                ctx.request_repaint();
+            }
+            TabUiAction::RecordSortHistory {
+                connection_id,
+                database,
+                schema,
+                table,
+                state,
+            } => {
+                self.record_table_sort_history(
+                    &connection_id, &database, &schema, &table, &state,
+                );
+                self.pending_refresh_active_table = Some(false);
+                ctx.request_repaint();
+            }
+            TabUiAction::ToggleFilterHistory => {
+                self.is_filter_history_open = !self.is_filter_history_open;
+                self.is_sort_history_open = false;
+                ctx.request_repaint();
+            }
+            TabUiAction::ToggleSortHistory => {
+                self.is_sort_history_open = !self.is_sort_history_open;
+                self.is_filter_history_open = false;
                 ctx.request_repaint();
             }
             TabUiAction::SavePendingCellChanges => {
@@ -13725,18 +13899,21 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 .inner_margin(egui::Margin::symmetric(8, 8))
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        if mini_button(ui, tr!("应用"), mini_accent_style(colors, fonts.sm))
+                                                        if mini_button(ui, tr!("应用"), mini_borderless_style(colors, fonts.md, colors.accent_button_text))
                                                             .on_hover_text(tr!("应用筛选 ({}+R)", MOD_KEY))
                                                             .clicked()
                                                         {
                                                             tab.current_page = 0;
                                                             tab.mongo_page_cursors.clear();
-                                                            action =
-                                                                TabUiAction::RefreshActiveTable {
-                                                                    reload_definition: false,
-                                                                };
+                                                            action = TabUiAction::RecordFilterHistory {
+                                                                connection_id: tab.table.connection_id.clone(),
+                                                                database: tab.table.database.clone(),
+                                                                schema: tab.table.schema.clone(),
+                                                                table: tab.table.table.clone(),
+                                                                state: tab.preview_filter.clone(),
+                                                            };
                                                         }
-                                                        if mini_button(ui, tr!("清空"), mini_danger_style(colors, fonts.sm)).clicked()
+                                                        if mini_button(ui, tr!("清空"), mini_borderless_style(colors, fonts.md, colors.danger_button_text)).clicked()
                                                         {
                                                             tab.preview_filter =
                                                                 TableFilterState::default();
@@ -13751,9 +13928,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     reload_definition: false,
                                                                 };
                                                         }
-                                                        if mini_button(ui, tr!("隐藏面板"), mini_hide_style(colors, fonts.sm)).clicked()
+                                                        if mini_button(ui, tr!("隐藏面板"), mini_borderless_style(colors, fonts.md, colors.hide_button_text)).clicked()
                                                         {
                                                             tab.show_preview_filter = false;
+                                                        }
+                                                        ui.add_space(6.0);
+                                                        if mini_button(ui, tr!("历史"), mini_borderless_style(colors, fonts.md, colors.index_badge)).clicked()
+                                                        {
+                                                            action = TabUiAction::ToggleFilterHistory;
                                                         }
                                                     });
                                                     ui.add_space(8.0);
@@ -13964,12 +14146,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                     ui.add_space(8.0);
                                                     ui.horizontal(|ui| {
-                                                        ui.label(
-                                                            RichText::new(tr!("预览语句"))
-                                                                .size(palette.fonts.lg)
-                                                                .strong()
-                                                                .color(palette.weak_text),
-                                                        );
                                                         {
                                                             let copy_btn = mini_button(ui, tr!("📋 复制"), mini_subtle_style(colors, fonts.sm));
                                                             if copy_btn.clicked() {
@@ -14029,17 +14205,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 .inner_margin(egui::Margin::symmetric(8, 8))
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
-                                                        if mini_button(ui, tr!("应用"), mini_accent_style(colors, fonts.sm)).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
+                                                        if mini_button(ui, tr!("应用"), mini_borderless_style(colors, fonts.md, colors.accent_button_text)).on_hover_text(tr!("应用排序 ({}+R)", MOD_KEY))
                                                         .clicked()
                                                         {
                                                             tab.current_page = 0;
                                                             tab.mongo_page_cursors.clear();
-                                                            action =
-                                                                TabUiAction::RefreshActiveTable {
-                                                                    reload_definition: false,
-                                                                };
+                                                            action = TabUiAction::RecordSortHistory {
+                                                                connection_id: tab.table.connection_id.clone(),
+                                                                database: tab.table.database.clone(),
+                                                                schema: tab.table.schema.clone(),
+                                                                table: tab.table.table.clone(),
+                                                                state: tab.preview_sort.clone(),
+                                                            };
                                                         }
-                                                        if mini_button(ui, tr!("清空"), mini_danger_style(colors, fonts.sm)).clicked()
+                                                        if mini_button(ui, tr!("清空"), mini_borderless_style(colors, fonts.md, colors.danger_button_text)).clicked()
                                                         {
                                                             clear_table_sort_state(&mut tab.preview_sort);
                                                             tab.current_page = 0;
@@ -14049,9 +14228,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     reload_definition: false,
                                                                 };
                                                         }
-                                                        if mini_button(ui, tr!("隐藏面板"), mini_hide_style(colors, fonts.sm)).clicked()
+                                                        if mini_button(ui, tr!("隐藏面板"), mini_borderless_style(colors, fonts.md, colors.hide_button_text)).clicked()
                                                         {
                                                             tab.show_preview_sort = false;
+                                                        }
+                                                        ui.add_space(6.0);
+                                                        if mini_button(ui, tr!("历史"), mini_borderless_style(colors, fonts.md, colors.index_badge)).clicked()
+                                                        {
+                                                            action = TabUiAction::ToggleSortHistory;
                                                         }
                                                     });
                                                     ui.add_space(8.0);
@@ -14130,12 +14314,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                     ui.add_space(8.0);
                                                     ui.horizontal(|ui| {
-                                                        ui.label(
-                                                            RichText::new(tr!("预览语句"))
-                                                                .size(palette.fonts.lg)
-                                                                .strong()
-                                                                .color(palette.weak_text),
-                                                        );
                                                         {
                                                             let copy_btn = mini_button(ui, tr!("📋 复制"), mini_subtle_style(colors, fonts.sm));
                                                             if copy_btn.clicked() {
@@ -16792,41 +16970,42 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         // 预计算显示数据
-        let mut display_items: Vec<(usize, String, String, String)> = Vec::new();
+        let mut display_items: Vec<(usize, String, String, String, Option<String>)> = Vec::new();
         for (idx, entry) in self.recent_tabs.iter().enumerate() {
-            let (icon, title, subtitle) = match entry {
-                RecentTabEntry::Query { connection_id, database, title, .. } => {
+            let (icon, title, subtitle, recorded_at) = match entry {
+                RecentTabEntry::Query { connection_id, database, title, recorded_at, .. } => {
                     let sub = match (connection_id.as_ref(), database.as_ref()) {
                         (Some(cid), Some(db)) => format!("{} / {}", self.connection_name(cid), db),
                         (Some(cid), None) => self.connection_name(cid),
                         _ => String::new(),
                     };
-                    ("Q".to_string(), title.clone(), sub)
+                    ("Q".to_string(), title.clone(), sub, *recorded_at)
                 }
-                RecentTabEntry::Table { connection_id, database, table_name, is_view, .. } => {
+                RecentTabEntry::Table { connection_id, database, table_name, is_view, recorded_at, .. } => {
                     let sub = format!("{} / {}", self.connection_name(connection_id), database.as_deref().unwrap_or(""));
                     let icon = if *is_view { "V" } else { "T" };
-                    (icon.to_string(), table_name.clone(), sub)
+                    (icon.to_string(), table_name.clone(), sub, *recorded_at)
                 }
-                RecentTabEntry::CreateTable { connection_id, database, .. } => {
+                RecentTabEntry::CreateTable { connection_id, database, recorded_at, .. } => {
                     let sub = format!("{} / {}", self.connection_name(connection_id), database);
-                    ("+".to_string(), tr!("新建表").to_string(), sub)
+                    ("+".to_string(), tr!("新建表").to_string(), sub, *recorded_at)
                 }
-                RecentTabEntry::TableSummary { connection_id, database, title, .. } => {
+                RecentTabEntry::TableSummary { connection_id, database, title, recorded_at, .. } => {
                     let sub = format!("{} / {}", self.connection_name(connection_id), database);
-                    ("S".to_string(), title.clone(), sub)
+                    ("S".to_string(), title.clone(), sub, *recorded_at)
                 }
-                RecentTabEntry::SchemaSummary { connection_id, database, title, .. } => {
+                RecentTabEntry::SchemaSummary { connection_id, database, title, recorded_at, .. } => {
                     let sub = format!("{} / {}", self.connection_name(connection_id), database);
-                    ("S".to_string(), title.clone(), sub)
+                    ("S".to_string(), title.clone(), sub, *recorded_at)
                 }
-                RecentTabEntry::Routine { connection_id, database, name, is_procedure, .. } => {
+                RecentTabEntry::Routine { connection_id, database, name, is_procedure, recorded_at, .. } => {
                     let sub = format!("{} / {}", self.connection_name(connection_id), database.as_deref().unwrap_or(""));
                     let icon = if *is_procedure { "λ" } else { "ƒ" };
-                    (icon.to_string(), name.clone(), sub)
+                    (icon.to_string(), name.clone(), sub, *recorded_at)
                 }
             };
-            display_items.push((idx, icon, title, subtitle));
+            let time = recorded_at.map(format_relative_time);
+            display_items.push((idx, icon, title, subtitle, time));
         }
 
         let mut pending_open_idx: Option<usize> = None;
@@ -16849,7 +17028,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     .strong(),
                             );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("✕").clicked() {
+                                let palette = mac_ui_palette_from_ui(ui);
+                                if ui
+                                    .add(
+                                        egui::Button::new(RichText::new("✕").size(self.theme.fonts.xl).color(palette.weak_text))
+                                            .fill(Color32::TRANSPARENT)
+                                            .stroke(Stroke::NONE),
+                                    )
+                                    .clicked()
+                                {
                                     self.is_recent_tabs_open = false;
                                 }
                             });
@@ -16858,7 +17045,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             let palette = mac_ui_palette_from_ui(ui);
-                            for (idx, icon, title, subtitle) in &display_items {
+                            for (idx, icon, title, subtitle, time) in &display_items {
                                 let frame_resp = egui::Frame::NONE
                                     .fill(Color32::TRANSPARENT)
                                     .inner_margin(egui::Margin::symmetric(4, 3))
@@ -16874,8 +17061,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             ui.vertical(|ui| {
                                                 ui.label(RichText::new(title.as_str()).size(self.theme.fonts.md));
                                                 if !subtitle.is_empty() {
+                                                    let sub = match time {
+                                                        Some(t) => format!("{} · {}", subtitle.as_str(), t),
+                                                        None => subtitle.clone(),
+                                                    };
                                                     ui.label(
-                                                        RichText::new(subtitle.as_str())
+                                                        RichText::new(sub)
                                                             .size(self.theme.fonts.xs)
                                                             .color(ui.visuals().weak_text_color()),
                                                     );
@@ -16915,6 +17106,271 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if let Some(entry) = self.recent_tabs.get(idx).cloned() {
                 self.is_recent_tabs_open = false;
                 self.reopen_recent_tab(&entry);
+            }
+        }
+    }
+
+    /// 当前活动数据页的表维度历史 key
+    fn current_table_history_key(&self) -> Option<String> {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Table(tab)) => Some(table_history_key(
+                &tab.table.connection_id,
+                &tab.table.database,
+                &tab.table.schema,
+                &tab.table.table,
+            )),
+            _ => None,
+        }
+    }
+
+    /// 将筛选历史还原到当前活动数据页并刷新
+    fn apply_filter_history(&mut self, state: &TableFilterState) {
+        if let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) {
+            tab.preview_filter = state.clone();
+            let columns = table_filter_columns(tab);
+            ensure_table_filter_column(&mut tab.preview_filter, &columns);
+            tab.current_page = 0;
+            tab.mongo_page_cursors.clear();
+            tab.show_preview_filter = true;
+        }
+        self.pending_refresh_active_table = Some(false);
+    }
+
+    /// 将排序历史还原到当前活动数据页并刷新
+    fn apply_sort_history(&mut self, state: &TableSortState) {
+        if let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) {
+            tab.preview_sort = state.clone();
+            let columns = table_filter_columns(tab);
+            ensure_table_sort_column(&mut tab.preview_sort, &columns);
+            tab.current_page = 0;
+            tab.mongo_page_cursors.clear();
+            tab.show_preview_sort = true;
+        }
+        self.pending_refresh_active_table = Some(false);
+    }
+
+    fn render_filter_history_dialog(&mut self, ctx: &egui::Context) {
+        if !self.is_filter_history_open {
+            return;
+        }
+        let current_key = self.current_table_history_key();
+        let entries: Vec<TableFilterHistoryEntry> = current_key
+            .as_ref()
+            .and_then(|k| self.filter_history.get(k))
+            .cloned()
+            .unwrap_or_default();
+
+        // 预计算显示数据：摘要 + 表名 + 相对时间
+        let mut display_items: Vec<(usize, String, String)> = Vec::new();
+        for (idx, entry) in entries.iter().enumerate() {
+            let summary = table_filter_summary(&entry.state).unwrap_or_default();
+            let table_label = match (&entry.schema, &entry.database) {
+                (Some(schema), _) => format!("{schema}.{}", entry.table),
+                (None, Some(db)) => format!("{db}.{}", entry.table),
+                _ => entry.table.clone(),
+            };
+            let subtitle = format!("{} · {}", table_label, format_relative_time(entry.recorded_at));
+            display_items.push((idx, summary, subtitle));
+        }
+
+        let mut pending_apply_idx: Option<usize> = None;
+        let mut popup_rect: Option<egui::Rect> = None;
+
+        egui::Area::new(egui::Id::new("filter_history_popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(ctx.content_rect().center() - egui::vec2(250.0, 200.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(500.0);
+                        ui.set_max_height(400.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(tr!("筛选历史"))
+                                    .size(self.theme.fonts.md)
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let palette = mac_ui_palette_from_ui(ui);
+                                if ui
+                                    .add(
+                                        egui::Button::new(RichText::new("✕").size(self.theme.fonts.xl).color(palette.weak_text))
+                                            .fill(Color32::TRANSPARENT)
+                                            .stroke(Stroke::NONE),
+                                    )
+                                    .clicked()
+                                {
+                                    self.is_filter_history_open = false;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let palette = mac_ui_palette_from_ui(ui);
+                            for (idx, summary, subtitle) in &display_items {
+                                let frame_resp = egui::Frame::NONE
+                                    .fill(Color32::TRANSPARENT)
+                                    .inner_margin(egui::Margin::symmetric(4, 3))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new(summary.as_str()).size(self.theme.fonts.md));
+                                            ui.label(
+                                                RichText::new(subtitle.as_str())
+                                                    .size(self.theme.fonts.xs)
+                                                    .color(ui.visuals().weak_text_color()),
+                                            );
+                                        });
+                                    });
+                                let row_rect = frame_resp.response.rect;
+                                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                let hovered = pointer_pos.map_or(false, |p| row_rect.contains(p));
+                                if hovered {
+                                    ui.painter().rect_filled(
+                                        row_rect,
+                                        egui::Rounding::same(3),
+                                        palette.selection_bg.gamma_multiply(0.3),
+                                    );
+                                }
+                                if frame_resp.response.interact(egui::Sense::click()).clicked() {
+                                    pending_apply_idx = Some(*idx);
+                                }
+                            }
+                            if display_items.is_empty() {
+                                ui.label(
+                                    RichText::new(tr!("暂无筛选历史"))
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                            }
+                        });
+
+                        popup_rect = Some(ui.min_rect());
+                    });
+            });
+
+        self.filter_history_popup_rect = popup_rect;
+
+        if let Some(idx) = pending_apply_idx {
+            if let Some(entry) = entries.get(idx) {
+                let state = entry.state.clone();
+                self.is_filter_history_open = false;
+                self.apply_filter_history(&state);
+            }
+        }
+    }
+
+    fn render_sort_history_dialog(&mut self, ctx: &egui::Context) {
+        if !self.is_sort_history_open {
+            return;
+        }
+        let current_key = self.current_table_history_key();
+        let entries: Vec<TableSortHistoryEntry> = current_key
+            .as_ref()
+            .and_then(|k| self.sort_history.get(k))
+            .cloned()
+            .unwrap_or_default();
+
+        // 预计算显示数据：摘要 + 表名 + 相对时间
+        let mut display_items: Vec<(usize, String, String)> = Vec::new();
+        for (idx, entry) in entries.iter().enumerate() {
+            let summary = table_sort_summary(&entry.state).unwrap_or_default();
+            let table_label = match (&entry.schema, &entry.database) {
+                (Some(schema), _) => format!("{schema}.{}", entry.table),
+                (None, Some(db)) => format!("{db}.{}", entry.table),
+                _ => entry.table.clone(),
+            };
+            let subtitle = format!("{} · {}", table_label, format_relative_time(entry.recorded_at));
+            display_items.push((idx, summary, subtitle));
+        }
+
+        let mut pending_apply_idx: Option<usize> = None;
+        let mut popup_rect: Option<egui::Rect> = None;
+
+        egui::Area::new(egui::Id::new("sort_history_popup"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(ctx.content_rect().center() - egui::vec2(250.0, 200.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(500.0);
+                        ui.set_max_height(400.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(tr!("排序历史"))
+                                    .size(self.theme.fonts.md)
+                                    .strong(),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let palette = mac_ui_palette_from_ui(ui);
+                                if ui
+                                    .add(
+                                        egui::Button::new(RichText::new("✕").size(self.theme.fonts.xl).color(palette.weak_text))
+                                            .fill(Color32::TRANSPARENT)
+                                            .stroke(Stroke::NONE),
+                                    )
+                                    .clicked()
+                                {
+                                    self.is_sort_history_open = false;
+                                }
+                            });
+                        });
+                        ui.separator();
+
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let palette = mac_ui_palette_from_ui(ui);
+                            for (idx, summary, subtitle) in &display_items {
+                                let frame_resp = egui::Frame::NONE
+                                    .fill(Color32::TRANSPARENT)
+                                    .inner_margin(egui::Margin::symmetric(4, 3))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new(summary.as_str()).size(self.theme.fonts.md));
+                                            ui.label(
+                                                RichText::new(subtitle.as_str())
+                                                    .size(self.theme.fonts.xs)
+                                                    .color(ui.visuals().weak_text_color()),
+                                            );
+                                        });
+                                    });
+                                let row_rect = frame_resp.response.rect;
+                                let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                let hovered = pointer_pos.map_or(false, |p| row_rect.contains(p));
+                                if hovered {
+                                    ui.painter().rect_filled(
+                                        row_rect,
+                                        egui::Rounding::same(3),
+                                        palette.selection_bg.gamma_multiply(0.3),
+                                    );
+                                }
+                                if frame_resp.response.interact(egui::Sense::click()).clicked() {
+                                    pending_apply_idx = Some(*idx);
+                                }
+                            }
+                            if display_items.is_empty() {
+                                ui.label(
+                                    RichText::new(tr!("暂无排序历史"))
+                                        .color(ui.visuals().weak_text_color()),
+                                );
+                            }
+                        });
+
+                        popup_rect = Some(ui.min_rect());
+                    });
+            });
+
+        self.sort_history_popup_rect = popup_rect;
+
+        if let Some(idx) = pending_apply_idx {
+            if let Some(entry) = entries.get(idx) {
+                let state = entry.state.clone();
+                self.is_sort_history_open = false;
+                self.apply_sort_history(&state);
             }
         }
     }
@@ -18128,6 +18584,35 @@ impl eframe::App for DesktopApp {
                 self.is_recent_tabs_open = false;
             }
         }
+        // 筛选/排序历史弹窗：ESC 或点击外部关闭
+        if self.is_filter_history_open {
+            let escape = ctx.input_mut(|i| i.key_pressed(egui::Key::Escape));
+            let clicked_outside = self.filter_history_popup_rect
+                .map(|rect| {
+                    ctx.input_mut(|i| {
+                        i.pointer.any_released()
+                            && !rect.contains(i.pointer.latest_pos().unwrap_or(egui::Pos2::ZERO))
+                    })
+                })
+                .unwrap_or(false);
+            if escape || clicked_outside {
+                self.is_filter_history_open = false;
+            }
+        }
+        if self.is_sort_history_open {
+            let escape = ctx.input_mut(|i| i.key_pressed(egui::Key::Escape));
+            let clicked_outside = self.sort_history_popup_rect
+                .map(|rect| {
+                    ctx.input_mut(|i| {
+                        i.pointer.any_released()
+                            && !rect.contains(i.pointer.latest_pos().unwrap_or(egui::Pos2::ZERO))
+                    })
+                })
+                .unwrap_or(false);
+            if escape || clicked_outside {
+                self.is_sort_history_open = false;
+            }
+        }
 
         // 全局预消费 Enter/Esc：仅在侧边栏持有焦点（且搜索框无焦点）时才预消费，
         // 否则让 TextEdit (如 SQL 编辑器、侧边栏搜索框) 正常接收 Enter。
@@ -18569,6 +19054,34 @@ impl eframe::App for DesktopApp {
             )) || (input.modifiers.command && input.key_pressed(egui::Key::R))
         });
         if refresh_active_workspace {
+            // 数据页刷新等同于「应用」当前筛选/排序条件，先计入历史
+            let snapshot = {
+                let tab = self.tabs.get(self.active_tab);
+                match tab {
+                    Some(WorkspaceTab::Table(tab)) => Some((
+                        tab.table.clone(),
+                        tab.preview_filter.clone(),
+                        tab.preview_sort.clone(),
+                    )),
+                    _ => None,
+                }
+            };
+            if let Some((table, filter, sort)) = snapshot {
+                self.record_table_filter_history(
+                    &table.connection_id,
+                    &table.database,
+                    &table.schema,
+                    &table.table,
+                    &filter,
+                );
+                self.record_table_sort_history(
+                    &table.connection_id,
+                    &table.database,
+                    &table.schema,
+                    &table.table,
+                    &sort,
+                );
+            }
             self.refresh_active_workspace();
         }
         // Cmd+E: 最近打开的标签页
@@ -18583,6 +19096,26 @@ impl eframe::App for DesktopApp {
                 self.record_recent_tab();
             }
             self.is_recent_tabs_open = !self.is_recent_tabs_open;
+        }
+        // Cmd+P: 历史筛选/排序（按当前展开的面板智能映射，toggle 开关）
+        let history_shortcut = ctx.input_mut(|input| {
+            input.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::P,
+            )) || (input.modifiers.command && !input.modifiers.shift && input.key_pressed(egui::Key::P))
+        });
+        if history_shortcut {
+            // 非 Table tab（或没有活动 tab）时不响应
+            if let Some(WorkspaceTab::Table(tab)) = self.tabs.get(self.active_tab) {
+                // 按当前面板智能映射：排序面板展开→排序历史；否则默认筛选历史
+                if tab.show_preview_sort && !tab.show_preview_filter {
+                    self.is_sort_history_open = !self.is_sort_history_open;
+                    self.is_filter_history_open = false;
+                } else {
+                    self.is_filter_history_open = !self.is_filter_history_open;
+                    self.is_sort_history_open = false;
+                }
+            }
         }
         // Cmd+Shift+E: EXPLAIN current query
         let explain_current = ctx.input_mut(|input| {
@@ -18835,6 +19368,8 @@ impl eframe::App for DesktopApp {
         self.render_log_window(ctx);
         self.render_scroll_speed_dialog(ctx);
         self.render_recent_tabs_dialog(ctx);
+        self.render_filter_history_dialog(ctx);
+        self.render_sort_history_dialog(ctx);
         self.render_ai_settings_dialog(ctx);
 
         // Cmd+D: new query tab (优先使用侧栏选中节点的上下文)
@@ -19198,6 +19733,22 @@ enum TabUiAction {
     OpenRenameSavedQueryDialog(SavedQueryEntry),
     PromptDeleteSavedQuery(SavedQueryEntry),
     RefreshActiveTable { reload_definition: bool },
+    RecordFilterHistory {
+        connection_id: String,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        state: TableFilterState,
+    },
+    RecordSortHistory {
+        connection_id: String,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        state: TableSortState,
+    },
+    ToggleFilterHistory,
+    ToggleSortHistory,
     ExportActiveResult(ExportFormat),
     CopyTextToClipboard {
         text: String,
@@ -19432,6 +19983,19 @@ fn mini_subtle_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyle {
         fill: c.subtle_button_bg,
         text: c.subtle_button_text,
         stroke: Stroke::new(1.0, c.subtle_button_stroke),
+        font_size,
+        min_width: 34.0,
+        min_height: 22.0,
+        corner_radius: c.radius_md,
+    }
+}
+
+/// 无边框 mini 按钮，文字颜色可指定（面板内工具按钮使用）
+fn mini_borderless_style(c: &ui_theme::ThemeColors, font_size: f32, text: Color32) -> ButtonStyle {
+    ButtonStyle {
+        fill: Color32::TRANSPARENT,
+        text,
+        stroke: Stroke::NONE,
         font_size,
         min_width: 34.0,
         min_height: 22.0,
@@ -28428,6 +28992,20 @@ fn set_table_sort_state(sort_state: &mut TableSortState, column: &str, descendin
 
 fn clear_table_sort_state(sort_state: &mut TableSortState) {
     sort_state.clauses.clear();
+}
+
+/// 相对时间描述（如「3 分钟前」）
+fn format_relative_time(recorded_at: chrono::DateTime<chrono::Utc>) -> String {
+    let seconds = (chrono::Utc::now() - recorded_at).num_seconds().max(0);
+    if seconds < 60 {
+        tr!("刚刚").to_string()
+    } else if seconds < 3600 {
+        tr!("{} 分钟前", seconds / 60)
+    } else if seconds < 86400 {
+        tr!("{} 小时前", seconds / 3600)
+    } else {
+        tr!("{} 天前", seconds / 86400)
+    }
 }
 
 fn table_sort_summary(sort_state: &TableSortState) -> Option<String> {
