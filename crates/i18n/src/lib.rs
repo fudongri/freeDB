@@ -302,8 +302,8 @@ fn en(key: &'static str) -> &'static str {
         "排序:" => "Sort:",
         "启用" => "Enabled",
         "禁用" => "Disabled",
-        "启用条件" => "Enable condition",
-        "禁用条件" => "Disable condition",
+        "已启用" => "Enabled",
+        "已禁用" => "Disabled",
         "导出 \u{25BE}" => "Export \u{25BE}",
 
         // ── app.rs status messages ──

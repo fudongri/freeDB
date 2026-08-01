@@ -14089,7 +14089,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 mini_subtle_style(colors, fonts.sm)
                                                             };
                                                             let toggle_btn = mini_button(ui, toggle_label, toggle_style);
-                                                            let check_hint = if clause.enabled { tr!("禁用条件") } else { tr!("启用条件") };
+                                                            let check_hint = if clause.enabled { tr!("已启用") } else { tr!("已禁用") };
                                                             if toggle_btn.on_hover_text(check_hint).clicked() {
                                                                 clause.enabled = !clause.enabled;
                                                             }
@@ -14120,6 +14120,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             .cloned()
                                                             .unwrap_or_default();
                                                         clause.joiner = TableFilterJoiner::And;
+                                                        clause.enabled = true;
                                                         if clause.column.is_none() {
                                                             clause.column = available_columns.first().cloned();
                                                         }
@@ -14144,34 +14145,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             &available_columns,
                                                         );
                                                     }
-                                                    ui.add_space(8.0);
-                                                    ui.horizontal(|ui| {
-                                                        {
-                                                            let copy_btn = mini_button(ui, tr!("📋 复制"), mini_subtle_style(colors, fonts.sm));
-                                                            if copy_btn.clicked() {
-                                                                show_copied_tooltip(ui, copy_btn.rect.center());
-                                                                action =
-                                                                    TabUiAction::CopyTextToClipboard {
-                                                                        text: live_preview_sql
-                                                                            .clone(),
-                                                                        status_message:
-                                                                            tr!("已复制预览语句")
-                                                                                .into(),
-                                                                    };
-                                                            }
-                                                        }
-                                                        if tab
-                                                            .last_preview_sql
-                                                            .as_ref()
-                                                            .is_some_and(|sql| sql != &live_preview_sql)
-                                                        {
-                                                            ui.small(
-                                                                RichText::new(tr!("未应用"))
-                                                                    .color(palette.selection_text),
-                                                            );
-                                                        }
-                                                    });
-                                                    ui.add_space(4.0);
+                                                    ui.add_space(12.0);
                                                     egui::Frame::new()
                                                         .fill(palette.card_bg)
                                                         .stroke(Stroke::new(
@@ -14179,20 +14153,48 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             palette.soft_border,
                                                         ))
                                                         .corner_radius(colors.radius_lg)
-                                                        .inner_margin(egui::Margin::same(6))
+                                                        .inner_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 4 })
                                                         .show(ui, |ui| {
-                                                            let mut sql_text = live_preview_sql.clone();
-                                                            ui.add(
-                                                                TextEdit::multiline(
-                                                                    &mut sql_text,
-                                                                )
-                                                                .font(
-                                                                    egui::TextStyle::Monospace,
-                                                                )
-                                                                .desired_width(f32::INFINITY)
-                                                                .desired_rows(2)
-                                                                .frame(false),
-                                                            );
+                                                            ui.horizontal(|ui| {
+                                                                let copy_btn = mini_button(ui, tr!("📋 复制"), mini_borderless_style(colors, fonts.sm, colors.subtle_button_text));
+                                                                if copy_btn.clicked() {
+                                                                    show_copied_tooltip(ui, copy_btn.rect.center());
+                                                                    action =
+                                                                        TabUiAction::CopyTextToClipboard {
+                                                                            text: live_preview_sql
+                                                                                .clone(),
+                                                                            status_message:
+                                                                                tr!("已复制预览语句")
+                                                                                    .into(),
+                                                                        };
+                                                                }
+                                                                if tab
+                                                                    .last_preview_sql
+                                                                    .as_ref()
+                                                                    .is_some_and(|sql| sql != &live_preview_sql)
+                                                                {
+                                                                    ui.small(
+                                                                        RichText::new(tr!("未应用"))
+                                                                            .color(palette.selection_text),
+                                                                    );
+                                                                }
+                                                            });
+                                                            egui::Frame::new()
+                                                                .inner_margin(egui::Margin::same(6))
+                                                                .show(ui, |ui| {
+                                                                    let mut sql_text = live_preview_sql.clone();
+                                                                    ui.add(
+                                                                        TextEdit::multiline(
+                                                                            &mut sql_text,
+                                                                        )
+                                                                        .font(
+                                                                            egui::TextStyle::Monospace,
+                                                                        )
+                                                                        .desired_width(f32::INFINITY)
+                                                                        .desired_rows(2)
+                                                                        .frame(false),
+                                                                    );
+                                                                });
                                                         });
                                                 });
                                         }
@@ -14290,7 +14292,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                 mini_subtle_style(colors, fonts.sm)
                                                             };
                                                             let toggle_btn = mini_button(ui, toggle_label, toggle_style);
-                                                            let check_hint = if clause.enabled { tr!("禁用条件") } else { tr!("启用条件") };
+                                                            let check_hint = if clause.enabled { tr!("已启用") } else { tr!("已禁用") };
                                                             if toggle_btn.on_hover_text(check_hint).clicked() {
                                                                 clause.enabled = !clause.enabled;
                                                             }
@@ -14308,38 +14310,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     }
                                                     if let Some(idx) = pending_remove {
                                                         tab.preview_sort.clauses.remove(idx);
+                                                        if tab.preview_sort.clauses.is_empty() {
+                                                            tab.preview_sort.clauses.push(TableSortClause::default());
+                                                        }
                                                     }
                                                     if add_clause && tab.preview_sort.clauses.len() < 8 {
                                                         tab.preview_sort.clauses.push(TableSortClause::default());
                                                     }
-                                                    ui.add_space(8.0);
-                                                    ui.horizontal(|ui| {
-                                                        {
-                                                            let copy_btn = mini_button(ui, tr!("📋 复制"), mini_subtle_style(colors, fonts.sm));
-                                                            if copy_btn.clicked() {
-                                                                show_copied_tooltip(ui, copy_btn.rect.center());
-                                                                action =
-                                                                    TabUiAction::CopyTextToClipboard {
-                                                                        text: live_preview_sql
-                                                                            .clone(),
-                                                                        status_message:
-                                                                            tr!("已复制预览语句")
-                                                                                .into(),
-                                                                    };
-                                                            }
-                                                        }
-                                                        if tab
-                                                            .last_preview_sql
-                                                            .as_ref()
-                                                            .is_some_and(|sql| sql != &live_preview_sql)
-                                                        {
-                                                            ui.small(
-                                                                RichText::new(tr!("未应用"))
-                                                                    .color(palette.selection_text),
-                                                            );
-                                                        }
-                                                    });
-                                                    ui.add_space(4.0);
+                                                    ui.add_space(12.0);
                                                     egui::Frame::new()
                                                         .fill(palette.card_bg)
                                                         .stroke(Stroke::new(
@@ -14347,20 +14325,48 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             palette.soft_border,
                                                         ))
                                                         .corner_radius(colors.radius_lg)
-                                                        .inner_margin(egui::Margin::same(6))
+                                                        .inner_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 4 })
                                                         .show(ui, |ui| {
-                                                            let mut sql_text = live_preview_sql.clone();
-                                                            ui.add(
-                                                                TextEdit::multiline(
-                                                                    &mut sql_text,
-                                                                )
-                                                                .font(
-                                                                    egui::TextStyle::Monospace,
-                                                                )
-                                                                .desired_width(f32::INFINITY)
-                                                                .desired_rows(2)
-                                                                .frame(false),
-                                                            );
+                                                            ui.horizontal(|ui| {
+                                                                let copy_btn = mini_button(ui, tr!("📋 复制"), mini_borderless_style(colors, fonts.sm, colors.subtle_button_text));
+                                                                if copy_btn.clicked() {
+                                                                    show_copied_tooltip(ui, copy_btn.rect.center());
+                                                                    action =
+                                                                        TabUiAction::CopyTextToClipboard {
+                                                                            text: live_preview_sql
+                                                                                .clone(),
+                                                                            status_message:
+                                                                                tr!("已复制预览语句")
+                                                                                    .into(),
+                                                                        };
+                                                                }
+                                                                if tab
+                                                                    .last_preview_sql
+                                                                    .as_ref()
+                                                                    .is_some_and(|sql| sql != &live_preview_sql)
+                                                                {
+                                                                    ui.small(
+                                                                        RichText::new(tr!("未应用"))
+                                                                            .color(palette.selection_text),
+                                                                    );
+                                                                }
+                                                            });
+                                                            egui::Frame::new()
+                                                                .inner_margin(egui::Margin::same(6))
+                                                                .show(ui, |ui| {
+                                                                    let mut sql_text = live_preview_sql.clone();
+                                                                    ui.add(
+                                                                        TextEdit::multiline(
+                                                                            &mut sql_text,
+                                                                        )
+                                                                        .font(
+                                                                            egui::TextStyle::Monospace,
+                                                                        )
+                                                                        .desired_width(f32::INFINITY)
+                                                                        .desired_rows(2)
+                                                                        .frame(false),
+                                                                    );
+                                                                });
                                                         });
                                                 });
                                         }
@@ -25101,7 +25107,7 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
                 .stroke(Stroke::NONE)
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
-                    let copy_btn = mini_button(ui, tr!("📋 复制"), mini_subtle_style(colors, fonts.sm));
+                    let copy_btn = mini_button(ui, tr!("📋 复制"), mini_borderless_style(colors, fonts.sm, colors.subtle_button_text));
                     if copy_btn.clicked() {
                         ui.ctx().copy_text(formatted_sql.clone());
                         show_copied_tooltip(ui, copy_btn.rect.center());
