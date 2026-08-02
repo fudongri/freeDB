@@ -34536,7 +34536,10 @@ fn render_query_editor(
                             && crate::fold::fold_content_hash(&tab.sql, c) == f.content_hash
                     });
                     if let Some(c) = c {
-                        if hit(c.hide_start) || hit(c.hide_end.saturating_sub(1)) {
+                        // FoldCandidate.hide_start/hide_end 为 byte index，换算回 char index 再判命中
+                        let bs = crate::fold::byte_to_char(&tab.sql, c.hide_start);
+                        let be = crate::fold::byte_to_char(&tab.sql, c.hide_end);
+                        if hit(bs) || hit(be.saturating_sub(1)) {
                             to_remove.push(i);
                         }
                     }

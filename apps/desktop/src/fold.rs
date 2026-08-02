@@ -115,8 +115,8 @@ pub fn char_line_start(sql: &str, line: usize) -> usize {
     start
 }
 
-/// byte index → char index（要求 byte 落在 char 边界上，内部用）。
-fn byte_to_char(sql: &str, byte_idx: usize) -> usize {
+/// byte index → char index（要求 byte 落在 char 边界上）。
+pub fn byte_to_char(sql: &str, byte_idx: usize) -> usize {
     sql[..byte_idx].chars().count()
 }
 
