@@ -2,6 +2,7 @@
 
 mod app;
 mod autocomplete;
+mod fold;
 mod icon;
 
 use app::DesktopApp;
