@@ -34795,6 +34795,38 @@ fn render_query_editor(
                             }
                         }
 
+                        // 折叠时复制选中：egui 内建 Copy 从 editor_buf（display 文本）切片，
+                        // 复制得到的是含 … 的省略版；这里把 display 选中范围映射回 sql 空间，
+                        // 从 tab.sql 切片真实内容覆盖剪贴板（同帧最后一个 CopyText 命令生效）。
+                        if has_folds {
+                            let copy_event = ui
+                                .input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+                            let copy_shortcut =
+                                ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C));
+                            if (copy_event || copy_shortcut)
+                                && ui.ctx().memory(|m| m.has_focus(editor_id))
+                            {
+                                if let Some(state) = TextEdit::load_state(ui.ctx(), editor_id) {
+                                    if let Some(range) = state.cursor.char_range() {
+                                        let disp_range = range.as_sorted_char_range();
+                                        if disp_range.start < disp_range.end {
+                                            if let Some(d) = &tab.fold_display {
+                                                let sql_start = d.display_to_sql(disp_range.start);
+                                                let sql_end = d.display_to_sql(disp_range.end);
+                                                let real: String = tab
+                                                    .sql
+                                                    .chars()
+                                                    .skip(sql_start)
+                                                    .take(sql_end - sql_start)
+                                                    .collect();
+                                                ui.ctx().copy_text(real);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // 帧末回写：display 编辑 → tab.sql（折叠存在时）。
                         // 先在借用范围内计算出 sql 空间编辑，再结束借用后写回。
                         if has_folds {
