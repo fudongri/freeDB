@@ -395,4 +395,32 @@ mod tests {
         assert_eq!((ds, de), (0, 0));
         assert_eq!(ins, "");
     }
+
+    #[test]
+    fn nested_expand_reveals_inner() {
+        // 外层展开后，内层折叠仍有效（folded 保留内层）
+        let sql = "f(\n  g(\n    1\n  )\n)";
+        let cands = find_fold_candidates(sql);
+        // 只折叠内层
+        let inner = cands.iter().find(|c| c.open_line == 2).unwrap();
+        let folds = vec![FoldRegion { open_line: inner.open_line, content_hash: fold_content_hash(sql, inner) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        // 注：hide_end 为闭括号 ')' 索引，隐藏区含闭括号前缩进（与 build_display_single_fold 语义一致）
+        assert_eq!(d.text, "f(\n  g(\n…\n)\n)");
+    }
+
+    #[test]
+    fn stale_fold_discarded_after_edit() {
+        // 编辑改变内容 → content_hash 变化 → refresh_folds 丢弃
+        let sql = "f(\n  bar\n)\nbaz";
+        let cands = find_fold_candidates(sql);
+        let mut folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        // 模拟编辑：内容变了
+        let new_sql = "f(\n  CHANGED\n)\nbaz";
+        let new_cands = find_fold_candidates(new_sql);
+        folds.retain(|f| {
+            new_cands.iter().any(|c| c.open_line == f.open_line && fold_content_hash(new_sql, c) == f.content_hash)
+        });
+        assert!(folds.is_empty());
+    }
 }
