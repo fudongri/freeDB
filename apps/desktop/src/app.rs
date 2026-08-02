@@ -35752,12 +35752,14 @@ fn key_conn_id(key: &str) -> String {
     key.strip_prefix("conn:").unwrap_or(key).to_string()
 }
 
-/// 拆分库节点 key（"db:<conn>/<db>"）→ (连接 id, 库名)
+/// 拆分库节点 key（"db:<conn>/<db>"）→ (连接 id, 库名)。conn 为定长 36 字符 UUID。
 fn key_db_parts(key: &str) -> (String, String) {
     let rest = key.strip_prefix("db:").unwrap_or(key);
-    match rest.split_once('/') {
-        Some((c, d)) => (c.to_string(), d.to_string()),
-        None => (rest.to_string(), String::new()),
+    match rest.get(36..) {
+        Some(db_part) if rest.as_bytes().get(36) == Some(&b'/') && !db_part.is_empty() => {
+            (rest[..36].to_string(), db_part.to_string())
+        }
+        _ => (rest.to_string(), String::new()),
     }
 }
 
@@ -35829,8 +35831,6 @@ fn render_saved_queries_panel(
             ui.add_space(6.0);
 
             let tree = build_tree(&tab.all_saved_queries, live_conn_name);
-            // 展开状态持久化：默认全展开（空集合 = 全展开）
-            let default_expanded = tab.saved_query_tree_expanded.is_empty();
             egui::ScrollArea::vertical()
                 .id_salt(format!("saved-queries-tree-{}", tab.id))
                 .show(ui, |ui| {
@@ -35844,7 +35844,7 @@ fn render_saved_queries_panel(
                         });
                     } else {
                         for conn_node in &tree {
-                            render_conn_node(ui, tab, chrome, action, conn_node, default_expanded);
+                            render_conn_node(ui, tab, chrome, action, conn_node);
                         }
                     }
                     // 拖拽释放处理：源信息从 saved_query_drag_source 取，目标从 saved_query_drag_target 取
@@ -35924,7 +35924,6 @@ fn render_conn_node(
     chrome: MacUiPalette,
     action: &mut TabUiAction,
     node: &QueryTreeNode,
-    _default_expanded: bool,
 ) {
     let QueryTreeNode::Connection { key, display_name, children } = node else { return };
     let expanded = is_expanded(tab, key);
