@@ -99,6 +99,8 @@ pub struct DesktopApp {
     roots_by_connection: HashMap<String, Vec<ExplorerNode>>,
     children_by_node: HashMap<String, Vec<ExplorerNode>>,
     expanded_nodes: HashSet<String>,
+    /// 已保存查询树展开状态（启动时从 ui_state 加载，供新建 tab 使用）
+    saved_query_tree_expanded: HashSet<String>,
     selected_tree_item: Option<String>,
     selected_connection: Option<String>,
     search_keyword: String,
@@ -1758,6 +1760,14 @@ impl DesktopApp {
             }
             form
         };
+        // 已保存查询树展开状态：启动时从 ui_state 加载，供新建 tab 使用（空 = 默认全展开）
+        let saved_query_tree_expanded: HashSet<String> = services
+            .load_ui_state("saved_queries_tree_expanded")
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+            .map(|v| v.into_iter().collect())
+            .unwrap_or_default();
         let mut app = Self {
             runtime,
             services,
@@ -1765,6 +1775,7 @@ impl DesktopApp {
             roots_by_connection: HashMap::new(),
             children_by_node: HashMap::new(),
             expanded_nodes: HashSet::new(),
+            saved_query_tree_expanded,
             selected_tree_item: None,
             selected_connection,
             search_keyword: String::new(),
@@ -4605,6 +4616,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         initial_sql: Option<String>,
     ) {
         let mut tab = QueryTabState::new(connection_id.clone());
+        // 应用启动时加载的已保存查询树展开状态（QueryTabState::new 默认为空 = 全展开）
+        tab.saved_query_tree_expanded = self.saved_query_tree_expanded.clone();
         tab.database = database;
         if let Some(sql) = initial_sql {
             tab.sql = sql;
@@ -35844,13 +35857,15 @@ fn render_conn_node(
     ui.add_space(2.0);
 }
 
-// Task 4 内存版本；Task 5 Step 1 会改成同样的签名但增加 *action = SaveSavedQueryTreeState(...)
-fn toggle_expanded(tab: &mut QueryTabState, key: &str, _action: &mut TabUiAction) {
+// 切换展开/收起：改内存状态 + 产生持久化 action（save_ui_state 由 app 主循环处理）
+fn toggle_expanded(tab: &mut QueryTabState, key: &str, action: &mut TabUiAction) {
     if tab.saved_query_tree_expanded.contains(key) {
         tab.saved_query_tree_expanded.remove(key);
     } else {
         tab.saved_query_tree_expanded.insert(key.to_string());
     }
+    let keys: Vec<String> = tab.saved_query_tree_expanded.iter().cloned().collect();
+    *action = TabUiAction::SaveSavedQueryTreeState(keys);
 }
 
 fn render_db_node(
