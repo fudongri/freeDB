@@ -34254,6 +34254,62 @@ fn check_autocomplete_triggers(
         return;
     }
 
+    // 删除/撤销/剪切内容时不触发智能提示（Backspace/Delete、Cmd/Ctrl+Z 撤销、
+    // Event::Cut 或 Cmd/Ctrl+X 剪切）。这些操作会移除文本而非键入，
+    // 若仍触发 300ms debounce 会在删掉字符后弹出提示框。
+    let destructive_edit = ui.input(|i| {
+        i.events.iter().any(|e| {
+            matches!(e, egui::Event::Cut)
+                || matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Backspace | egui::Key::Delete,
+                        pressed: true,
+                        ..
+                    }
+                )
+        }) || (i.modifiers.command
+            && (i.key_pressed(egui::Key::Z) || i.key_pressed(egui::Key::X)))
+    });
+    if destructive_edit {
+        tab.autocomplete.dismiss();
+        tab.autocomplete.last_keystroke = None;
+        return;
+    }
+
+    // 鼠标点击/选中不触发智能提示。点击、拖选、双击选词只移动光标/选区，
+    // 不产生新的输入，但会把光标停在新位置——若 300ms debounce 恰好到期，
+    // 会按新光标位置重新弹出提示框。这里拦截鼠标按下并清掉 debounce 计时。
+    // 注意：跳过 popup 内的点击，否则点击建议行会被误拦截。
+    let mouse_click = ui.input(|i| {
+        i.events.iter().find_map(|e| {
+            match e {
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    pos,
+                    ..
+                } => Some(*pos),
+                _ => None,
+            }
+        })
+    });
+    if let Some(click_pos) = mouse_click {
+        let inside_popup = if tab.autocomplete.visible {
+            tab.autocomplete
+                .popup_rect
+                .map(|r| r.contains(click_pos))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !inside_popup {
+            tab.autocomplete.dismiss();
+            tab.autocomplete.last_keystroke = None;
+            return;
+        }
+    }
+
     // 编辑器内容为空时关闭智能提示
     if tab.sql.is_empty() {
         tab.autocomplete.dismiss();
