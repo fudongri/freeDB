@@ -668,13 +668,6 @@ struct CreateTableState {
     show_sql_preview: bool,
 }
 
-#[derive(Clone, PartialEq)]
-enum SavedQueriesFilterMode {
-    All,
-    ByConnection,
-    ByDatabase,
-}
-
 /// Alt+drag column block selection: a rectangular region spanning
 /// multiple rows at the same character-column range.
 #[derive(Clone, Debug)]
@@ -777,7 +770,8 @@ struct QueryTabState {
     bottom_panel_collapsed: bool,
     saved_queries_panel_visible: bool,
     saved_queries_panel_width: Option<f32>,
-    saved_queries_filter_mode: SavedQueriesFilterMode,
+    /// 已保存查询树展开状态（节点 key 集合，空 = 全展开）
+    saved_query_tree_expanded: HashSet<String>,
     /// 已保存查询拖拽状态：正在被拖拽的查询 (ID, 名称)
     saved_query_drag_source: Option<(String, String)>,
     /// 已保存查询拖拽目标位置（用于指示线显示）
@@ -869,7 +863,7 @@ impl Clone for QueryTabState {
             bottom_panel_collapsed: self.bottom_panel_collapsed,
             saved_queries_panel_visible: self.saved_queries_panel_visible,
             saved_queries_panel_width: self.saved_queries_panel_width,
-            saved_queries_filter_mode: self.saved_queries_filter_mode.clone(),
+            saved_query_tree_expanded: self.saved_query_tree_expanded.clone(),
             saved_query_drag_source: self.saved_query_drag_source.clone(),
             saved_query_drag_target: self.saved_query_drag_target,
             folded: self.folded.clone(),
@@ -20167,7 +20161,7 @@ impl QueryTabState {
             bottom_panel_collapsed: true,
             saved_queries_panel_visible: true,
             saved_queries_panel_width: None,
-            saved_queries_filter_mode: SavedQueriesFilterMode::All,
+            saved_query_tree_expanded: HashSet::new(),
             saved_query_drag_source: None,
             saved_query_drag_target: None,
             folded: Vec::new(),
