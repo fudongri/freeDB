@@ -33575,20 +33575,26 @@ fn replicate_edit_to_extra_cursors(
     // handles the case where the cursor moved but text didn't change.
     let primary_del_start = del_start;
     let primary_del_end = del_end;
-    let old_len = primary_del_end - primary_del_start;
     let inserted_chars: Vec<char> = inserted.chars().collect();
     let new_len = inserted_chars.len();
-    let delta: isize = new_len as isize - old_len as isize;
 
     // Detect edit direction from the primary cursor position.
     // Backspace: deletion ends at the primary cursor (del_end == cursor)
     //   → extra cursors should delete BEFORE themselves
     // Delete:  deletion starts at the primary cursor (del_start == cursor)
     //   → extra cursors should delete AFTER themselves
+    // When the primary has a selection, Backspace/Delete both remove the whole
+    // selection and primary may sit at either end; fall back to Backspace
+    // semantics (delete before) so the direction doesn't flip with selection
+    // orientation.
     let primary_pos = old_primary_cursor
         .map(|r| r.primary.index)
         .unwrap_or(primary_del_start);
-    let backward = primary_del_end == primary_pos && inserted.is_empty();
+    let backward = if primary_del_start != primary_del_end {
+        true
+    } else {
+        primary_del_end == primary_pos && inserted.is_empty()
+    };
 
     // Collect all edit sites: (char_index, delete_end)
     let mut sites: Vec<(usize, usize)> = Vec::new();
@@ -33599,10 +33605,17 @@ fn replicate_edit_to_extra_cursors(
         let sel = extra.as_sorted_char_range();
         let (extra_del_start, extra_del_end) = if sel.start != sel.end {
             (sel.start, sel.end)
-        } else if backward {
-            (p.saturating_sub(old_len), p)
+        } else if inserted.is_empty() {
+            // 纯删除（Backspace/Delete）：extra 无选区执行自己的键语义，只删 1 个字符，
+            // 不复制主光标的删除长度——主光标带长选区时避免 extra 误删整段文字
+            if backward {
+                (p.saturating_sub(1), p)
+            } else {
+                (p, p + 1)
+            }
         } else {
-            (p, p + old_len)
+            // 替换输入：extra 无选区仅插入不删除
+            (p, p)
         };
         if extra_del_end <= old_char_count {
             sites.push((extra_del_start, extra_del_end));
@@ -33626,8 +33639,10 @@ fn replicate_edit_to_extra_cursors(
     *current_sql = chars.into_iter().collect();
 
     // Compute new cursor positions using the same shift logic for ALL cursors.
-    // Every edit site has identical old_len and new_len (replicated input), so
-    // we can walk the sorted-by-start sites and apply cumulative delta.
+    // Each site may have its own deletion length (extra cursors without a
+    // selection delete 1 char, not the primary's selection length), and every
+    // site inserts the same replicated input. Walk the ascending sites and
+    // apply each site's delta to positions after it.
     // Sites are currently sorted descending by start; reverse to ascending.
     let sites_asc = {
         let mut v = sites.clone();
@@ -34556,6 +34571,10 @@ fn render_query_editor(
             tab.refresh_folds();
             // 强制重建 display（sql 未变，需手动失效快照）
             tab.fold_display_sql_snapshot.clear();
+            // extra_cursors 是 display 空间索引，折叠被移除后 display 结构已变、旧索引失效；
+            // 若沿用会把 display 索引误当 sql 索引用，复制编辑会写坏 sql。折叠是视图操作，
+            // 清空多光标让其重新创建。
+            tab.extra_cursors.clear();
         }
     }
 
@@ -35032,8 +35051,27 @@ fn render_query_editor(
                         }
 
                         // --- Multi-cursor edit replication ---
+                        // undo/redo 帧跳过复制：egui undoer 快照只记录 te.show() 内部
+                        // 主光标编辑后的状态（多光标复制在其后发生），Cmd+Z 撤销时
+                        // find_edit_with_cursor 会把"恢复历史文本"的跨处变化误判为主光标
+                        // 一次编辑并复制到所有 extra 光标，破坏文本。且撤销后 extra 光标
+                        // 基于旧文本空间漂移，一并清空成单光标。
+                        let undo_redo_pressed = ui.input(|i| {
+                            i.modifiers.command
+                                && (i.key_pressed(egui::Key::Z) || i.key_pressed(egui::Key::Y))
+                        });
+                        if undo_redo_pressed {
+                            tab.extra_cursors.clear();
+                        }
+                        // 复制发生帧会重建 output.galley 为"全光标编辑后"文本（见下方），
+                        // 因此本帧 tab.cursor_range / tab.extra_cursors（同为全编辑空间）可直接
+                        // 用于渲染，无需 primary_edited 快照——旧快照方案只对齐光标位置，extra
+                        // 行文本仍慢一帧，表现为"主行先显示、extra 行慢一帧"。
                         if let Some(ref old_sql_text) = old_sql_for_replication {
-                            if old_sql_text != &tab.sql && !tab.extra_cursors.is_empty() {
+                            if !undo_redo_pressed
+                                && old_sql_text != &tab.sql
+                                && !tab.extra_cursors.is_empty()
+                            {
                                 let old_primary_idx = old_cursor_for_replication
                                     .map(|r| r.primary.index);
                                 if let Some((del_start, del_end, inserted)) =
@@ -35047,6 +35085,41 @@ fn render_query_editor(
                                         del_start,
                                         del_end,
                                         &inserted,
+                                    );
+                                    // 复制完成后重建本帧 galley：te.show() 布局的 galley 只含主光标
+                                    // 编辑，extra 光标的复制编辑在之后才写入 tab.sql。若不重建，主行
+                                    // 文本当帧显示、extra 行下一帧才更新（"输入不同步"）。重建为全编辑
+                                    // 后文本后，主/extra 行文本与本帧 cursor_range/extra_cursors
+                                    // （同为全编辑空间）一致，光标位置也正确。
+                                    // 但 te.show() 已把旧 galley 推入绘制命令，重建后需用背景色
+                                    // 擦除旧文本区域并重绘新 galley，本帧屏幕文本才同步。
+                                    let new_width = output.galley.size().x;
+                                    let old_galley = std::mem::replace(
+                                        &mut output.galley,
+                                        layouter(ui, &tab.sql, new_width),
+                                    );
+                                    // 擦除新旧 galley 的并集区域：新 galley 内由重绘覆盖，
+                                    // 新区域之外若有旧文本残留（如 extra 编辑缩短文本）也一并擦掉
+                                    let erase_rect = egui::Rect::from_min_size(
+                                        output.galley_pos,
+                                        old_galley.size(),
+                                    )
+                                    .union(egui::Rect::from_min_size(
+                                        output.galley_pos,
+                                        output.galley.size(),
+                                    ));
+                                    let repaint_painter = ui
+                                        .painter()
+                                        .with_clip_rect(output.text_clip_rect);
+                                    repaint_painter.rect_filled(
+                                        erase_rect,
+                                        0.0,
+                                        palette.editor_bg,
+                                    );
+                                    repaint_painter.galley(
+                                        output.galley_pos,
+                                        output.galley.clone(),
+                                        palette.text,
                                     );
                                     // Update primary cursor to account for all edits,
                                     // not just the single edit TextEdit saw at the
@@ -35278,6 +35351,9 @@ fn render_query_editor(
                                     let painter = ui.painter();
                                     let offset = output.galley_pos.to_vec2();
 
+                                    // 复制发生帧已重建 output.galley 为"全光标编辑后"文本，
+                                    // 本帧 tab.cursor_range / tab.extra_cursors 同为全编辑空间，
+                                    // 可直接用于渲染，无需 primary_edited 快照。
                                     // Re-draw primary cursor (non-blinking) to cover
                                     // TextEdit's blinking cursor with matching style.
                                     // tab.cursor_range 为 sql 空间，渲染需 display 空间
@@ -35296,7 +35372,7 @@ fn render_query_editor(
                                     }
 
                                     // Draw extra cursors with the same style.
-                                    for extra in tab.extra_cursors.iter() {
+                                    for extra in &tab.extra_cursors {
                                         let r = egui::text_selection::text_cursor_state::cursor_rect(
                                             &galley, &extra.primary, gutter_row_height,
                                         );
@@ -35576,6 +35652,9 @@ fn render_query_editor(
                 tab.refresh_folds();
                 // 强制重建 display：sql 未变，需手动失效快照让下一帧 build_display
                 tab.fold_display_sql_snapshot.clear();
+                // extra_cursors 是 display 空间索引，折叠/展开改变 display 结构后旧索引失效，
+                // 复制逻辑会误把它们当 sql 索引写坏文本，需清空让其重新创建。
+                tab.extra_cursors.clear();
                 // 清空 undoer：egui 撤销快照存的是 display 文本，折叠/展开改变 display 结构后
                 // 旧快照与新的 display 不匹配，undo 会把含 … 的折叠态文本写回 sql（内容被破坏）。
                 // 折叠是视图操作，清空编辑撤销链让 undo 从当前折叠结构重新开始。
