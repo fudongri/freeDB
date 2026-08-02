@@ -176,6 +176,21 @@ impl FoldDisplay {
     }
 }
 
+/// 把显示文本上的编辑 diff 换算回 sql 空间。
+/// 返回 (del_start, del_end, inserted)，均为 sql char 索引。
+/// 若编辑触及折叠区（调用方应先展开），返回 (0, 0, "") 表示无效、需重试。
+pub fn map_display_edit_to_sql(d: &FoldDisplay, sql: &str, del_start: usize, del_end: usize, inserted: &str) -> (usize, usize, String) {
+    let sql_del_start = d.display_to_sql(del_start);
+    let sql_del_end = d.display_to_sql(del_end);
+    if d.region_contains_sql_idx(sql_del_start)
+        || (sql_del_end > sql_del_start && d.region_contains_sql_idx(sql_del_end.saturating_sub(1)))
+    {
+        return (0, 0, String::new());
+    }
+    let _ = sql;
+    (sql_del_start, sql_del_end, inserted.to_string())
+}
+
 /// 构造显示文本；无折叠返回 None。
 /// candidates 按 open_line 升序；只折叠 candidates 中与 folds 匹配且不被更外层折叠包含的。
 pub fn build_display(sql: &str, folds: &[FoldRegion], candidates: &[FoldCandidate]) -> Option<FoldDisplay> {
@@ -338,5 +353,46 @@ mod tests {
         let c = &cands[0];
         assert!(d.region_contains_sql_idx(c.hide_start + 1));
         assert!(!d.region_contains_sql_idx(c.hide_start - 1));
+    }
+
+    #[test]
+    fn edit_before_fold_maps_to_sql() {
+        let sql = "aa\nf(\n  bar\n)\nzz";
+        let cands = find_fold_candidates(sql);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        // 在 display "aa\n" 后插入 "XX"
+        let (ds, de, ins) = map_display_edit_to_sql(&d, sql, 3, 3, "XX");
+        assert_eq!((ds, de), (3, 3));
+        assert_eq!(ins, "XX");
+    }
+
+    #[test]
+    fn edit_after_fold_maps_correctly() {
+        let sql = "f(\n  bar\n)\nbaz";
+        let cands = find_fold_candidates(sql);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        // "baz" 起始处插入（display char 索引 = 占位符结束 + 闭括号 + 换行 = display_end + 2）。
+        // 注意不能以 d.text.len() 为索引：它返回字节长度，"…" 占 3 字节，与 char 索引不一致。
+        let seg = &d.segments[0];
+        let disp_baz = seg.display_end + 2;
+        let (ds, de, ins) = map_display_edit_to_sql(&d, sql, disp_baz, disp_baz, "Q");
+        // sql 中 "baz" 起始 = 折叠区结束 + 闭括号 + 换行 = sql_end + 2
+        let expect = seg.sql_end + 2;
+        assert_eq!((ds, de), (expect, expect));
+        assert_eq!(ins, "Q");
+    }
+
+    #[test]
+    fn edit_touching_fold_returns_invalid_signal() {
+        let sql = "f(\n  bar\n)\nbaz";
+        let cands = find_fold_candidates(sql);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        // 删除 display 2..4（"…" 占位符及其前导换行）：起点落在折叠区之前（sql 2）、终点落在区内（sql 9，end-1=8 ∈ [hide_start, hide_end)）
+        let (ds, de, ins) = map_display_edit_to_sql(&d, sql, 2, 4, "");
+        assert_eq!((ds, de), (0, 0));
+        assert_eq!(ins, "");
     }
 }
