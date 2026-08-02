@@ -113,6 +113,120 @@ pub fn char_line_start(sql: &str, line: usize) -> usize {
     start
 }
 
+/// 已折叠区域：按"起始行 + 内容哈希"识别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldRegion {
+    pub open_line: usize,
+    pub content_hash: u64,
+}
+
+/// 折叠区域的显示段。
+#[derive(Debug, Clone, Copy)]
+pub struct FoldSegment {
+    pub sql_start: usize,
+    pub sql_end: usize,
+    pub display_start: usize,
+    pub display_end: usize,
+}
+
+/// 折叠后的显示文本及其偏移映射。
+#[derive(Debug, Clone)]
+pub struct FoldDisplay {
+    pub text: String,
+    pub segments: Vec<FoldSegment>,
+}
+
+impl FoldDisplay {
+    /// sql char 索引 → display char 索引。落在折叠区内钳制到占位符末尾。
+    pub fn sql_to_display(&self, sql_idx: usize) -> usize {
+        let mut delta: isize = 0;
+        for seg in &self.segments {
+            if sql_idx < seg.sql_start {
+                break;
+            }
+            if sql_idx < seg.sql_end {
+                // 钳制到占位符末尾
+                return (seg.display_end as isize) as usize;
+            }
+            delta = (seg.display_end as isize) - (seg.sql_end as isize);
+        }
+        ((sql_idx as isize) + delta) as usize
+    }
+
+    /// display char 索引 → sql char 索引。落在占位符上 → 折叠区末尾。
+    pub fn display_to_sql(&self, display_idx: usize) -> usize {
+        let mut delta: isize = 0;
+        for seg in &self.segments {
+            if display_idx < seg.display_start {
+                break;
+            }
+            if display_idx < seg.display_end {
+                return seg.sql_end;
+            }
+            delta = (seg.sql_end as isize) - (seg.display_end as isize);
+        }
+        ((display_idx as isize) + delta) as usize
+    }
+
+    /// sql 索引是否落在某折叠区内
+    pub fn region_contains_sql_idx(&self, sql_idx: usize) -> bool {
+        self.segments
+            .iter()
+            .any(|seg| sql_idx >= seg.sql_start && sql_idx < seg.sql_end)
+    }
+}
+
+/// 构造显示文本；无折叠返回 None。
+/// candidates 按 open_line 升序；只折叠 candidates 中与 folds 匹配且不被更外层折叠包含的。
+pub fn build_display(sql: &str, folds: &[FoldRegion], candidates: &[FoldCandidate]) -> Option<FoldDisplay> {
+    if folds.is_empty() {
+        return None;
+    }
+    // 匹配候选：open_line + hash 一致
+    let mut matched: Vec<&FoldCandidate> = candidates
+        .iter()
+        .filter(|c| folds.iter().any(|f| f.open_line == c.open_line && f.content_hash == fold_content_hash(sql, c)))
+        .collect();
+    if matched.is_empty() {
+        return None;
+    }
+    // 剔除被更外层折叠包含的（嵌套只显示最外层）
+    matched.sort_by_key(|c| c.hide_start);
+    let mut filtered: Vec<&FoldCandidate> = Vec::new();
+    for c in matched {
+        if filtered.iter().any(|f: &&FoldCandidate| c.hide_start >= f.hide_start && c.hide_end <= f.hide_end) {
+            continue;
+        }
+        filtered.push(c);
+    }
+
+    let mut text = String::with_capacity(sql.len());
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    let mut display_cursor = 0usize;
+    for c in filtered {
+        if c.hide_start > cursor {
+            text.push_str(&sql[cursor..c.hide_start]);
+            display_cursor += c.hide_start - cursor;
+        }
+        let seg = FoldSegment {
+            sql_start: c.hide_start,
+            sql_end: c.hide_end,
+            display_start: display_cursor,
+            display_end: display_cursor + 2,
+        };
+        text.push('…');
+        text.push('\n');
+        display_cursor += 2;
+        segments.push(seg);
+        cursor = c.hide_end;
+    }
+    if cursor < sql.len() {
+        text.push_str(&sql[cursor..]);
+    }
+    Some(FoldDisplay { text, segments })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +283,60 @@ mod tests {
         let a = find_fold_candidates(sql_a)[0];
         let b = find_fold_candidates(sql_b)[0];
         assert_ne!(fold_content_hash(sql_a, &a), fold_content_hash(sql_b, &b));
+    }
+
+    #[test]
+    fn build_display_single_fold() {
+        let sql = "f(\n  bar\n)\nbaz";
+        let cands = find_fold_candidates(sql);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        assert_eq!(d.text, "f(\n…\n)\nbaz");
+    }
+
+    #[test]
+    fn build_display_no_folds_returns_none() {
+        let sql = "SELECT 1";
+        let cands = find_fold_candidates(sql);
+        assert!(build_display(sql, &[], &cands).is_none());
+    }
+
+    #[test]
+    fn nested_only_outer_folds() {
+        // 外层折叠时内层候选被包含，display 只替换外层区域
+        let sql = "f(\n  g(\n    1\n  )\n)";
+        let cands = find_fold_candidates(sql);
+        // find_fold_candidates 按闭括号相遇顺序返回：cands[0] 是内层 g(...)
+        let outer = cands.iter().find(|c| c.open_line == 1).unwrap();
+        let folds = vec![FoldRegion { open_line: outer.open_line, content_hash: fold_content_hash(sql, outer) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        assert_eq!(d.text, "f(\n…\n)");
+    }
+
+    #[test]
+    fn offset_mapping_roundtrip() {
+        let sql = "aa\nf(\n  bar\n)\nzz";
+        let cands = find_fold_candidates(sql);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        // sql 索引 → display → 回到 sql（除折叠区内钳制）
+        let sql_idx = sql.len(); // 末尾
+        let disp = d.sql_to_display(sql_idx);
+        // 整体文本与"替换折叠区为占位符"等价（char 级比较）
+        assert_eq!(d.text, sql.replace(&sql[cands[0].hide_start..cands[0].hide_end], "…\n"));
+        // display 末尾索引回 sql 末尾
+        let back = d.display_to_sql(disp);
+        assert_eq!(back, sql_idx);
+    }
+
+    #[test]
+    fn cursor_in_fold_region_detected() {
+        let sql = "f(\n  bar\n)\nbaz";
+        let cands = find_fold_candidates(sql);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        let c = &cands[0];
+        assert!(d.region_contains_sql_idx(c.hide_start + 1));
+        assert!(!d.region_contains_sql_idx(c.hide_start - 1));
     }
 }
