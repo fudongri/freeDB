@@ -535,7 +535,11 @@ impl AppServices {
         if sql_text.is_empty() {
             return Err(anyhow!("{}", tr!("语句内容不能为空")));
         }
-        self.history_store.update_saved_query(id, sql_text, connection_id, database)
+        let connection_name = self
+            .connection_store
+            .get_connection(connection_id)?
+            .map(|c| c.name);
+        self.history_store.update_saved_query(id, sql_text, connection_id, database, connection_name.as_deref())
     }
 
     pub fn delete_saved_query(&self, id: &str) -> Result<()> {

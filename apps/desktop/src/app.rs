@@ -732,6 +732,17 @@ struct AiMessage {
     content: String,
 }
 
+/// 已保存查询拖拽目标位置
+#[derive(Clone)]
+enum DropTarget {
+    /// 落入连接节点 → 归属该连接，database 置空（无库平铺）
+    Connection(String),
+    /// 落入库节点 → 归属到该库
+    Database(String, String), // (连接 id, 库名)
+    /// 落入查询行 → 同分组内重排（在该查询之前插入；before_id = None 表示插到末尾）
+    QueryBefore { connection_id: String, database: Option<String>, before_id: Option<String> },
+}
+
 struct QueryTabState {
     id: String,
     title: String,
@@ -778,7 +789,7 @@ struct QueryTabState {
     /// 已保存查询拖拽状态：正在被拖拽的查询 (ID, 名称)
     saved_query_drag_source: Option<(String, String)>,
     /// 已保存查询拖拽目标位置（用于指示线显示）
-    saved_query_drag_target: Option<usize>,
+    saved_query_drag_target: Option<DropTarget>,
     /// 括号折叠状态（只增删此列表，不改 sql）
     folded: Vec<crate::fold::FoldRegion>,
     /// 当前可折叠候选（每帧/sql 变化时刷新）
@@ -868,7 +879,7 @@ impl Clone for QueryTabState {
             saved_queries_panel_width: self.saved_queries_panel_width,
             saved_query_tree_expanded: self.saved_query_tree_expanded.clone(),
             saved_query_drag_source: self.saved_query_drag_source.clone(),
-            saved_query_drag_target: self.saved_query_drag_target,
+            saved_query_drag_target: self.saved_query_drag_target.clone(),
             folded: self.folded.clone(),
             fold_candidates: self.fold_candidates.clone(),
             fold_display: self.fold_display.clone(),
@@ -8977,6 +8988,42 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let (_, saved_queries, all_saved_queries) = load_query_library(&self.services, &connection_id);
                         tab.saved_queries = saved_queries;
                         tab.all_saved_queries = all_saved_queries;
+                    }
+                }
+            }
+            TabUiAction::MoveSavedQuery { id, target_connection_id, target_database } => {
+                // 读取当前 sql_text 保持内容不变
+                let sql_text = self.tabs.get(self.active_tab)
+                    .and_then(|t| match t {
+                        WorkspaceTab::Query(tab) => tab.all_saved_queries.iter().find(|e| e.id == id).map(|e| e.sql_text.clone()),
+                        _ => None,
+                    });
+                if let Some(sql_text) = sql_text {
+                    let result = self.services.update_saved_query(&id, &sql_text, &target_connection_id, target_database.as_deref());
+                    match result {
+                        Ok(()) => {
+                            // 归一 sort_order：把移动的查询排到目标分组末尾，避免冲突
+                            let all = self.services.list_all_saved_queries().unwrap_or_default();
+                            let mut group: Vec<(String, i32)> = all.iter()
+                                .filter(|e| e.connection_id == target_connection_id && e.database == target_database)
+                                .map(|e| (e.id.clone(), e.sort_order))
+                                .collect();
+                            group.sort_by_key(|(_, so)| *so);
+                            group.retain(|(gid, _)| gid != &id); // 移动项独立出来
+                            let mut updates: Vec<(String, i32)> = group.iter().enumerate()
+                                .map(|(i, (gid, _))| (gid.clone(), i as i32))
+                                .collect();
+                            updates.push((id.clone(), group.len() as i32)); // 放到目标分组末尾
+                            let _ = self.services.update_saved_query_sort_orders(&updates);
+                            self.status_message = tr!("已移动保存查询").into();
+                            if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                                let connection_id = tab.connection_id.clone().unwrap_or_default();
+                                let (_, saved_queries, all_saved_queries) = load_query_library(&self.services, &connection_id);
+                                tab.saved_queries = saved_queries;
+                                tab.all_saved_queries = all_saved_queries;
+                            }
+                        }
+                        Err(e) => self.status_message = tr!("移动查询失败: {}", e).into(),
                     }
                 }
             }
@@ -20455,6 +20502,7 @@ enum TabUiAction {
     CreateTableExecute,
     GenerateData,
     ReorderSavedQueries(Vec<(String, i32)>),
+    MoveSavedQuery { id: String, target_connection_id: String, target_database: Option<String> },
     SaveSavedQueryTreeState(Vec<String>),
     RefreshProcesslist,
     LoadFile(std::path::PathBuf),
@@ -35699,6 +35747,20 @@ fn render_query_editor(
     }
 }
 
+/// 从连接节点 key（"conn:<id>"）提取连接 id
+fn key_conn_id(key: &str) -> String {
+    key.strip_prefix("conn:").unwrap_or(key).to_string()
+}
+
+/// 拆分库节点 key（"db:<conn>/<db>"）→ (连接 id, 库名)
+fn key_db_parts(key: &str) -> (String, String) {
+    let rest = key.strip_prefix("db:").unwrap_or(key);
+    match rest.split_once('/') {
+        Some((c, d)) => (c.to_string(), d.to_string()),
+        None => (rest.to_string(), String::new()),
+    }
+}
+
 /// 已保存查询折叠面板
 fn render_saved_queries_panel(
     ui: &mut egui::Ui,
@@ -35785,6 +35847,63 @@ fn render_saved_queries_panel(
                             render_conn_node(ui, tab, chrome, action, conn_node, default_expanded);
                         }
                     }
+                    // 拖拽释放处理：源信息从 saved_query_drag_source 取，目标从 saved_query_drag_target 取
+                    let released = ui.input(|i| i.pointer.any_released());
+                    if released {
+                        if let Some((from_id, _)) = tab.saved_query_drag_source.take() {
+                            let from_entry = tab.all_saved_queries.iter().find(|e| e.id == from_id).cloned();
+                            if let Some(target) = tab.saved_query_drag_target.take() {
+                                if let Some(from_entry) = from_entry {
+                                    match target {
+                                        DropTarget::Connection(cid) => {
+                                            *action = TabUiAction::MoveSavedQuery {
+                                                id: from_id,
+                                                target_connection_id: cid,
+                                                target_database: None,
+                                            };
+                                        }
+                                        DropTarget::Database(cid, db) => {
+                                            *action = TabUiAction::MoveSavedQuery {
+                                                id: from_id,
+                                                target_connection_id: cid,
+                                                target_database: Some(db),
+                                            };
+                                        }
+                                        DropTarget::QueryBefore { connection_id, database, before_id } => {
+                                            let same_group = from_entry.connection_id == connection_id
+                                                && from_entry.database == database;
+                                            if same_group {
+                                                // 同分组重排：复用 ReorderSavedQueries，在 before_id 之前插入
+                                                let mut group: Vec<&SavedQueryEntry> = tab.all_saved_queries
+                                                    .iter()
+                                                    .filter(|e| e.connection_id == connection_id && e.database == database)
+                                                    .collect();
+                                                group.sort_by_key(|e| e.sort_order);
+                                                if let Some(pos) = group.iter().position(|e| e.id == from_id) {
+                                                    group.remove(pos);
+                                                }
+                                                let insert_at = group.iter().position(|e| e.id == before_id.as_deref().unwrap_or(""))
+                                                    .unwrap_or(group.len());
+                                                group.insert(insert_at, &from_entry);
+                                                let updates: Vec<(String, i32)> = group.iter().enumerate()
+                                                    .map(|(i, e)| (e.id.clone(), i as i32))
+                                                    .collect();
+                                                *action = TabUiAction::ReorderSavedQueries(updates);
+                                            } else {
+                                                // 跨分组：移动归属
+                                                *action = TabUiAction::MoveSavedQuery {
+                                                    id: from_id,
+                                                    target_connection_id: connection_id,
+                                                    target_database: database,
+                                                };
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        tab.saved_query_drag_target = None;
+                    }
                 });
         });
 }
@@ -35834,6 +35953,27 @@ fn render_conn_node(
             toggle_expanded(tab, key, action);
         }
     });
+    // 拖拽目标：整行可放（连接节点）
+    let dragging = tab.saved_query_drag_source.is_some();
+    if dragging {
+        let resp = ui.scope(|ui| {
+            let (r, resp) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), row_height),
+                egui::Sense::hover(),
+            );
+            ui.painter().rect_filled(r, chrome.radius_md, Color32::TRANSPARENT);
+            resp
+        }).inner;
+        if resp.hovered() {
+            ui.painter().rect_stroke(
+                resp.rect,
+                chrome.radius_md,
+                Stroke::new(1.0, chrome.selection_stroke),
+                egui::StrokeKind::Inside,
+            );
+            tab.saved_query_drag_target = Some(DropTarget::Connection(key_conn_id(key)));
+        }
+    }
     if expanded {
         for child in children {
             match child {
@@ -35905,6 +36045,28 @@ fn render_db_node(
             toggle_expanded(tab, key, action);
         }
     });
+    // 拖拽目标：整行可放（库节点）
+    let dragging = tab.saved_query_drag_source.is_some();
+    if dragging {
+        let resp = ui.scope(|ui| {
+            let (r, resp) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), row_height),
+                egui::Sense::hover(),
+            );
+            ui.painter().rect_filled(r, chrome.radius_md, Color32::TRANSPARENT);
+            resp
+        }).inner;
+        if resp.hovered() {
+            ui.painter().rect_stroke(
+                resp.rect,
+                chrome.radius_md,
+                Stroke::new(1.0, chrome.selection_stroke),
+                egui::StrokeKind::Inside,
+            );
+            let (cid, db) = key_db_parts(key);
+            tab.saved_query_drag_target = Some(DropTarget::Database(cid, db));
+        }
+    }
     if expanded {
         for child in children {
             ui.horizontal(|ui| {
@@ -35961,6 +36123,11 @@ fn render_query_row(
             egui::vec2(btn_width, 22.0),
             egui::Sense::click_and_drag(),
         );
+        let item_rect_center_y = rect.center().y;
+        let item_rect_bottom = rect.bottom();
+        if item_response.drag_started() {
+            tab.saved_query_drag_source = Some((entry_id.clone(), title.clone()));
+        }
         ui.painter().rect_filled(rect, chrome.radius_md, fill);
         ui.painter().rect_stroke(rect, chrome.radius_md, Stroke::new(1.0, stroke_color), egui::StrokeKind::Inside);
         let delete_icon_rect = egui::Rect::from_center_size(
@@ -36027,6 +36194,35 @@ fn render_query_row(
                 ui.close();
             }
         });
+        // 拖拽目标：查询行间重排（仅当拖拽源存在时）
+        if tab.saved_query_drag_source.is_some() {
+            let ptr_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y));
+            if let Some(y) = ptr_y {
+                if y >= item_rect_center_y && y < item_rect_bottom {
+                    ui.painter().hline(
+                        rect.x_range(),
+                        rect.bottom(),
+                        Stroke::new(2.0, panel_palette.selection_stroke),
+                    );
+                    tab.saved_query_drag_target = Some(DropTarget::QueryBefore {
+                        connection_id: connection_id.clone(),
+                        database: database.clone(),
+                        before_id: Some(entry_id.clone()),
+                    });
+                } else if y < item_rect_center_y {
+                    ui.painter().hline(
+                        rect.x_range(),
+                        rect.top(),
+                        Stroke::new(2.0, panel_palette.selection_stroke),
+                    );
+                    tab.saved_query_drag_target = Some(DropTarget::QueryBefore {
+                        connection_id: connection_id.clone(),
+                        database: database.clone(),
+                        before_id: Some(entry_id.clone()),
+                    });
+                }
+            }
+        }
     });
     ui.add_space(2.0);
 }

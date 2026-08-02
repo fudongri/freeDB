@@ -161,13 +161,13 @@ impl HistoryStore {
         Ok(())
     }
 
-    pub fn update_saved_query(&self, id: &str, sql_text: &str, connection_id: &str, database: Option<&str>) -> Result<()> {
+    pub fn update_saved_query(&self, id: &str, sql_text: &str, connection_id: &str, database: Option<&str>, connection_name: Option<&str>) -> Result<()> {
         let connection = self.connection.lock();
         connection.execute(
             "UPDATE saved_queries
-             SET sql_text = ?2, connection_id = ?3, database = ?4
+             SET sql_text = ?2, connection_id = ?3, database = ?4, connection_name = ?5
              WHERE id = ?1",
-            params![id, sql_text, connection_id, database],
+            params![id, sql_text, connection_id, database, connection_name],
         )?;
         Ok(())
     }

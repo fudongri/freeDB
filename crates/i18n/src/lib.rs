@@ -1007,6 +1007,8 @@ fn en(key: &'static str) -> &'static str {
         "BSON 转换错误: {}" => "BSON conversion error: {}",
         "启动安装程序失败（UAC 提权被拒绝或取消）" => "Failed to launch installer (UAC elevation denied or cancelled)",
         "保存排序失败: {}" => "Failed to save sort: {}",
+        "已移动保存查询" => "Saved query moved",
+        "移动查询失败: {}" => "Failed to move query: {}",
 
         _ => key,
     }
