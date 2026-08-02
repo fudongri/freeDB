@@ -782,6 +782,14 @@ struct QueryTabState {
     saved_query_drag_source: Option<(String, String)>,
     /// 已保存查询拖拽目标位置（用于指示线显示）
     saved_query_drag_target: Option<usize>,
+    /// 括号折叠状态（只增删此列表，不改 sql）
+    folded: Vec<crate::fold::FoldRegion>,
+    /// 当前可折叠候选（每帧/sql 变化时刷新）
+    fold_candidates: Vec<crate::fold::FoldCandidate>,
+    /// 折叠后的显示文本与偏移映射（None = 无折叠，display == sql）
+    fold_display: Option<crate::fold::FoldDisplay>,
+    /// 生成 fold_display 时的 sql 快照，用于检测是否需要重建
+    fold_display_sql_snapshot: String,
     selected_saved_query_id: Option<String>,
     /// Original SQL text when a saved query was loaded; used to detect modifications.
     selected_saved_query_sql: Option<String>,
@@ -864,6 +872,10 @@ impl Clone for QueryTabState {
             saved_queries_filter_mode: self.saved_queries_filter_mode.clone(),
             saved_query_drag_source: self.saved_query_drag_source.clone(),
             saved_query_drag_target: self.saved_query_drag_target,
+            folded: self.folded.clone(),
+            fold_candidates: self.fold_candidates.clone(),
+            fold_display: self.fold_display.clone(),
+            fold_display_sql_snapshot: self.fold_display_sql_snapshot.clone(),
             selected_saved_query_id: self.selected_saved_query_id.clone(),
             selected_saved_query_sql: self.selected_saved_query_sql.clone(),
             selected_saved_query_connection_id: self.selected_saved_query_connection_id.clone(),
@@ -20158,6 +20170,10 @@ impl QueryTabState {
             saved_queries_filter_mode: SavedQueriesFilterMode::All,
             saved_query_drag_source: None,
             saved_query_drag_target: None,
+            folded: Vec::new(),
+            fold_candidates: Vec::new(),
+            fold_display: None,
+            fold_display_sql_snapshot: String::new(),
             selected_saved_query_id: None,
             selected_saved_query_sql: None,
             selected_saved_query_connection_id: None,
@@ -20187,6 +20203,16 @@ impl QueryTabState {
 
     fn current_selections(&self) -> &QueryResultSelectionState {
         self.result_selections.get(self.selected_result_index).unwrap_or(&EMPTY_SELECTIONS)
+    }
+
+    /// 重新计算折叠候选；根据现有 folded 保留仍有效的折叠。
+    fn refresh_folds(&mut self) {
+        self.fold_candidates = crate::fold::find_fold_candidates(&self.sql);
+        self.folded.retain(|f| {
+            self.fold_candidates.iter().any(|c| {
+                c.open_line == f.open_line && crate::fold::fold_content_hash(&self.sql, c) == f.content_hash
+            })
+        });
     }
 
     fn current_selections_mut(&mut self) -> &mut QueryResultSelectionState {
