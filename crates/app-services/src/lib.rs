@@ -467,7 +467,13 @@ impl AppServices {
         } else {
             title.to_string()
         };
-        let record = self.history_store.save_query(connection_id, database, &title, sql_text)?;
+        let connection_name = self
+            .connection_store
+            .get_connection(connection_id)?
+            .map(|c| c.name);
+        let record = self.history_store.save_query(
+            connection_id, database, &title, sql_text, connection_name.as_deref(),
+        )?;
         Ok(SavedQueryEntry {
             id: record.id,
             connection_id: record.connection_id,
@@ -476,6 +482,7 @@ impl AppServices {
             sql_text: record.sql_text,
             saved_at: record.saved_at,
             sort_order: record.sort_order,
+            connection_name: record.connection_name,
         })
     }
 
@@ -492,6 +499,7 @@ impl AppServices {
                 sql_text: record.sql_text,
                 saved_at: record.saved_at,
                 sort_order: record.sort_order,
+                connection_name: record.connection_name,
             })
             .collect())
     }
@@ -509,6 +517,7 @@ impl AppServices {
                 sql_text: record.sql_text,
                 saved_at: record.saved_at,
                 sort_order: record.sort_order,
+                connection_name: record.connection_name,
             })
             .collect())
     }
@@ -889,6 +898,8 @@ impl AppServices {
         }
 
         let mut id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // 原始连接 ID → 连接名（供导入时补全 connection_name 快照）
+        let mut name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         for conn in &bundle.connections {
             let new_id = Uuid::new_v4().to_string();
@@ -944,12 +955,17 @@ impl AppServices {
             // 由于导出时 connectionId 是原始 ID，需要通过匹配来映射
             // 这里用顺序索引：第 i 个连接对应原始 ID
             id_map.insert(conn.original_id.clone().unwrap_or_default(), new_id);
+            // 记录原始连接名，供保存查询的 connection_name 快照使用
+            if let Some(name) = conn.name.clone() {
+                name_map.insert(conn.original_id.clone().unwrap_or_default(), name);
+            }
         }
 
         // 为保存的查询重新映射 connection_id
         for q in &bundle.saved_queries {
+            let original_id = q.connection_id.as_deref().unwrap_or("");
             let new_conn_id = id_map
-                .get(q.connection_id.as_deref().unwrap_or(""))
+                .get(original_id)
                 .cloned()
                 .or_else(|| id_map.values().next().cloned());
             if let Some(conn_id) = new_conn_id {
@@ -958,6 +974,7 @@ impl AppServices {
                     q.database.as_deref(),
                     q.title.as_deref().unwrap_or(""),
                     q.sql_text.as_deref().unwrap_or(""),
+                    name_map.get(original_id).map(String::as_str),
                 )?;
             }
         }

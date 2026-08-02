@@ -24,6 +24,7 @@ pub struct SavedQueryRecord {
     pub sql_text: String,
     pub saved_at: DateTime<Utc>,
     pub sort_order: i32,
+    pub connection_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -97,6 +98,7 @@ impl HistoryStore {
         database: Option<&str>,
         title: &str,
         sql_text: &str,
+        connection_name: Option<&str>,
     ) -> Result<SavedQueryRecord> {
         let connection = self.connection.lock();
         let existing = connection
@@ -126,14 +128,15 @@ impl HistoryStore {
             (Uuid::new_v4().to_string(), 0)
         };
         connection.execute(
-            "INSERT INTO saved_queries (id, connection_id, database, title, sql_text, saved_at, sort_order)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO saved_queries (id, connection_id, database, title, sql_text, saved_at, sort_order, connection_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 database = excluded.database,
                 title = excluded.title,
                 sql_text = excluded.sql_text,
-                saved_at = excluded.saved_at",
-            params![id, connection_id, database, title, sql_text, saved_at.to_rfc3339(), sort_order],
+                saved_at = excluded.saved_at,
+                connection_name = excluded.connection_name",
+            params![id, connection_id, database, title, sql_text, saved_at.to_rfc3339(), sort_order, connection_name],
         )?;
         Ok(SavedQueryRecord {
             id,
@@ -143,6 +146,7 @@ impl HistoryStore {
             sql_text: sql_text.to_string(),
             saved_at,
             sort_order,
+            connection_name: connection_name.map(String::from),
         })
     }
 
@@ -194,7 +198,7 @@ impl HistoryStore {
     ) -> Result<Vec<SavedQueryRecord>> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
-            "SELECT id, connection_id, database, title, sql_text, saved_at, sort_order
+            "SELECT id, connection_id, database, title, sql_text, saved_at, sort_order, connection_name
              FROM saved_queries
              WHERE connection_id = ?1
              ORDER BY sort_order ASC, saved_at DESC
@@ -211,6 +215,7 @@ impl HistoryStore {
                     .map_err(to_sql_error)?
                     .with_timezone(&Utc),
                 sort_order: row.get(6)?,
+                connection_name: row.get(7)?,
             })
         })?;
 
@@ -220,7 +225,7 @@ impl HistoryStore {
     pub fn list_all_saved_queries(&self, limit: usize) -> Result<Vec<SavedQueryRecord>> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
-            "SELECT id, connection_id, database, title, sql_text, saved_at, sort_order
+            "SELECT id, connection_id, database, title, sql_text, saved_at, sort_order, connection_name
              FROM saved_queries
              ORDER BY sort_order ASC, saved_at DESC
              LIMIT ?1",
@@ -236,6 +241,7 @@ impl HistoryStore {
                     .map_err(to_sql_error)?
                     .with_timezone(&Utc),
                 sort_order: row.get(6)?,
+                connection_name: row.get(7)?,
             })
         })?;
 
@@ -320,6 +326,16 @@ impl HistoryStore {
             "CREATE INDEX IF NOT EXISTS idx_saved_queries_sort_order
                 ON saved_queries(connection_id, sort_order);",
         )?;
+
+        // Migrate: add connection_name column to saved_queries if missing
+        let has_connection_name_column: bool = connection
+            .prepare("SELECT connection_name FROM saved_queries LIMIT 0")
+            .is_ok();
+        if !has_connection_name_column {
+            connection.execute_batch(
+                "ALTER TABLE saved_queries ADD COLUMN connection_name TEXT;",
+            )?;
+        }
 
         Ok(())
     }

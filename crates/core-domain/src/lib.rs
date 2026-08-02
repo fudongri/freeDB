@@ -412,6 +412,7 @@ pub struct SavedQueryEntry {
     pub sql_text: String,
     pub saved_at: DateTime<Utc>,
     pub sort_order: i32,
+    pub connection_name: Option<String>,
 }
 
 impl SavedQueryEntry {
@@ -429,6 +430,7 @@ impl SavedQueryEntry {
             sql_text: sql_text.into(),
             saved_at: Utc::now(),
             sort_order: 0,
+            connection_name: None,
         }
     }
 }
