@@ -128,7 +128,22 @@ fn select_word_at(text: &str, ccursor: CCursor) -> CCursorRange {
                 } else {
                     let min = ccursor_previous_word(text, ccursor);
                     let max = ccursor_next_word(text, ccursor);
-                    CCursorRange::two(min, max)
+                    // 双击落在非词字符间隙（换行/空白/标点）时，原逻辑把上一词起点到下一词
+                    // 终点全部选中，会把换行符连同邻词一起跨行选中。双击选词不应跨行：
+                    // 跳过区间开头的换行符，并把终点收缩到第一个换行符之前。
+                    let chars: Vec<char> = text.chars().collect();
+                    let mut sel_start = min.index.min(chars.len());
+                    let mut sel_end = max.index.min(chars.len());
+                    while sel_start < sel_end && matches!(chars[sel_start], '\n' | '\r') {
+                        sel_start += 1;
+                    }
+                    if let Some(rel) = chars[sel_start..sel_end]
+                        .iter()
+                        .position(|&c| c == '\n' || c == '\r')
+                    {
+                        sel_end = sel_start + rel;
+                    }
+                    CCursorRange::two(CCursor::new(sel_start), CCursor::new(sel_end))
                 }
             } else {
                 let min = ccursor_previous_word(text, ccursor);
@@ -337,6 +352,8 @@ pub fn cursor_rect(galley: &Galley, cursor: &CCursor, row_height: f32) -> Rect {
 #[cfg(test)]
 mod test {
     use crate::text_selection::text_cursor_state::next_word_boundary_char_index;
+    use crate::text_selection::text_cursor_state::select_word_at;
+    use epaint::text::cursor::CCursor;
 
     #[test]
     fn test_next_word_boundary_char_index() {
@@ -372,5 +389,53 @@ mod test {
         assert_eq!(next_word_boundary_char_index(text, 15), 19);
         assert_eq!(next_word_boundary_char_index(text, 19), 20);
         assert_eq!(next_word_boundary_char_index(text, 20), 21);
+    }
+
+    /// 双击选词：双击落在非词字符间隙（含换行符）时不得跨行选中。
+    fn range_of(text: &str, ccursor_index: usize) -> (usize, usize) {
+        let range = select_word_at(text, CCursor::new(ccursor_index)).as_sorted_char_range();
+        let selected: String = text.chars().skip(range.start).take(range.end - range.start).collect();
+        assert!(
+            !selected.contains('\n') && !selected.contains('\r'),
+            "双击选词不得包含换行符, 选中了 {:?}",
+            selected
+        );
+        (range.start, range.end)
+    }
+
+    #[test]
+    fn double_click_at_line_end_trailing_space_does_not_cross_line() {
+        // 行尾尾随空格：双击落在空格与换行之间，原逻辑会选中 "foo \nFROM"
+        let text = "SELECT foo \nFROM bar";
+        // 光标在 "foo " 与换行之间（idx 11 = 空格后）
+        assert_eq!(range_of(text, 11), (7, 11));
+        // 普通单词双击不受影响
+        assert_eq!(range_of(text, 8), (7, 10));
+        assert_eq!(range_of(text, 12), (12, 16));
+    }
+
+    #[test]
+    fn double_click_on_empty_line_does_not_cross_line() {
+        // 空行：双击落在两个换行符之间，原逻辑会选中 "foo\n\nFROM"
+        let text = "SELECT foo\n\nFROM bar";
+        assert_eq!(range_of(text, 11), (7, 10));
+        assert_eq!(range_of(text, 10), (7, 10));
+        assert_eq!(range_of(text, 12), (12, 16));
+    }
+
+    #[test]
+    fn double_click_on_folded_ellipsis_does_not_cross_line() {
+        // 折叠 display 文本：双击落在 … 占位符相邻间隙，原逻辑会跨行选中
+        let text = "f(\n…\n)\nbaz";
+        // 双击在 … 前（换行与 … 之间，idx 3）：跳过换行只选中 …
+        assert_eq!(range_of(text, 3), (3, 4));
+        // 双击在 … 与换行之间（idx 4）：同样只选中 …
+        assert_eq!(range_of(text, 4), (3, 4));
+        // 双击在 ) 与换行之间（idx 6）：只选中 )
+        assert_eq!(range_of(text, 6), (5, 6));
+        // 双击在 ( 与换行之间（idx 2）：裁剪到行尾只选中 "f("
+        assert_eq!(range_of(text, 2), (0, 2));
+        // 普通单词双击不受影响
+        assert_eq!(range_of(text, 8), (7, 10));
     }
 }
