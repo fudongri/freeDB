@@ -33583,14 +33583,17 @@ fn replicate_edit_to_extra_cursors(
     //   → extra cursors should delete BEFORE themselves
     // Delete:  deletion starts at the primary cursor (del_start == cursor)
     //   → extra cursors should delete AFTER themselves
-    // When the primary has a selection, Backspace/Delete both remove the whole
-    // selection and primary may sit at either end; fall back to Backspace
-    // semantics (delete before) so the direction doesn't flip with selection
-    // orientation.
+    // 主光标是否有选区：有选区时 extra 无选区只删 1 个字符（不复制主光标的长选区删除），
+    // 方向稳定为删前，避免随选区方向翻转；无选区时 extra 复制主光标的删除长度与方向，
+    // 快速连续删除（一帧多个按键）时主光标删多个字符，extra 也同步删同样数量。
+    let primary_has_selection = old_primary_cursor
+        .map(|r| !r.is_empty())
+        .unwrap_or(false);
     let primary_pos = old_primary_cursor
         .map(|r| r.primary.index)
         .unwrap_or(primary_del_start);
-    let backward = if primary_del_start != primary_del_end {
+    let primary_del_len = primary_del_end - primary_del_start;
+    let backward = if primary_has_selection {
         true
     } else {
         primary_del_end == primary_pos && inserted.is_empty()
@@ -33606,12 +33609,22 @@ fn replicate_edit_to_extra_cursors(
         let (extra_del_start, extra_del_end) = if sel.start != sel.end {
             (sel.start, sel.end)
         } else if inserted.is_empty() {
-            // 纯删除（Backspace/Delete）：extra 无选区执行自己的键语义，只删 1 个字符，
-            // 不复制主光标的删除长度——主光标带长选区时避免 extra 误删整段文字
-            if backward {
-                (p.saturating_sub(1), p)
+            if primary_has_selection {
+                // 主光标带选区（整段删除）：extra 无选区执行自己的键语义，只删 1 个字符，
+                // 不复制主光标的删除长度——避免 extra 误删整段文字
+                if backward {
+                    (p.saturating_sub(1), p)
+                } else {
+                    (p, p + 1)
+                }
             } else {
-                (p, p + 1)
+                // 主光标无选区纯删除：extra 复制主光标的删除长度，向同一方向同步删除。
+                // 快速连续删除时主光标一帧删多个字符，extra 也删同样数量，避免"后面几排跟不上"
+                if backward {
+                    (p.saturating_sub(primary_del_len), p)
+                } else {
+                    (p, p + primary_del_len)
+                }
             }
         } else {
             // 替换输入：extra 无选区仅插入不删除
@@ -36102,5 +36115,105 @@ fn change_display_value(val: &str) -> String {
         "(empty)".to_string()
     } else {
         val.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cur(ccursor: usize) -> egui::text::CCursor {
+        egui::text::CCursor::new(ccursor)
+    }
+
+    fn one(ccursor: usize) -> egui::text::CCursorRange {
+        egui::text::CCursorRange::one(cur(ccursor))
+    }
+
+    fn two(min: usize, max: usize) -> egui::text::CCursorRange {
+        egui::text::CCursorRange::two(cur(min), cur(max))
+    }
+
+    fn repl(old: &str, primary: egui::text::CCursorRange, extras: Vec<usize>, del_start: usize, del_end: usize, inserted: &str)
+        -> (String, Option<usize>, Vec<usize>)
+    {
+        let mut cur_sql = old.to_string();
+        let mut extras_ranges: Vec<egui::text::CCursorRange> =
+            extras.iter().map(|&p| one(p)).collect();
+        let new_primary = replicate_edit_to_extra_cursors(
+            old,
+            &mut cur_sql,
+            Some(primary),
+            &mut extras_ranges,
+            del_start,
+            del_end,
+            inserted,
+        );
+        let new_primary_idx = new_primary.map(|r| r.primary.index);
+        let new_extras = extras_ranges.iter().map(|r| r.primary.index).collect();
+        (cur_sql, new_primary_idx, new_extras)
+    }
+
+    // ── 快速删除：一帧内主光标删多个字符，extra 无选区应复制主光标的删除长度与方向 ──
+
+    #[test]
+    fn rapid_forward_delete_replicates_full_length() {
+        // 主光标无选区在 pos 2，一帧 Delete 删 3 个字符 (2..5)="cde"；
+        // extra 无选区在 pos 7，应同步删 3 个字符 (7..10)="hij"，而非固定只删 1 个
+        let (sql, primary, extras) = repl("abcdefghij", one(2), vec![7], 2, 5, "");
+        assert_eq!(sql, "abfg");
+        assert_eq!(primary, Some(2));
+        assert_eq!(extras, vec![4]);
+    }
+
+    #[test]
+    fn rapid_backspace_replicates_full_length() {
+        // 主光标无选区在 pos 5，一帧 Backspace 删 3 个字符 (2..5)="cde"；
+        // extra 无选区在 pos 9，应同步删光标前 3 个字符 (6..9)="ghi"
+        let (sql, primary, extras) = repl("abcdefghij", one(5), vec![9], 2, 5, "");
+        assert_eq!(sql, "abfj");
+        assert_eq!(primary, Some(2));
+        assert_eq!(extras, vec![3]);
+    }
+
+    #[test]
+    fn single_forward_delete_replicates_one_after() {
+        // 单次 Delete：主光标 pos 2 删 1 字符 (2..3)='c'；extra 在 pos 7 应删光标后 1 个 'h'
+        let (sql, primary, extras) = repl("abcdefghij", one(2), vec![7], 2, 3, "");
+        assert_eq!(sql, "abdefgij");
+        assert_eq!(primary, Some(2));
+        assert_eq!(extras, vec![6]);
+    }
+
+    #[test]
+    fn single_backspace_replicates_one_before() {
+        // 单次 Backspace：主光标 pos 5 删 1 字符 (4..5)='e'；extra 在 pos 9 应删光标前 1 个 'i'
+        let (sql, primary, extras) = repl("abcdefghij", one(5), vec![9], 4, 5, "");
+        assert_eq!(sql, "abcdfghj");
+        assert_eq!(primary, Some(4));
+        assert_eq!(extras, vec![7]);
+    }
+
+    // ── 主光标带选区时：extra 无选区只删 1 个字符，不复制主光标的选区长度（C1 语义回归） ──
+
+    #[test]
+    fn primary_selection_extra_deletes_single_char() {
+        // 主光标有选区 (2..5)="cde" 按 Backspace 删除整段；extra 无选区在 pos 7
+        // 应只删光标前 1 个字符 'g'，不得误删 3 个字符
+        let (sql, primary, extras) = repl("abcdefghij", two(2, 5), vec![7], 2, 5, "");
+        assert_eq!(sql, "abfhij");
+        assert_eq!(primary, Some(2));
+        assert_eq!(extras, vec![3]);
+    }
+
+    #[test]
+    fn replacement_extra_only_inserts() {
+        // 替换输入：主光标 pos 2 插入 "XY"，extra 无选区在 pos 7 仅插入不删除。
+        // 主插入在 index 2 后 → "abXYcdefghij"；extra 原在 'h' 前（old index 7），
+        // 主插入后 'h' 移到 index 9，extra 在其前插入 → "abXYcdefgXYhij"
+        let (sql, primary, extras) = repl("abcdefghij", one(2), vec![7], 2, 2, "XY");
+        assert_eq!(sql, "abXYcdefgXYhij");
+        assert_eq!(primary, Some(4));
+        assert_eq!(extras, vec![11]);
     }
 }
