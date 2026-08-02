@@ -34583,7 +34583,7 @@ fn render_query_editor(
             .rect
             .width()
     });
-    let gutter_width = (gutter_text_width + 28.0).max(56.0);
+    let gutter_width = (gutter_text_width + 28.0 + 18.0).max(56.0 + 18.0);
     let gutter_row_height = row_height + QUERY_EDITOR_LINE_SPACING;
 
     // ── 查找/替换栏 ──
@@ -35345,7 +35345,7 @@ fn render_query_editor(
         let painter = ui.painter();
         let clip_painter = painter.with_clip_rect(gutter_rect);
         clip_painter.rect_filled(gutter_rect, 0.0, palette.gutter_bg);
-        let text_x = gutter_rect.right() - 6.0;
+        let text_x = gutter_rect.right() - 26.0;
         // 整个 gutter 统一一次分配用于交互检测，避免逐按钮 allocate_rect 导致抖动
         let gutter_resp = ui.allocate_rect(gutter_rect, egui::Sense::click());
         let pointer_pos = gutter_resp.hovered().then(|| ui.ctx().pointer_latest_pos()).flatten();
@@ -35381,6 +35381,39 @@ fn render_query_editor(
         let mut last_line: Option<usize> = None;
         let mut hover_stmt_line: Option<usize> = None;
         let mut clicked_stmt_line: Option<usize> = None;
+        let mut clicked_fold_line: Option<usize> = None;
+        // 折叠箭头：视觉行 → (候选 open_line, 是否已折叠)
+        // 仅显示"当前可见"的候选：嵌套折叠的内层被外层隐藏时不画箭头；
+        // 折叠压缩行号时，通过 fold_display 把候选首行 sql 索引换算到视觉行，
+        // 避免箭头画错位置（普通行、省略行均无箭头）。
+        let mut fold_arrows: HashMap<usize, (usize, bool)> = HashMap::new();
+        {
+            for c in &tab.fold_candidates {
+                let header_sql = crate::fold::char_line_start(&tab.sql, c.open_line);
+                // 首行起始 char 是否落在已折叠区域内（被外层折叠隐藏）
+                let hidden = tab
+                    .fold_display
+                    .as_ref()
+                    .is_some_and(|d| d.region_contains_sql_idx(header_sql));
+                if hidden {
+                    continue;
+                }
+                let is_folded = tab.folded.iter().any(|f| f.open_line == c.open_line);
+                let disp_header = tab
+                    .fold_display
+                    .as_ref()
+                    .map(|d| d.sql_to_display(header_sql))
+                    .unwrap_or(header_sql);
+                if let Some((&vl, _)) = gutter_line_offsets
+                    .iter()
+                    .filter(|(_, off)| **off <= disp_header)
+                    .max_by_key(|(_, off)| **off)
+                {
+                    // or_insert：同一视觉行多个候选时保留首个（与点击处理 find 一致）
+                    fold_arrows.entry(vl).or_insert((c.open_line, is_folded));
+                }
+            }
+        }
         for (center_y, line) in &gutter_rows {
             if last_line == Some(*line) {
                 continue;
@@ -35438,6 +35471,28 @@ fn render_query_editor(
                 FontId::new(fonts.code, FontFamily::Monospace),
                 if num_active { palette.line_number_active } else { palette.line_number },
             );
+            // 折叠箭头（行号右侧，贴 gutter 右缘）；交互由 gutter_resp 统一处理
+            if let Some(&(open_line, is_folded)) = fold_arrows.get(line) {
+                let fold_arrow_x = gutter_rect.right() - 14.0;
+                let arrow = if is_folded { "+" } else { "-" };
+                let arrow_color = if is_folded { palette.line_number_active } else { palette.line_number };
+                clip_painter.text(
+                    egui::pos2(fold_arrow_x, *center_y),
+                    Align2::CENTER_CENTER,
+                    arrow,
+                    FontId::new(fonts.code, FontFamily::Monospace),
+                    arrow_color,
+                );
+                let arrow_rect = egui::Rect::from_center_size(
+                    egui::pos2(fold_arrow_x, *center_y),
+                    egui::vec2(18.0, gutter_row_height),
+                );
+                if arrow_rect.contains(pointer_pos.unwrap_or(egui::pos2(-9999.0, -9999.0)))
+                    && gutter_resp.clicked()
+                {
+                    clicked_fold_line = Some(open_line);
+                }
+            }
         }
         // 统一处理点击（移到循环外避免 borrow 冲突）
         if let Some(line) = clicked_stmt_line {
@@ -35458,6 +35513,24 @@ fn render_query_editor(
                 if let Some(stmt) = find_statement_at_index(&tab.sql, sci) {
                     *action = TabUiAction::ExecuteQuery(ExecuteMode::Explicit(stmt));
                 }
+            }
+        }
+        // 折叠箭头点击：折叠/展开（只增删 tab.folded，不改 sql）
+        if let Some(line) = clicked_fold_line {
+            let candidate = tab.fold_candidates.iter().find(|c| c.open_line == line);
+            if let Some(c) = candidate {
+                let is_folded = tab.folded.iter().any(|f| f.open_line == line);
+                if is_folded {
+                    tab.folded.retain(|f| f.open_line != line);
+                } else {
+                    tab.folded.push(crate::fold::FoldRegion {
+                        open_line: c.open_line,
+                        content_hash: crate::fold::fold_content_hash(&tab.sql, c),
+                    });
+                }
+                tab.refresh_folds();
+                // 强制重建 display：sql 未变，需手动失效快照让下一帧 build_display
+                tab.fold_display_sql_snapshot.clear();
             }
         }
     }
