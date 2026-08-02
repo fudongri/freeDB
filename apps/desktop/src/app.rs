@@ -35885,7 +35885,7 @@ fn render_saved_queries_panel(
                                                 let insert_at = match before_id {
                                                     Some(bid) => {
                                                         let idx = group.iter().position(|e| e.id == bid).unwrap_or(group.len());
-                                                        if insert_after { idx + 1 } else { idx }
+                                                        (idx + usize::from(insert_after)).min(group.len())
                                                     }
                                                     None => group.len(),
                                                 };
@@ -36201,8 +36201,8 @@ fn render_query_row(
         });
         // 拖拽目标：查询行间重排（排除拖拽源行自身，避免 self-drop 静默移到末尾）
         if let Some((drag_source_id, _)) = &tab.saved_query_drag_source {
+            let ptr_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y));
             if drag_source_id != entry_id {
-                let ptr_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y));
                 if let Some(y) = ptr_y {
                     if y >= item_rect_center_y && y < item_rect_bottom {
                         ui.painter().hline(
@@ -36231,8 +36231,12 @@ fn render_query_row(
                     }
                 }
             } else {
-                // 拖拽源行自身不作为目标：清掉陈旧目标，避免 self-drop 误触发
-                tab.saved_query_drag_target = None;
+                // 仅当指针确实悬停在源行自身时才清空目标，避免覆盖更早渲染的上方行/节点目标
+                if let Some(y) = ptr_y {
+                    if y >= rect.top() && y < rect.bottom() {
+                        tab.saved_query_drag_target = None;
+                    }
+                }
             }
         }
     });
