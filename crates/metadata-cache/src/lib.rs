@@ -66,6 +66,17 @@ impl MetadataCache {
         if removed > 0 {
             tracing::info!(removed = removed, "已清理元数据缓存中的重复行");
         }
+        // 自愈：历史上 autocomplete 会把用户 SQL 里随意输入的表名（如 flow）
+        // 以空列形式缓存进来（columns_json IS NULL），且跨会话持久化导致智能提示
+        // 反复建议不存在的表名。启动时清掉所有无列条目——真实表的列缓存会随
+        // 连接树加载/表预览重新写回，无列表对智能提示没有价值。
+        let stale = conn.execute(
+            "DELETE FROM metadata_cache WHERE columns_json IS NULL",
+            [],
+        )?;
+        if stale > 0 {
+            tracing::info!(stale = stale, "已清理元数据缓存中的无列表条目");
+        }
         Ok(())
     }
 
@@ -224,7 +235,9 @@ mod tests {
     }
 
     /// 模拟老用户升级：旧版本已累积大量重复行（schema 为 NULL 的 MySQL 连接），
-    /// 重新构造 MetadataCache（等价于应用重启）时应自动去重，无需依赖连接名。
+    /// 重新构造 MetadataCache（等价于应用重启）时应自动清理。
+    /// 历史版本把 autocomplete 从用户 SQL 解析出的表名以空列（columns_json IS NULL）形式
+    /// 缓存进来，init 会删除所有无列条目——因此该场景清理后应为 0 条。
     #[test]
     fn init_self_heals_legacy_duplicates_for_any_connection() {
         let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
@@ -256,7 +269,39 @@ mod tests {
         // 构造 MetadataCache 触发 init 自愈
         let cache = MetadataCache::new(conn).unwrap();
         let loaded = cache.load_for_connection("conn-any").unwrap();
-        assert_eq!(loaded.len(), 1, "启动时应自动清理历史重复行");
-        assert_eq!(loaded[0].table, "users");
+        assert_eq!(loaded.len(), 0, "启动时应清理所有无列表条目");
+    }
+
+    /// 有列缓存的行不受 Fix B 清理影响，去重逻辑仍应保留最新一条。
+    #[test]
+    fn init_dedups_rows_with_columns() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        {
+            let c = conn.lock();
+            c.execute_batch(
+                "CREATE TABLE metadata_cache (
+                    connection_id TEXT NOT NULL,
+                    database_name TEXT,
+                    schema_name   TEXT,
+                    table_name    TEXT NOT NULL,
+                    is_view       INTEGER NOT NULL DEFAULT 0,
+                    columns_json  TEXT,
+                    updated_at    TEXT NOT NULL,
+                    PRIMARY KEY (connection_id, database_name, schema_name, table_name)
+                );",
+            )
+            .unwrap();
+            for i in 0..10 {
+                c.execute(
+                    "INSERT INTO metadata_cache (connection_id, database_name, schema_name, table_name, is_view, columns_json, updated_at)
+                     VALUES ('conn-any', 'mydb', NULL, 'users', 0, '[{\"name\":\"id\"}]', ?1)",
+                    [format!("2026-01-0{}T00:00:00+00:00", i % 9 + 1)],
+                )
+                .unwrap();
+            }
+        }
+        let cache = MetadataCache::new(conn).unwrap();
+        let loaded = cache.load_for_connection("conn-any").unwrap();
+        assert_eq!(loaded.len(), 1, "有列重复行去重后应保留最新一条");
     }
 }

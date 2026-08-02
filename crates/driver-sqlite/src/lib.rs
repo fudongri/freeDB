@@ -191,6 +191,7 @@ impl DatabaseDriver for SqliteDriver {
     ) -> AppResult<TableDefinition> {
         let conn = sqlite_conn(handle)?;
         let table_name = table.table.clone();
+        let table_name_for_error = table_name.clone();
         let (cols, uniq_sqls, create_sql) = run_blocking(conn, move |c| {
             // 列信息：PRAGMA table_info → (name, type, notnull, dflt_value, pk)
             let mut stmt = c.prepare(&format!("PRAGMA table_info({})", quote_ident(&table_name)))?;
@@ -247,6 +248,12 @@ impl DatabaseDriver for SqliteDriver {
             Ok((cols, uniq_sqls, create_sql))
         })
         .await?;
+
+        // 表不存在时 PRAGMA table_info 和 sqlite_master 都返回空，但上面闭包会正常返回 Ok。
+        // 用 create_sql 是否存在校验表/视图，避免把用户 SQL 里随意输入的表名缓存进智能提示。
+        if create_sql.is_none() {
+            return Err(AppError::NotFound(format!("table {} not found", table_name_for_error)));
+        }
 
         let unique_col_names = collect_unique_columns(&uniq_sqls);
         let columns = cols

@@ -271,6 +271,28 @@ impl SchemaCache {
             .unwrap_or(false)
     }
 
+    /// 判断表是否已由连接树/元数据缓存确认存在，而非用户 SQL 里随意输入的未知名称。
+    /// 智能提示只在确认存在的表上加载列，未知表名静默跳过，避免每次输入
+    /// 都触发数据库查询并对不存在的表报错。
+    pub fn is_known_table(&self, schema: Option<&str>, database: Option<&str>, table: &str) -> bool {
+        if self.columns_for_table(table).is_some() {
+            return true;
+        }
+        if let Some(schema) = schema {
+            return self
+                .tables_for_schema(schema)
+                .map(|tables| tables.iter().any(|t| t == table))
+                .unwrap_or(false);
+        }
+        if let Some(database) = database {
+            return self
+                .tables_for_database(database)
+                .map(|tables| tables.iter().any(|t| t == table))
+                .unwrap_or(false);
+        }
+        self.tables.contains_key(table)
+    }
+
     /// Number of tables with cached column definitions.
     pub fn tables_with_columns_count(&self) -> usize {
         self.tables
@@ -1368,18 +1390,9 @@ impl AutocompleteEngine {
                     }
                 }
                 if suggestions.is_empty() {
+                    let mut seen = std::collections::HashSet::new();
                     for (table_name, (_is_view, cols)) in &cache.tables {
-                        for col in cols {
-                            suggestions.push(AutocompleteSuggestion {
-                                label: col.name.clone(),
-                                kind: SuggestionKind::Column {
-                                    parent_table: table_name.clone(),
-                                },
-                                matched_indices: vec![],
-                                insertion_text: None,
-                                cursor_offset: None,
-                            });
-                        }
+                        push_deduped_columns(&mut suggestions, table_name, cols, &mut seen);
                     }
                 }
             }
@@ -1407,18 +1420,9 @@ impl AutocompleteEngine {
                         }
                     }
                 } else {
+                    let mut seen = std::collections::HashSet::new();
                     for (table_name, (_is_view, cols)) in &cache.tables {
-                        for col in cols {
-                            suggestions.push(AutocompleteSuggestion {
-                                label: col.name.clone(),
-                                kind: SuggestionKind::Column {
-                                    parent_table: table_name.clone(),
-                                },
-                                matched_indices: vec![],
-                                insertion_text: None,
-                                cursor_offset: None,
-                            });
-                        }
+                        push_deduped_columns(&mut suggestions, table_name, cols, &mut seen);
                     }
                 }
                 if !prefix.is_empty() {
@@ -1488,18 +1492,9 @@ impl AutocompleteEngine {
                         cursor_offset: None,
                     });
                 }
+                let mut seen = std::collections::HashSet::new();
                 for (table_name, (_is_view, cols)) in &cache.tables {
-                    for col in cols {
-                        suggestions.push(AutocompleteSuggestion {
-                            label: col.name.clone(),
-                            kind: SuggestionKind::Column {
-                                parent_table: table_name.clone(),
-                            },
-                            matched_indices: vec![],
-                            insertion_text: None,
-                            cursor_offset: None,
-                        });
-                    }
+                    push_deduped_columns(&mut suggestions, table_name, cols, &mut seen);
                 }
                 Self::push_function_snippets(&mut suggestions, &context, db_kind);
             }
@@ -1833,6 +1828,32 @@ fn lookup_columns_for_table<'a>(
     cache
         .columns_for_table(table)
         .or_else(|| table.rsplit('.').next().and_then(|short| cache.columns_for_table(short)))
+}
+
+/// 同一物理表可能以多个缓存键存储（裸表名、`db.table`、`schema.table`），
+/// 遍历所有键会把同一列名贡献多次。按（表短名, 列名）对建议去重，
+/// 只保留第一条，避免提示框里同一个字段重复出现。
+fn push_deduped_columns(
+    suggestions: &mut Vec<AutocompleteSuggestion>,
+    table_name: &str,
+    cols: &[ColumnDefinition],
+    seen: &mut std::collections::HashSet<(String, String)>,
+) {
+    let short = table_name.rsplit('.').next().unwrap_or(table_name);
+    for col in cols {
+        let key = (short.to_string(), col.name.clone());
+        if seen.insert(key) {
+            suggestions.push(AutocompleteSuggestion {
+                label: col.name.clone(),
+                kind: SuggestionKind::Column {
+                    parent_table: table_name.to_string(),
+                },
+                matched_indices: vec![],
+                insertion_text: None,
+                cursor_offset: None,
+            });
+        }
+    }
 }
 
 const COMMON_SQL_FUNCTION_SNIPPETS: &[(&str, &str, usize)] = &[
@@ -2298,6 +2319,76 @@ mod tests {
             }
         }
         cache
+    }
+
+    /// 复现：同一物理表的列通过多个缓存键（裸表名 + `db.table`）各存一份，
+    /// SelectClause 上下文下同一列名会重复出现。
+    #[test]
+    fn select_clause_dedups_columns_across_multiple_cache_keys() {
+        let mut cache = SchemaCache::new();
+        for (name, cols) in [("users", &["name"][..]), ("mydb.users", &["name"][..])] {
+            cache.add_table(name.to_string(), false);
+            cache.add_columns(
+                name.to_string(),
+                cols.iter()
+                    .map(|c| ColumnDefinition {
+                        name: c.to_string(),
+                        data_type: "text".into(),
+                        nullable: true,
+                        primary_key: false,
+                        unique: false,
+                        auto_increment: false,
+                        on_update_current_timestamp: false,
+                        default_value: None,
+                        comment: None,
+                    })
+                    .collect(),
+            );
+        }
+        let suggestions = AutocompleteEngine::suggest("SELECT na", 9, &cache, None, None, None);
+        let name_cols: Vec<&AutocompleteSuggestion> = suggestions
+            .iter()
+            .filter(|s| matches!(s.kind, SuggestionKind::Column { .. }) && s.label == "name")
+            .collect();
+        assert_eq!(
+            name_cols.len(),
+            1,
+            "同一列名在多缓存键下不应重复，实际 {} 次：{:?}",
+            name_cols.len(),
+            suggestions
+                .iter()
+                .filter(|s| s.label == "name")
+                .map(|s| &s.kind)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// 智能提示只应加载连接树确认存在的表的列；用户 SQL 里随意输入的
+    /// 未知表名（未打完的表名、schema 名当裸表名）应被识别为未知并跳过。
+    #[test]
+    fn is_known_table_guards_unknown_names() {
+        let mut cache = SchemaCache::new();
+        // 模拟连接树加载：schema ods 下的表 flow，db mydb 下的表 users
+        cache.add_table("flow".to_string(), false);
+        cache.add_table_to_schema("ods", "flow".to_string(), false);
+        cache.add_table("users".to_string(), false);
+        cache.add_table_to_database("mydb", "users".to_string(), false);
+
+        // 已知表：schema 匹配放行
+        assert!(cache.is_known_table(Some("ods"), None, "flow"));
+        // 已知表：database 匹配放行
+        assert!(cache.is_known_table(None, Some("mydb"), "users"));
+        // 已知表：裸表名在 tables 中
+        assert!(cache.is_known_table(None, None, "flow"));
+        // 未知：schema 里没这个表
+        assert!(!cache.is_known_table(Some("ods"), None, "flowx"));
+        // 未知：schema 不存在
+        assert!(!cache.is_known_table(Some("unknown_schema"), None, "flow"));
+        // 未知：database 里没这个表
+        assert!(!cache.is_known_table(None, Some("mydb"), "nope"));
+        // 未知：裸表名（用户输入 schema 名或乱输表名）不在缓存
+        assert!(!cache.is_known_table(None, None, "ods_ng_plutus_all"));
+        assert!(!cache.is_known_table(None, None, "flowx"));
     }
 
     #[test]

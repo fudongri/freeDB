@@ -2112,14 +2112,6 @@ impl DesktopApp {
             }
             if !entry.columns.is_empty() {
                 self.schema_cache.add_columns(entry.table.clone(), entry.columns.clone());
-                if let Some(ref db) = entry.database {
-                    self.schema_cache
-                        .add_columns(format!("{}.{}", db, entry.table), entry.columns.clone());
-                }
-                if let Some(ref schema) = entry.schema {
-                    self.schema_cache
-                        .add_columns(format!("{}.{}", schema, entry.table), entry.columns.clone());
-                }
             }
         }
     }
@@ -2148,18 +2140,12 @@ impl DesktopApp {
                 .add_database(&table_ref.connection_id, db.clone());
             self.schema_cache
                 .add_table_to_database(db, table_ref.table.clone(), is_view);
-            self.schema_cache
-                .add_columns(format!("{}.{}", db, table_ref.table), definition.columns.clone());
         }
         if let Some(ref schema) = table_ref.schema {
             self.schema_cache
                 .add_schema(&table_ref.connection_id, schema.clone());
             self.schema_cache
                 .add_table_to_schema(schema, table_ref.table.clone(), is_view);
-            self.schema_cache.add_columns(
-                format!("{}.{}", schema, table_ref.table),
-                definition.columns.clone(),
-            );
         }
         self.services.merge_metadata_cache(
             &table_ref.connection_id,
@@ -2207,6 +2193,19 @@ impl DesktopApp {
         ) else {
             return;
         };
+        // 只对连接树/元数据缓存确认存在的表加载列。用户输入过程中的未知表名
+        // （未打完的表名、schema 名当裸表名等）静默跳过，避免每次输入都触发
+        // 数据库查询并对不存在的表报错、把连接标为失败。
+        if !self
+            .schema_cache
+            .is_known_table(
+                table_ref.schema.as_deref(),
+                table_ref.database.as_deref(),
+                &table_ref.table,
+            )
+        {
+            return;
+        }
         if self.schema_cache.columns_for_table(&table_ref.table).is_some() {
             return;
         }

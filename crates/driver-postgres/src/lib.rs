@@ -277,6 +277,20 @@ impl DatabaseDriver for PostgresDriver {
             )
             .await
             .map_err(map_pg_error)?;
+        // 表不存在时 information_schema.columns 返回空，仍会走到这里。
+        // 校验表存在性，避免把用户 SQL 里随意输入的表名缓存进智能提示。
+        if rows.is_empty() {
+            let exists = client
+                .query_opt(
+                    "SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
+                    &[&schema, &table.table],
+                )
+                .await
+                .map_err(map_pg_error)?;
+            if exists.is_none() {
+                return Err(AppError::NotFound(format!("table {} not found", table.table)));
+            }
+        }
         let columns = rows
             .into_iter()
             .map(|row| {

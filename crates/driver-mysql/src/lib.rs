@@ -182,6 +182,21 @@ impl DatabaseDriver for MySqlDriver {
             escape_mysql_literal(&table.table),
         );
         let rows: Vec<Row> = conn.query(sql).await.map_err(map_mysql_error)?;
+        // 表不存在时 INFORMATION_SCHEMA.COLUMNS 返回空，仍会走到这里。
+        // 校验表存在性，避免把用户 SQL 里随意输入的表名缓存进智能提示。
+        if rows.is_empty() {
+            let exists_rows: Vec<Row> = conn
+                .query(format!(
+                    "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}' LIMIT 1",
+                    escape_mysql_literal(db),
+                    escape_mysql_literal(&table.table),
+                ))
+                .await
+                .map_err(map_mysql_error)?;
+            if exists_rows.is_empty() {
+                return Err(AppError::NotFound(format!("table {} not found", table.table)));
+            }
+        }
         let columns = rows
             .into_iter()
             .map(|row| {
