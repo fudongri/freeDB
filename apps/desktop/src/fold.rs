@@ -83,10 +83,11 @@ pub fn fold_content_hash(sql: &str, c: &FoldCandidate) -> u64 {
 }
 
 /// char 索引 → 1-based 行号。换行符计入其后的行：char_index 处为换行符时归属下一行。
+/// 参数为 char index，迭代用 `chars().enumerate()` 保持 char 语义（不得用 byte 位置比较）。
 pub fn line_of_char(sql: &str, char_index: usize) -> usize {
     let mut line = 1usize;
-    for (i, ch) in sql.char_indices() {
-        if i > char_index {
+    for (ci, ch) in sql.chars().enumerate() {
+        if ci > char_index {
             break;
         }
         if ch == '\n' {
@@ -99,17 +100,19 @@ pub fn line_of_char(sql: &str, char_index: usize) -> usize {
 /// 1-based 行号 → 该行首个字符的 char 索引。
 /// 换行归属约定与 line_of_char 一致：字符串中最后一个换行符归属其后的行（作为该行起始）；
 /// 其余换行符终止当前行，下一行从其后的字符开始。
+/// 返回值是 char index（egui CCursor 契约），迭代用 `char_indices().enumerate()` 同时拿
+/// (char_idx, (byte_idx, ch))：换行计数与 last_nl 比较用 byte 位置，输出用 char 位置。
 pub fn char_line_start(sql: &str, line: usize) -> usize {
     let last_nl = sql.rfind('\n');
     let mut cur = 1usize;
     let mut start = 0usize;
-    for (i, ch) in sql.char_indices() {
+    for (ci, (byte_i, ch)) in sql.char_indices().enumerate() {
         if cur == line {
             break;
         }
         if ch == '\n' {
             cur += 1;
-            start = if last_nl == Some(i) { i } else { i + 1 };
+            start = if last_nl == Some(byte_i) { ci } else { ci + 1 };
         }
     }
     start
@@ -299,6 +302,29 @@ mod tests {
         assert_eq!(line_of_char(sql, 5), 3);
         assert_eq!(char_line_start(sql, 2), 3);
         assert_eq!(char_line_start(sql, 3), 5);
+    }
+
+    // ── 遗留多字节回归：line_of_char / char_line_start 的 char/byte 索引混淆 ──
+
+    #[test]
+    fn line_of_char_multibyte_before_open() {
+        // 开括号前有多字节字符（emoji）：line_of_char 应返回正确行号
+        // '😀'(0) 'f'(1) '('(2) '\n'(3) 空格(4) 空格(5) 'b'(6) 'a'(7) 'r'(8) '\n'(9) ')'(10)
+        let sql = "😀f(\n  bar\n)";
+        // `(` 的 char index 是 2（'😀' 1 个 char、'f' 1 个 char、'(' 1 个 char），在第 1 行
+        assert_eq!(line_of_char(sql, 2), 1);
+        // 多字节前导使旧实现 byte 位置 3 > char_index 2 提前 break：
+        // 对紧跟其后的换行符（char 3）旧实现少计换行、返回 1，正确应归属第 2 行
+        assert_eq!(line_of_char(sql, 3), 2);
+    }
+
+    #[test]
+    fn char_line_start_multibyte_returns_char_index() {
+        // 首行含多字节字符：char_line_start 返回 char index 而非 byte 位置
+        let sql = "中\nf(\nbar\n)";
+        // 第 2 行首字符 'f' 的 char index：'中'(0) '\n'(1) → 第 2 行从 char 2 开始
+        assert_eq!(char_line_start(sql, 2), 2);
+        // 旧实现返回 'f' 的 byte 位置 4（'中' 占 3 字节）；修复后必须为 char index
     }
 
     #[test]
