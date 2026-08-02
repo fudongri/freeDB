@@ -35576,6 +35576,14 @@ fn render_query_editor(
                 tab.refresh_folds();
                 // 强制重建 display：sql 未变，需手动失效快照让下一帧 build_display
                 tab.fold_display_sql_snapshot.clear();
+                // 清空 undoer：egui 撤销快照存的是 display 文本，折叠/展开改变 display 结构后
+                // 旧快照与新的 display 不匹配，undo 会把含 … 的折叠态文本写回 sql（内容被破坏）。
+                // 折叠是视图操作，清空编辑撤销链让 undo 从当前折叠结构重新开始。
+                let editor_id = egui::Id::from(format!("query-editor-{}", tab.id));
+                if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
+                    state.clear_undoer();
+                    state.store(ui.ctx(), editor_id);
+                }
             }
         }
     }
