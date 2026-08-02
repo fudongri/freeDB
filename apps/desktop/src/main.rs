@@ -4,6 +4,7 @@ mod app;
 mod autocomplete;
 mod fold;
 mod icon;
+mod saved_query_tree;
 
 use app::DesktopApp;
 use app_services::AppServices;
