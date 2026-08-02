@@ -35352,10 +35352,16 @@ fn render_query_editor(
         // 计算所有语句起始位置
         let stmt_starts = find_all_statement_starts(&tab.sql);
         // 语句起始字符索引 → visual_line 映射
+        // 折叠时 gutter_line_offsets 是 display 空间，sci 是 sql 空间，需先换算
         let mut stmt_line_map: HashMap<usize, usize> = HashMap::new();
         for &sci in &stmt_starts {
+            let disp_sci = if let Some(d) = &tab.fold_display {
+                d.sql_to_display(sci)
+            } else {
+                sci
+            };
             if let Some((&vl, _)) = gutter_line_offsets.iter()
-                .filter(|(_, off)| **off <= sci)
+                .filter(|(_, off)| **off <= disp_sci)
                 .max_by_key(|(_, off)| **off)
             {
                 stmt_line_map.insert(sci, vl);
