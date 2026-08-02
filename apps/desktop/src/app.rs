@@ -29476,6 +29476,7 @@ fn render_editor_find_bar(
     tab: &mut QueryTabState,
     colors: &ui_theme::ThemeColors,
     fonts: &ui_theme::FontSizes,
+    display_text: Option<&str>,
 ) {
     let chrome = mac_ui_palette_from_ui(ui);
     let frame_response = egui::Frame::new()
@@ -29503,13 +29504,13 @@ fn render_editor_find_bar(
                             tab.find.regex_pending = true;
                             tab.find.regex_debounce_frame = 0;
                         } else {
-                            tab.find.recompute(&tab.sql);
+                            tab.find.recompute(display_text.unwrap_or(&tab.sql));
                         }
                     }
                     // Enter/Shift+Enter 导航（输入框内）
                     if find_response.lost_focus() && !tab.find.find_text.is_empty() {
                         if tab.find.use_regex && tab.find.regex_pending {
-                            tab.find.recompute(&tab.sql);
+                            tab.find.recompute(display_text.unwrap_or(&tab.sql));
                             tab.find.regex_pending = false;
                         }
                         let shift = ui.input(|i| i.modifiers.shift);
@@ -29569,7 +29570,7 @@ fn render_editor_find_bar(
                         .clicked()
                     {
                         tab.find.case_sensitive = !tab.find.case_sensitive;
-                        tab.find.recompute(&tab.sql);
+                        tab.find.recompute(display_text.unwrap_or(&tab.sql));
                     }
 
                     // 正则开关
@@ -29588,7 +29589,7 @@ fn render_editor_find_bar(
                         .clicked()
                     {
                         tab.find.use_regex = !tab.find.use_regex;
-                        tab.find.recompute(&tab.sql);
+                        tab.find.recompute(display_text.unwrap_or(&tab.sql));
                     }
 
                     // 展开/收起替换
@@ -29628,9 +29629,10 @@ fn render_editor_find_bar(
                         ui.add(te);
                         ui.add_space(4.0);
 
-                        // 替换当前
+                        // 替换当前（折叠存在时匹配基于显示文本，禁用替换以防错位）
+                        let replace_enabled = !tab.find.matches.is_empty() && display_text.is_none();
                         if ui
-                            .add_enabled(!tab.find.matches.is_empty(), egui::Button::new(tr!("替换")).min_size(egui::vec2(40.0, 20.0)))
+                            .add_enabled(replace_enabled, egui::Button::new(tr!("替换")).min_size(egui::vec2(40.0, 20.0)))
                             .clicked()
                         {
                             if let Some(new_sql) = tab.find.replace(&tab.sql) {
@@ -29640,7 +29642,7 @@ fn render_editor_find_bar(
                         }
                         // 全部替换
                         if ui
-                            .add_enabled(!tab.find.matches.is_empty(), egui::Button::new(tr!("全部替换")).min_size(egui::vec2(56.0, 20.0)))
+                            .add_enabled(replace_enabled, egui::Button::new(tr!("全部替换")).min_size(egui::vec2(56.0, 20.0)))
                             .clicked()
                         {
                             if let Some(new_sql) = tab.find.replace_all(&tab.sql) {
@@ -34509,9 +34511,65 @@ fn render_query_editor(
     autocomplete_usage: &mut AutocompleteUsageMemory,
     loading_autocomplete_columns: &HashSet<String>,
 ) {
+    // ── 折叠：刷新候选 + 渲染前安全展开 + 构造显示文本 ──
+    tab.refresh_folds();
+
+    // 渲染前安全展开：光标/选区/额外光标命中折叠区 → 移除对应折叠
+    {
+        let fold_hit_indices: Option<Vec<usize>> = tab.fold_display.as_ref().map(|d| {
+            let hit = |idx: usize| d.region_contains_sql_idx(idx);
+            let cursor_hits = tab
+                .cursor_range
+                .map(|r| hit(r.primary.index) || hit(r.secondary.index))
+                .unwrap_or(false);
+            // extra_cursors 为 display 空间，换算回 sql 空间再判命中
+            let extra_hits = tab.extra_cursors.iter().any(|c| {
+                let p = d.display_to_sql(c.primary.index);
+                let s = d.display_to_sql(c.secondary.index);
+                hit(p) || hit(s)
+            });
+            if cursor_hits || extra_hits {
+                let mut to_remove: Vec<usize> = Vec::new();
+                for (i, f) in tab.folded.iter().enumerate() {
+                    let c = tab.fold_candidates.iter().find(|c| {
+                        c.open_line == f.open_line
+                            && crate::fold::fold_content_hash(&tab.sql, c) == f.content_hash
+                    });
+                    if let Some(c) = c {
+                        if hit(c.hide_start) || hit(c.hide_end.saturating_sub(1)) {
+                            to_remove.push(i);
+                        }
+                    }
+                }
+                Some(to_remove)
+            } else {
+                None
+            }
+        }).flatten();
+        if let Some(indices) = fold_hit_indices {
+            for &i in indices.iter().rev() {
+                tab.folded.remove(i);
+            }
+            tab.refresh_folds();
+            // 强制重建 display（sql 未变，需手动失效快照）
+            tab.fold_display_sql_snapshot.clear();
+        }
+    }
+
+    // 构造显示文本并缓存：快照与 sql 不一致时重建
+    if tab.fold_display_sql_snapshot != tab.sql {
+        tab.fold_display = crate::fold::build_display(&tab.sql, &tab.folded, &tab.fold_candidates);
+        tab.fold_display_sql_snapshot = tab.sql.clone();
+    }
+    let has_folds = tab.fold_display.is_some();
+
     let font_id = FontId::new(fonts.code, FontFamily::Monospace);
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
-    let logical_line_count = tab.sql.split('\n').count().max(1);
+    let logical_line_count = tab
+        .fold_display
+        .as_ref()
+        .map(|d| d.text.split('\n').count().max(1))
+        .unwrap_or_else(|| tab.sql.split('\n').count().max(1));
     let gutter_digits = logical_line_count.to_string().len().max(2);
     let gutter_sample = "9".repeat(gutter_digits);
     let gutter_text_width = ui.fonts_mut(|fonts| {
@@ -34536,7 +34594,13 @@ fn render_query_editor(
             egui::vec2(ui.available_width(), bar_h),
         );
         ui.allocate_ui_at_rect(bar_rect, |ui| {
-            render_editor_find_bar(ui, tab, colors, fonts);
+            // 折叠存在时查找基于显示文本（独立 clone，避免 &mut tab 冲突）
+            let find_bar_display = if has_folds {
+                tab.fold_display.as_ref().map(|d| d.text.clone())
+            } else {
+                None
+            };
+            render_editor_find_bar(ui, tab, colors, fonts, find_bar_display.as_deref());
         });
         bar_h + 4.0
     } else {
@@ -34546,20 +34610,46 @@ fn render_query_editor(
     let remaining_editor_height = (editor_inner_height - find_bar_height).max(40.0);
 
     // If find is open, recompute matches when sql changes (skip live regex recompute)
+    // 折叠存在时基于显示文本计算匹配，避免匹配落在被折叠的隐藏内容里
     if tab.find.open && !tab.find.find_text.is_empty() {
         if tab.find.use_regex && tab.find.regex_pending {
             tab.find.regex_debounce_frame += 1;
             if tab.find.regex_debounce_frame >= 15 {
-                tab.find.recompute(&tab.sql);
+                if let Some(d) = &tab.fold_display {
+                    tab.find.recompute(&d.text);
+                } else {
+                    tab.find.recompute(&tab.sql);
+                }
                 tab.find.regex_pending = false;
             }
-        } else if (tab.find.matches.is_empty() || tab.find.last_sql != tab.sql) && !tab.find.use_regex {
-            tab.find.recompute(&tab.sql);
+        } else if !tab.find.use_regex {
+            let changed = if let Some(d) = &tab.fold_display {
+                tab.find.matches.is_empty() || tab.find.last_sql != d.text
+            } else {
+                tab.find.matches.is_empty() || tab.find.last_sql != tab.sql
+            };
+            if changed {
+                if let Some(d) = &tab.fold_display {
+                    tab.find.recompute(&d.text);
+                } else {
+                    tab.find.recompute(&tab.sql);
+                }
+            }
         }
     }
 
-    let current_line =
-        current_line_number(&tab.sql, tab.cursor_range);
+    let current_line = if let Some(d) = &tab.fold_display {
+        let display_text = d.text.as_str();
+        let display_cursor = tab.cursor_range.map(|r| {
+            egui::text::CCursorRange::two(
+                egui::text::CCursor::new(d.sql_to_display(r.secondary.index)),
+                egui::text::CCursor::new(d.sql_to_display(r.primary.index)),
+            )
+        });
+        current_line_number(display_text, display_cursor)
+    } else {
+        current_line_number(&tab.sql, tab.cursor_range)
+    };
 
     // 查找高亮在 TextEdit 之后绘制，当前命中使用 IntelliJ 风格的蓝底浅描边
     let match_bg = colors.search_match_bg;
@@ -34618,12 +34708,31 @@ fn render_query_editor(
                         let saved_cursor = tab.cursor_range;
                         // For multi-cursor edit replication: snapshot before TextEdit processes input.
                         // Clone sql BEFORE giving a &mut to TextEdit (avoids borrow conflict).
-                        let old_sql_for_replication = if !tab.extra_cursors.is_empty() {
+                        // 折叠存在时禁用多光标复制（display 空间的复制会错位），见 task-5 计划说明
+                        let old_sql_for_replication = if !tab.extra_cursors.is_empty() && !has_folds {
                             Some(tab.sql.clone())
                         } else {
                             None
                         };
                         let old_cursor_for_replication = tab.cursor_range;
+
+                        // 帧首构造编辑器 buffer：有折叠绑定显示文本（帧末回写），无折叠直接绑定 sql
+                        let mut editor_buf: String = tab
+                            .fold_display
+                            .as_ref()
+                            .map(|d| d.text.clone())
+                            .unwrap_or_default();
+                        // TextEdit 内部 state 光标始终为 display 空间；无折叠时二者相同
+                        let saved_cursor_display = if let Some(d) = &tab.fold_display {
+                            saved_cursor.map(|r| {
+                                egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(d.sql_to_display(r.secondary.index)),
+                                    egui::text::CCursor::new(d.sql_to_display(r.primary.index)),
+                                )
+                            })
+                        } else {
+                            saved_cursor
+                        };
                         let editor_id = egui::Id::from(format!("query-editor-{}", tab.id));
 
                         // Detect Option+primary interaction BEFORE TextEdit consumes events.
@@ -34648,12 +34757,18 @@ fn render_query_editor(
 
                             // Pre-show: restore internal cursor state to prevent drift.
                             if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
-                                state.cursor.set_char_range(saved_cursor);
+                                state.cursor.set_char_range(saved_cursor_display);
                                 state.store(ui.ctx(), editor_id);
                             }
                         }
 
-                        let te = TextEdit::multiline(&mut tab.sql)
+                        // 折叠存在时绑定局部 editor_buf（帧末回写），否则直接绑定 tab.sql（无折叠路径行为不变）
+                        let mut te = if has_folds {
+                            TextEdit::multiline(&mut editor_buf)
+                        } else {
+                            TextEdit::multiline(&mut tab.sql)
+                        };
+                        te = te
                             .id(editor_id)
                             .code_editor()
                             .font(FontId::new(fonts.code, FontFamily::Monospace))
@@ -34672,11 +34787,56 @@ fn render_query_editor(
                         if option_interacting {
                             output.cursor_range = saved_cursor;
                             if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
-                                state.cursor.set_char_range(saved_cursor);
+                                state.cursor.set_char_range(saved_cursor_display);
                                 state.store(ui.ctx(), editor_id);
                             }
                         }
 
+                        // 帧末回写：display 编辑 → tab.sql（折叠存在时）。
+                        // 先在借用范围内计算出 sql 空间编辑，再结束借用后写回。
+                        if has_folds {
+                            let sql_edit: Option<(usize, usize, String)> =
+                                tab.fold_display.as_ref().and_then(|d| {
+                                    if editor_buf != d.text {
+                                        find_edit_with_cursor(&d.text, &editor_buf, None).map(
+                                            |(dd, de, ins)| {
+                                                crate::fold::map_display_edit_to_sql(
+                                                    d, &tab.sql, dd, de, &ins,
+                                                )
+                                            },
+                                        )
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some((sd, se, s_ins)) = sql_edit {
+                                // map 返回 sql char 索引；(0,0,"") 表示编辑触及折叠区，忽略等待安全展开
+                                if !(s_ins.is_empty() && sd == 0 && se == 0) {
+                                    let max = tab.sql.chars().count();
+                                    let sd = sd.min(max);
+                                    let se = se.min(max);
+                                    let mut new_sql: Vec<char> = tab.sql.chars().collect();
+                                    let ins_chars: Vec<char> = s_ins.chars().collect();
+                                    new_sql.splice(sd..se, ins_chars.iter().cloned());
+                                    tab.sql = new_sql.into_iter().collect();
+                                    tab.refresh_folds();
+                                    tab.fold_display_sql_snapshot.clear();
+                                }
+                            }
+                        }
+
+                        // 光标换算回 sql 坐标（output.cursor_range 为 display 空间；
+                        // option_interacting 时已整体覆盖为 sql 空间的 saved_cursor）
+                        if !option_interacting {
+                            if let Some(d) = &tab.fold_display {
+                                output.cursor_range = output.cursor_range.map(|r| {
+                                    egui::text::CCursorRange::two(
+                                        egui::text::CCursor::new(d.display_to_sql(r.secondary.index)),
+                                        egui::text::CCursor::new(d.display_to_sql(r.primary.index)),
+                                    )
+                                });
+                            }
+                        }
                         tab.cursor_range = output.cursor_range;
 
                         // 右键点击时：若点击位置在已选区域内则保留选择，否则移动光标
@@ -34684,6 +34844,12 @@ fn render_query_editor(
                             if let Some(pointer_pos) = ui.input(|i| i.pointer.latest_pos()) {
                                 let galley_local = pointer_pos - output.galley_pos;
                                 let ccursor = output.galley.cursor_from_pos(galley_local);
+                                // ccursor 为 display 空间；tab.cursor_range 为 sql 空间，换算后比较
+                                let ccursor_sql = if let Some(d) = &tab.fold_display {
+                                    egui::text::CCursor::new(d.display_to_sql(ccursor.index))
+                                } else {
+                                    ccursor
+                                };
                                 let current_range = tab.cursor_range;
                                 let click_in_selection = current_range.is_some_and(|r| {
                                     !r.is_empty() && {
@@ -34692,23 +34858,44 @@ fn render_query_editor(
                                         } else {
                                             (r.secondary.index, r.primary.index)
                                         };
-                                        ccursor.index >= start && ccursor.index <= end
+                                        ccursor_sql.index >= start && ccursor_sql.index <= end
                                     }
                                 });
                                 if !click_in_selection {
                                     let new_range = egui::text::CCursorRange::one(ccursor);
+                                    // TextEdit state 保持 display 空间
                                     if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
                                         state.cursor.set_char_range(Some(new_range));
                                         state.store(ui.ctx(), editor_id);
                                     }
-                                    tab.cursor_range = Some(new_range);
+                                    // tab.cursor_range 存 sql 空间
+                                    if let Some(d) = &tab.fold_display {
+                                        let new_sql_range = egui::text::CCursorRange::one(
+                                            egui::text::CCursor::new(d.display_to_sql(ccursor.index)),
+                                        );
+                                        tab.cursor_range = Some(new_sql_range);
+                                    } else {
+                                        tab.cursor_range = Some(new_range);
+                                    }
                                 }
                             }
                         }
 
                         // SQL 变化后重新计算查找匹配（修复编辑 SQL 后高亮偏移过期的问题）
-                        if tab.find.open && !tab.find.find_text.is_empty() && tab.find.last_sql != tab.sql && !tab.find.use_regex {
-                            tab.find.recompute(&tab.sql);
+                        // 折叠存在时 last_sql 存的是 display 文本，与 editor_buf 比较
+                        if tab.find.open && !tab.find.find_text.is_empty() && !tab.find.use_regex {
+                            let changed = if has_folds {
+                                tab.find.last_sql != editor_buf
+                            } else {
+                                tab.find.last_sql != tab.sql
+                            };
+                            if changed {
+                                if has_folds {
+                                    tab.find.recompute(&editor_buf);
+                                } else {
+                                    tab.find.recompute(&tab.sql);
+                                }
+                            }
                         }
 
                         // 通过 painter 绘制查找匹配高亮（单次遍历 glyphs，O(glyphs) 复杂度）
@@ -34910,15 +35097,23 @@ fn render_query_editor(
                                 if tab.editor_focus_requested {
                                     output.response.request_focus();
                                     if let Some(target) = tab.autocomplete_cursor_target.take() {
-                                        // 光标放到自动补全选中词之后
-                                        let cursor_pos = egui::text::CCursor::new(target);
+                                        // 光标放到自动补全选中词之后（target 为 sql 空间，TextEdit state 需 display 空间）
+                                        let cursor_pos = if let Some(d) = &tab.fold_display {
+                                            egui::text::CCursor::new(d.sql_to_display(target))
+                                        } else {
+                                            egui::text::CCursor::new(target)
+                                        };
                                         if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
                                             state.cursor.set_char_range(Some(egui::text::CCursorRange::one(cursor_pos)));
                                             state.store(ui.ctx(), editor_id);
                                         }
                                     } else {
                                         // 光标放到文本末尾
-                                        let cursor_pos = egui::text::CCursor::new(tab.sql.len());
+                                        let cursor_pos = if let Some(d) = &tab.fold_display {
+                                            egui::text::CCursor::new(d.text.chars().count())
+                                        } else {
+                                            egui::text::CCursor::new(tab.sql.len())
+                                        };
                                         if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
                                             state.cursor.set_char_range(Some(egui::text::CCursorRange::one(cursor_pos)));
                                             state.store(ui.ctx(), editor_id);
@@ -34981,9 +35176,15 @@ fn render_query_editor(
 
                                                 // Clear old extra cursors and regenerate for the spanned lines.
                                                 // Skip primary cursor's own row to avoid double-cursor.
+                                                // tab.cursor_range 为 sql 空间，galley 为 display 空间，需换算
                                                 let primary_row = {
                                                     tab.cursor_range.map(|cr| {
-                                                        galley.layout_from_cursor(cr.primary).row
+                                                        let p = if let Some(d) = &tab.fold_display {
+                                                            egui::text::CCursor::new(d.sql_to_display(cr.primary.index))
+                                                        } else {
+                                                            cr.primary
+                                                        };
+                                                        galley.layout_from_cursor(p).row
                                                     })
                                                 };
                                                 tab.extra_cursors.clear();
@@ -35044,9 +35245,15 @@ fn render_query_editor(
 
                                     // Re-draw primary cursor (non-blinking) to cover
                                     // TextEdit's blinking cursor with matching style.
+                                    // tab.cursor_range 为 sql 空间，渲染需 display 空间
                                     if let Some(cr) = tab.cursor_range {
+                                        let primary_disp = if let Some(d) = &tab.fold_display {
+                                            egui::text::CCursor::new(d.sql_to_display(cr.primary.index))
+                                        } else {
+                                            cr.primary
+                                        };
                                         let r = egui::text_selection::text_cursor_state::cursor_rect(
-                                            &galley, &cr.primary, gutter_row_height,
+                                            &galley, &primary_disp, gutter_row_height,
                                         );
                                         egui::text_selection::visuals::paint_cursor_end(
                                             painter, ui.visuals(), r.translate(offset),
@@ -35105,9 +35312,23 @@ fn render_query_editor(
                                 tab.sql = new_sql;
                                 autocomplete_usage.record(&selected_label);
                                 tab.autocomplete.dismiss();
+                                // new_cursor 为 sql 空间；TextEdit state 需 display 空间。
+                                // 补全写回后折叠状态可能变化，需刷新并重建 display。
+                                tab.refresh_folds();
+                                let rebuilt = crate::fold::build_display(
+                                    &tab.sql,
+                                    &tab.folded,
+                                    &tab.fold_candidates,
+                                );
+                                let display_cursor = match (&rebuilt, &tab.fold_display) {
+                                    (Some(d), _) => d.sql_to_display(new_cursor),
+                                    (None, _) => new_cursor,
+                                };
+                                tab.fold_display = rebuilt;
+                                tab.fold_display_sql_snapshot = tab.sql.clone();
                                 let eid = egui::Id::from(format!("query-editor-{}", tab.id));
                                 if let Some(mut state) = TextEdit::load_state(ui.ctx(), eid) {
-                                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
+                                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(display_cursor))));
                                     state.store(ui.ctx(), eid);
                                 }
                             }
@@ -35216,9 +35437,15 @@ fn render_query_editor(
         if let Some(line) = clicked_stmt_line {
             if let Some(&sci) = line_stmt_map.get(&line) {
                 let eid = egui::Id::from(format!("query-editor-{}", tab.id));
+                // sci 为 sql 空间；TextEdit state 需 display 空间
+                let display_sci = if let Some(d) = &tab.fold_display {
+                    d.sql_to_display(sci)
+                } else {
+                    sci
+                };
                 if let Some(mut state) = TextEdit::load_state(ui.ctx(), eid) {
                     state.cursor.set_char_range(Some(
-                        egui::text::CCursorRange::one(egui::text::CCursor::new(sci)),
+                        egui::text::CCursorRange::one(egui::text::CCursor::new(display_sci)),
                     ));
                     state.store(ui.ctx(), eid);
                 }
