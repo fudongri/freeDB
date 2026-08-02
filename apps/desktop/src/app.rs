@@ -739,8 +739,8 @@ enum DropTarget {
     Connection(String),
     /// 落入库节点 → 归属到该库
     Database(String, String), // (连接 id, 库名)
-    /// 落入查询行 → 同分组内重排（在该查询之前插入；before_id = None 表示插到末尾）
-    QueryBefore { connection_id: String, database: Option<String>, before_id: Option<String> },
+    /// 落入查询行 → 同分组内重排。insert_after=false 插到该行之前，true 插到该行之后
+    QueryBefore { connection_id: String, database: Option<String>, before_id: Option<String>, insert_after: bool },
 }
 
 struct QueryTabState {
@@ -35869,11 +35869,11 @@ fn render_saved_queries_panel(
                                                 target_database: Some(db),
                                             };
                                         }
-                                        DropTarget::QueryBefore { connection_id, database, before_id } => {
+                                        DropTarget::QueryBefore { connection_id, database, before_id, insert_after } => {
                                             let same_group = from_entry.connection_id == connection_id
                                                 && from_entry.database == database;
                                             if same_group {
-                                                // 同分组重排：复用 ReorderSavedQueries，在 before_id 之前插入
+                                                // 同分组重排：在 before_id 指向的行的 insert_after 侧插入
                                                 let mut group: Vec<&SavedQueryEntry> = tab.all_saved_queries
                                                     .iter()
                                                     .filter(|e| e.connection_id == connection_id && e.database == database)
@@ -35882,8 +35882,13 @@ fn render_saved_queries_panel(
                                                 if let Some(pos) = group.iter().position(|e| e.id == from_id) {
                                                     group.remove(pos);
                                                 }
-                                                let insert_at = group.iter().position(|e| e.id == before_id.as_deref().unwrap_or(""))
-                                                    .unwrap_or(group.len());
+                                                let insert_at = match before_id {
+                                                    Some(bid) => {
+                                                        let idx = group.iter().position(|e| e.id == bid).unwrap_or(group.len());
+                                                        if insert_after { idx + 1 } else { idx }
+                                                    }
+                                                    None => group.len(),
+                                                };
                                                 group.insert(insert_at, &from_entry);
                                                 let updates: Vec<(String, i32)> = group.iter().enumerate()
                                                     .map(|(i, e)| (e.id.clone(), i as i32))
@@ -36194,33 +36199,40 @@ fn render_query_row(
                 ui.close();
             }
         });
-        // 拖拽目标：查询行间重排（仅当拖拽源存在时）
-        if tab.saved_query_drag_source.is_some() {
-            let ptr_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y));
-            if let Some(y) = ptr_y {
-                if y >= item_rect_center_y && y < item_rect_bottom {
-                    ui.painter().hline(
-                        rect.x_range(),
-                        rect.bottom(),
-                        Stroke::new(2.0, panel_palette.selection_stroke),
-                    );
-                    tab.saved_query_drag_target = Some(DropTarget::QueryBefore {
-                        connection_id: connection_id.clone(),
-                        database: database.clone(),
-                        before_id: Some(entry_id.clone()),
-                    });
-                } else if y < item_rect_center_y {
-                    ui.painter().hline(
-                        rect.x_range(),
-                        rect.top(),
-                        Stroke::new(2.0, panel_palette.selection_stroke),
-                    );
-                    tab.saved_query_drag_target = Some(DropTarget::QueryBefore {
-                        connection_id: connection_id.clone(),
-                        database: database.clone(),
-                        before_id: Some(entry_id.clone()),
-                    });
+        // 拖拽目标：查询行间重排（排除拖拽源行自身，避免 self-drop 静默移到末尾）
+        if let Some((drag_source_id, _)) = &tab.saved_query_drag_source {
+            if drag_source_id != entry_id {
+                let ptr_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y));
+                if let Some(y) = ptr_y {
+                    if y >= item_rect_center_y && y < item_rect_bottom {
+                        ui.painter().hline(
+                            rect.x_range(),
+                            rect.bottom(),
+                            Stroke::new(2.0, panel_palette.selection_stroke),
+                        );
+                        tab.saved_query_drag_target = Some(DropTarget::QueryBefore {
+                            connection_id: connection_id.clone(),
+                            database: database.clone(),
+                            before_id: Some(entry_id.clone()),
+                            insert_after: true,
+                        });
+                    } else if y < item_rect_center_y {
+                        ui.painter().hline(
+                            rect.x_range(),
+                            rect.top(),
+                            Stroke::new(2.0, panel_palette.selection_stroke),
+                        );
+                        tab.saved_query_drag_target = Some(DropTarget::QueryBefore {
+                            connection_id: connection_id.clone(),
+                            database: database.clone(),
+                            before_id: Some(entry_id.clone()),
+                            insert_after: false,
+                        });
+                    }
                 }
+            } else {
+                // 拖拽源行自身不作为目标：清掉陈旧目标，避免 self-drop 误触发
+                tab.saved_query_drag_target = None;
             }
         }
     });
