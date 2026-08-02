@@ -35425,6 +35425,16 @@ fn render_query_editor(
                 continue;
             }
             let is_play_line = play_lines.contains(line) && !is_executing;
+            // 已折叠区域首行（折叠块头部行）gutter 高亮标注；先于播放行绘制，同行动作时可被其覆盖
+            if let Some(&(_, is_folded)) = fold_arrows.get(line) {
+                if is_folded {
+                    let highlight_rect = egui::Rect::from_min_max(
+                        egui::pos2(gutter_rect.left() + 2.0, center_y - gutter_row_height * 0.5),
+                        egui::pos2(gutter_rect.right() - 2.0, center_y + gutter_row_height * 0.5),
+                    );
+                    clip_painter.rect_filled(highlight_rect, colors.radius_md, palette.current_line_bg);
+                }
+            }
             // 所有语句起始行显示背景高亮
             if is_play_line {
                 let highlight_rect = egui::Rect::from_min_max(
