@@ -1,29 +1,31 @@
 //! SQL 括号折叠的纯逻辑：候选检测、偏移映射、显示文本构造。
 //! 不依赖 egui，便于单元测试。
 
-/// 一个可折叠的跨行括号块。所有索引均为 char index（与 egui CCursor 一致）。
+/// 一个可折叠的跨行括号块。
+/// `hide_start`/`hide_end` 为 **byte index**（供 `&sql[a..b]` 切片，多字节安全）；
+/// `open_line`/`open_col` 为 char 语义（行号 / 行内列偏移）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FoldCandidate {
     /// 开括号所在行（1-based）
     pub open_line: usize,
     /// 开括号列（该行内 char 偏移）
     pub open_col: usize,
-    /// 折叠隐藏区起始 char 索引 = 开括号行换行之后
+    /// 折叠隐藏区起始 byte index = 开括号行换行之后
     pub hide_start: usize,
-    /// 折叠隐藏区结束 char 索引 = 匹配的闭括号 ')' 之前
+    /// 折叠隐藏区结束 byte index = 匹配的闭括号 ')' 之前
     pub hide_end: usize,
 }
 
 /// 找到所有跨多行（区域含至少一个 '\n'）的 `(...)` 块。
 /// 沿用 find_matching_paren 的 quote/escape 跳过规则。
 pub fn find_fold_candidates(sql: &str) -> Vec<FoldCandidate> {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut stack: Vec<(usize, usize)> = Vec::new(); // (open_paren_char_idx, open_col)
+    let mut stack: Vec<(usize, usize, usize)> = Vec::new(); // (open_paren_char_idx, open_col, open_paren_byte_idx)
     let mut out = Vec::new();
     let mut quote: Option<char> = None;
     let mut escape = false;
     let mut col = 0usize; // 当前行内已扫描的 char 数（开括号列以此计）
-    for (i, &ch) in chars.iter().enumerate() {
+    // byte_pos 记录当前 char 的起始 byte 位置，hide_start/hide_end 以 byte index 存储（供 &str 切片）
+    for (i, (byte_pos, ch)) in sql.char_indices().enumerate() {
         if let Some(q) = quote {
             if escape {
                 escape = false;
@@ -35,23 +37,22 @@ pub fn find_fold_candidates(sql: &str) -> Vec<FoldCandidate> {
         } else {
             match ch {
                 '\'' | '"' | '`' => quote = Some(ch),
-                '(' => stack.push((i, col)),
+                '(' => stack.push((i, col, byte_pos)),
                 ')' => {
-                    if let Some((open_idx, open_col)) = stack.pop() {
+                    if let Some((open_idx, open_col, open_byte)) = stack.pop() {
                         // 开括号与闭括号之间是否跨行：检测开括号之后到闭括号之前是否有 '\n'
-                        let crosses_lines = chars[open_idx + 1..i].iter().any(|&c| c == '\n');
+                        let crosses_lines = sql[open_byte..byte_pos].chars().any(|c| c == '\n');
                         if crosses_lines {
-                            // 隐藏区起始 = 开括号后第一个换行的下一个字符
-                            let nl_idx = chars[open_idx..i]
-                                .iter()
-                                .position(|&c| c == '\n')
-                                .map(|p| open_idx + p);
-                            if let Some(nl_idx) = nl_idx {
+                            // 隐藏区起始 = 开括号后第一个换行的下一个字符（byte 位置）
+                            let nl_byte = sql[open_byte..byte_pos]
+                                .find('\n')
+                                .map(|p| open_byte + p);
+                            if let Some(nl_byte) = nl_byte {
                                 out.push(FoldCandidate {
                                     open_line: line_of_char(sql, open_idx),
                                     open_col,
-                                    hide_start: nl_idx + 1,
-                                    hide_end: i,
+                                    hide_start: nl_byte + '\n'.len_utf8(),
+                                    hide_end: byte_pos,
                                 });
                             }
                         }
@@ -71,6 +72,7 @@ pub fn find_fold_candidates(sql: &str) -> Vec<FoldCandidate> {
 }
 
 /// 折叠区域内容哈希：用于编辑导致行号漂移后判断折叠是否保留。
+/// `c.hide_start/hide_end` 为 byte index，直接对字节流做 FNV-1a（与 char 无关）。
 pub fn fold_content_hash(sql: &str, c: &FoldCandidate) -> u64 {
     let mut h: u64 = 1469598103934665603;
     for b in sql[c.hide_start..c.hide_end].as_bytes() {
@@ -111,6 +113,11 @@ pub fn char_line_start(sql: &str, line: usize) -> usize {
         }
     }
     start
+}
+
+/// byte index → char index（要求 byte 落在 char 边界上，内部用）。
+fn byte_to_char(sql: &str, byte_idx: usize) -> usize {
+    sql[..byte_idx].chars().count()
 }
 
 /// 已折叠区域：按"起始行 + 内容哈希"识别。
@@ -217,16 +224,19 @@ pub fn build_display(sql: &str, folds: &[FoldRegion], candidates: &[FoldCandidat
 
     let mut text = String::with_capacity(sql.len());
     let mut segments = Vec::new();
-    let mut cursor = 0usize;
-    let mut display_cursor = 0usize;
+    let mut cursor = 0usize; // sql 空间 byte 游标，推进到 c.hide_end
+    let mut display_cursor = 0usize; // display 空间 char 偏移（egui CCursor 契约）
     for c in filtered {
         if c.hide_start > cursor {
-            text.push_str(&sql[cursor..c.hide_start]);
-            display_cursor += c.hide_start - cursor;
+            let frag = &sql[cursor..c.hide_start];
+            text.push_str(frag);
+            // display_cursor 累计 push 的 char 数，不能用 byte 差（hide_start 为 byte index）
+            display_cursor += frag.chars().count();
         }
         let seg = FoldSegment {
-            sql_start: c.hide_start,
-            sql_end: c.hide_end,
+            // FoldDisplay.segments 保持 char index 契约（egui CCursor 使用），由 byte 换算
+            sql_start: byte_to_char(sql, c.hide_start),
+            sql_end: byte_to_char(sql, c.hide_end),
             display_start: display_cursor,
             display_end: display_cursor + 2,
         };
@@ -350,9 +360,10 @@ mod tests {
         let cands = find_fold_candidates(sql);
         let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
         let d = build_display(sql, &folds, &cands).unwrap();
-        let c = &cands[0];
-        assert!(d.region_contains_sql_idx(c.hide_start + 1));
-        assert!(!d.region_contains_sql_idx(c.hide_start - 1));
+        // segments 为 char index 空间，region_contains_sql_idx 亦为 char 空间
+        let seg = d.segments[0];
+        assert!(d.region_contains_sql_idx(seg.sql_start + 1));
+        assert!(!d.region_contains_sql_idx(seg.sql_start.saturating_sub(1)));
     }
 
     #[test]
@@ -422,5 +433,63 @@ mod tests {
             new_cands.iter().any(|c| c.open_line == f.open_line && fold_content_hash(new_sql, c) == f.content_hash)
         });
         assert!(folds.is_empty());
+    }
+
+    // ── C-1 回归：多字节字符（中文/©）下 byte 切片不 panic ──
+
+    #[test]
+    fn multibyte_content_hash_does_not_panic() {
+        // 中文注释等非 ASCII 字符 + 折叠边界：hide_start/hide_end 为 byte index，byte 切片安全
+        let sql = "f(\n-- 中文注释\n'val'\n)";
+        let cands = find_fold_candidates(sql);
+        assert_eq!(cands.len(), 1);
+        let _ = fold_content_hash(sql, &cands[0]);
+    }
+
+    #[test]
+    fn multibyte_2byte_char_does_not_panic() {
+        // 评审触发示例：© 是 2 字节字符
+        let sql = "f(\n©\n)";
+        let cands = find_fold_candidates(sql);
+        assert_eq!(cands.len(), 1);
+        let _ = fold_content_hash(sql, &cands[0]);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        // 折叠区 = "©\n"，display 文本为前缀 + 占位符 + 闭括号
+        assert_eq!(d.text, "f(\n…\n)");
+        // segments 保持 char index 契约：隐藏区 char 区间 [3,5)
+        assert_eq!(d.segments[0].sql_start, 3);
+        assert_eq!(d.segments[0].sql_end, 5);
+    }
+
+    #[test]
+    fn build_display_multibyte_does_not_panic() {
+        let sql = "f(\n-- 中文注释\n'val'\n)";
+        let cands = find_fold_candidates(sql);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        // 折叠区整行含中文注释，display 文本为前缀 + 占位符 + 闭括号
+        assert_eq!(d.text, "f(\n…\n)");
+        // segments 保持 char index 契约：隐藏区 char 区间 [3,17)
+        assert_eq!(d.segments[0].sql_start, 3);
+        assert_eq!(d.segments[0].sql_end, 17);
+    }
+
+    #[test]
+    fn multibyte_offset_mapping_roundtrip() {
+        // 折叠区前有中文 → byte/char 混合索引下偏移映射往返仍闭合
+        let sql = "SELECT '中' FROM t\nf(\n-- 中文注释\n'val'\n)\nzz";
+        let cands = find_fold_candidates(sql);
+        assert_eq!(cands.len(), 1);
+        let folds = vec![FoldRegion { open_line: cands[0].open_line, content_hash: fold_content_hash(sql, &cands[0]) }];
+        let d = build_display(sql, &folds, &cands).unwrap();
+        // 文本末尾往返
+        let char_len = sql.chars().count();
+        let disp = d.sql_to_display(char_len);
+        assert_eq!(d.display_to_sql(disp), char_len);
+        // 折叠区内部钳制到占位符末尾
+        let inside = d.segments[0].sql_start + 1;
+        assert!(d.region_contains_sql_idx(inside));
+        assert_eq!(d.sql_to_display(inside), d.segments[0].display_end);
     }
 }
