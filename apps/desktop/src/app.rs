@@ -35185,7 +35185,15 @@ fn render_query_editor(
                         let mut visual_line = 1usize;
                         let mut byte_offset_acc = 0usize;
                         for row in &output.galley.rows {
-                            let center_y = output.galley_pos.y + row.pos.y + row.height() * 0.5;
+                            // 空文本时 LayoutJob 无 section，layout_section 不会把空行高设为
+                            // line_height，首行 height() 为 0，行号中心会贴顶偏上；
+                            // 用 gutter_row_height 兜底使空内容时行号 1 也垂直居中于标准行。
+                            let row_h = if row.height() <= 0.0 {
+                                gutter_row_height
+                            } else {
+                                row.height()
+                            };
+                            let center_y = output.galley_pos.y + row.pos.y + row_h * 0.5;
                             gutter_rows.push((center_y, visual_line));
                             gutter_line_offsets.entry(visual_line).or_insert(byte_offset_acc);
                             byte_offset_acc += row.char_count_including_newline();
