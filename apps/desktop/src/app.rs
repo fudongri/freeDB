@@ -10804,7 +10804,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     let editor_inner_height = ui.available_height();
                                     if tab.saved_queries_panel_visible {
                                         // 左侧可折叠面板 + 右侧编辑器
-                                        let panel_width = tab.saved_queries_panel_width.unwrap_or(220.0);
+                                        let panel_width = tab.saved_queries_panel_width.unwrap_or(250.0);
                                         // 消除 cell 间 spacing，把手宽度并入面板，避免面板与编辑器之间露出 panel_bg 竖带
                                         ui.spacing_mut().item_spacing.x = 0.0;
                                         StripBuilder::new(ui)
@@ -10844,16 +10844,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         tab.saved_queries_panel_width = Some(new_width);
                                                         ui.ctx().request_repaint();
                                                     }
-                                                    // 绘制拖拽指示线（仅悬停/拖拽时可见）
-                                                    if interacted {
-                                                        ui.painter().line_segment(
-                                                            [
-                                                                egui::pos2(rect.center().x, rect.top() + 4.0),
-                                                                egui::pos2(rect.center().x, rect.bottom() - 4.0),
-                                                            ],
-                                                            Stroke::new(1.0, palette.accent_button_stroke),
-                                                        );
-                                                    }
+                                                    // 绘制拖拽指示线（默认弱化，悬停/拖拽时高亮）
+                                                    let line_color = if interacted {
+                                                        palette.accent_button_stroke
+                                                    } else {
+                                                        palette.accent_button_stroke.linear_multiply(0.35)
+                                                    };
+                                                    ui.painter().line_segment(
+                                                        [
+                                                            egui::pos2(rect.center().x, rect.top() + 4.0),
+                                                            egui::pos2(rect.center().x, rect.bottom() - 4.0),
+                                                        ],
+                                                        Stroke::new(1.0, line_color),
+                                                    );
                                                 });
                                                 // 右侧：编辑器
                                                 h_strip.cell(|ui| {
@@ -35784,8 +35787,10 @@ fn render_saved_queries_panel(
                         .color(chrome.weak_text),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 折叠按钮（复用侧边栏 layout.svg 图标）
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    // 折叠按钮（复用侧边栏 layout.svg 图标），最右侧
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::click());
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.hovered() {
                         ui.painter().rect_filled(rect, chrome.radius_md, ui.visuals().widgets.hovered.weak_bg_fill);
                     }
@@ -35796,30 +35801,43 @@ fn render_saved_queries_panel(
                     if resp.clicked() {
                         tab.saved_queries_panel_visible = false;
                     }
+                    // 收起全部（collapse-all.svg）
+                    let (c_rect, c_resp) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::click());
+                    let c_resp = c_resp
+                        .on_hover_text(tr!("收起全部"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if c_resp.hovered() {
+                        ui.painter().rect_filled(c_rect, chrome.radius_md, ui.visuals().widgets.hovered.weak_bg_fill);
+                    }
+                    egui::Image::new(egui::include_image!("../assets/svg/collapse-all.svg"))
+                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                        .tint(chrome.weak_text)
+                        .paint_at(ui, egui::Rect::from_center_size(c_rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
+                    let some_expanded = tab.saved_query_tree_collapsed.len() < total_tree_keys(tab);
+                    if c_resp.clicked() && some_expanded {
+                        let mut keys = HashSet::new();
+                        let tree = build_tree(&tab.all_saved_queries, live_conn_name);
+                        all_tree_keys(&tree, &mut keys);
+                        tab.saved_query_tree_collapsed = keys.clone();
+                        *action = TabUiAction::SaveSavedQueryTreeState(keys.into_iter().collect());
+                    }
+                    // 展开全部（expand-all.svg），在折叠按钮左侧
+                    let (e_rect, e_resp) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::click());
+                    let e_resp = e_resp
+                        .on_hover_text(tr!("展开全部"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if e_resp.hovered() {
+                        ui.painter().rect_filled(e_rect, chrome.radius_md, ui.visuals().widgets.hovered.weak_bg_fill);
+                    }
+                    egui::Image::new(egui::include_image!("../assets/svg/expand-all.svg"))
+                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                        .tint(chrome.weak_text)
+                        .paint_at(ui, egui::Rect::from_center_size(e_rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
+                    if e_resp.clicked() {
+                        tab.saved_query_tree_collapsed.clear();
+                        *action = TabUiAction::SaveSavedQueryTreeState(Vec::new());
+                    }
                 });
-            });
-            ui.add_space(6.0);
-
-            // 展开/收起按钮（配色取自 ThemeColors，方式同 ctx_menu_style 的 app.rs:33054 模式）
-            let (dv, lv) = read_theme_variants(ui);
-            let colors = ui_theme::Theme::from_visuals(ui.visuals(), dv, lv).colors;
-            let style = subtle_button_style(&colors, chrome.fonts.xs);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-                let expand_btn = query_toolbar_button(ui, tr!("展开全部"), style);
-                let collapse_btn = query_toolbar_button(ui, tr!("收起全部"), style);
-                let some_expanded = tab.saved_query_tree_collapsed.len() < total_tree_keys(tab);
-                if expand_btn.clicked() {
-                    tab.saved_query_tree_collapsed.clear();
-                    *action = TabUiAction::SaveSavedQueryTreeState(Vec::new());
-                }
-                if collapse_btn.clicked() && some_expanded {
-                    let mut keys = HashSet::new();
-                    let tree = build_tree(&tab.all_saved_queries, live_conn_name);
-                    all_tree_keys(&tree, &mut keys);
-                    tab.saved_query_tree_collapsed = keys.clone();
-                    *action = TabUiAction::SaveSavedQueryTreeState(keys.into_iter().collect());
-                }
             });
             ui.add_space(6.0);
 
