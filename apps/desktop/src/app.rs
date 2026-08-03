@@ -17064,33 +17064,57 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .interactable(true)
             .show(ctx, |ui| {
                 apply_mac_dialog_style(ui, palette);
-                let card_w = 300.0;
-                let card_h = 164.0;
+                let card_w = 348.0;
+                let header_h = 74.0;
+                let footer_h = 26.0;
+                let card_h = 20.0 + header_h + 10.0 + footer_h + 20.0;
                 let card_rect = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(card_w, card_h));
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                    let r = 2.0;
-                    let bg = self.theme.colors.dialog_card_bg;
+                    let r = colors.radius_xxl;
+                    let bg = colors.dialog_card_bg;
+                    let shadow_color = colors.dialog_card_shadow;
+                    ui.painter().rect_filled(ui.max_rect().translate(egui::vec2(0.0, 8.0)), r, shadow_color);
                     ui.painter().rect_filled(ui.max_rect(), r, bg);
                     ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
-                    let inner = ui.max_rect().shrink(20.0);
+
+                    let inner = ui.max_rect().shrink2(egui::vec2(24.0, 20.0));
                     ui.allocate_ui_at_rect(inner, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 14.0);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                            ui.label(RichText::new("⚠").size(self.theme.fonts.heading).color(colors.warning_icon));
-                            ui.label(RichText::new(tr!("删除连接")).size(self.theme.fonts.code).color(palette.title).strong());
-                        });
-                        ui.label(RichText::new(tr!("确认要删除「{}」吗？此操作不可撤销。", conn_name)).size(self.theme.fonts.lg).color(palette.text));
-                        ui.horizontal(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let inner_rect = ui.max_rect();
+                        let header_rect = egui::Rect::from_min_size(
+                            inner_rect.min,
+                            egui::vec2(inner_rect.width(), header_h),
+                        );
+                        let footer_rect = egui::Rect::from_min_size(
+                            egui::pos2(inner_rect.min.x, inner_rect.max.y - footer_h),
+                            egui::vec2(inner_rect.width(), footer_h),
+                        );
+
+                        ui.allocate_ui_at_rect(header_rect, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 10.0);
+                            ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
-                                let delete_btn = egui::Button::new(RichText::new(tr!("删除")).size(self.theme.fonts.lg).color(self.theme.colors.confirm_button_text))
-                                    .fill(colors.delete_button_bg).corner_radius(self.theme.colors.radius_lg);
-                                if ui.add(delete_btn).clicked() { should_confirm = true; should_close = true; }
-                                let cancel_btn = egui::Button::new(RichText::new(tr!("取消")).size(self.theme.fonts.lg).color(palette.title))
-                                    .fill(palette.input_bg).stroke(Stroke::new(1.0, palette.border)).corner_radius(self.theme.colors.radius_lg);
-                                if ui.add(cancel_btn).clicked() { should_close = true; }
+                                ui.label(RichText::new("⚠").size(self.theme.fonts.heading).color(colors.warning_icon));
+                                ui.label(RichText::new(tr!("删除连接")).size(self.theme.fonts.xl).color(palette.title).strong());
+                            });
+                            ui.label(RichText::new(tr!("确认要删除「{}」吗？此操作不可撤销。", conn_name)).size(self.theme.fonts.md).color(palette.text));
+                        });
+
+                        ui.allocate_ui_at_rect(footer_rect, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add_space(ui.available_width());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                    let danger_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_danger_style(&self.theme.colors, self.theme.fonts.sm) };
+                                    let subtle_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_subtle_style(&self.theme.colors, self.theme.fonts.sm) };
+                                    if mini_button(ui, tr!("删除"), danger_style).clicked() {
+                                        should_confirm = true;
+                                        should_close = true;
+                                    }
+                                    if mini_button(ui, tr!("取消"), subtle_style).clicked() {
+                                        should_close = true;
+                                    }
+                                });
                             });
                         });
                     });
