@@ -16695,7 +16695,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut value = self.ddl_input_dialog.as_ref().map(|d| d.value.clone()).unwrap_or_default();
         let mut charset = self.ddl_input_dialog.as_ref().map(|d| d.charset.clone()).unwrap_or_default();
         let mut collation = self.ddl_input_dialog.as_ref().map(|d| d.collation.clone()).unwrap_or_default();
-        let is_create_db = is_create_db;
 
         egui::Area::new("ddl-input-dialog".into())
             .order(egui::Order::Foreground)
@@ -16703,125 +16702,178 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .interactable(true)
             .show(ctx, |ui| {
                 apply_mac_dialog_style(ui, palette);
-                let card_w = 420.0;
-                let card_h = if is_create_db { 290.0 } else { 190.0 };
+                let show_charset = is_create_db && matches!(db_kind, DatabaseKind::MySql | DatabaseKind::Postgres);
+                let card_w = if show_charset { 500.0 } else { 360.0 };
+                let header_h = 30.0;
+                let form_h = 30.0;
+                let grid_h = if show_charset { 74.0 } else { 0.0 };
+                let footer_h = 26.0;
+                let card_h = 20.0 + header_h + 12.0 + form_h + 12.0 + grid_h + 12.0 + footer_h + 20.0;
                 let card_rect = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(card_w, card_h));
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                    let r = 2.0;
-                    let bg = self.theme.colors.dialog_card_bg;
+                    let r = colors.radius_xl;
+                    let bg = colors.dialog_card_bg;
+                    let shadow_color = colors.dialog_card_shadow;
+                    ui.painter().rect_filled(ui.max_rect().translate(egui::vec2(0.0, 8.0)), r, shadow_color);
                     ui.painter().rect_filled(ui.max_rect(), r, bg);
                     ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
-                    let inner = ui.max_rect().shrink(20.0);
+
+                    let inner = ui.max_rect().shrink2(egui::vec2(24.0, 20.0));
                     ui.allocate_ui_at_rect(inner, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 14.0);
-                        ui.label(RichText::new(&title).size(self.theme.fonts.code).color(palette.title).strong());
-                        let resp = ui.add(TextEdit::singleline(&mut value).hint_text(RichText::new(&placeholder).color(ui.visuals().weak_text_color())).desired_width(f32::INFINITY));
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            should_confirm = true;
-                            should_close = true;
-                        }
-                        // 新建数据库时显示字符集/排序规则下拉
-                        if is_create_db {
-                            let charset_items: &[&str] = match db_kind {
-                                DatabaseKind::MySql => &[
-                                    "armscii8", "ascii", "big5", "binary", "cp1250", "cp1251", "cp1256",
-                                    "cp1257", "cp850", "cp852", "cp866", "cp932", "dec8", "eucjpms",
-                                    "euckr", "gb18030", "gb2312", "gbk", "geostd8", "greek", "hebrew",
-                                    "hp8", "keybcs2", "koi8r", "koi8u", "latin1", "latin2", "latin5",
-                                    "latin7", "macce", "macroman", "sjis", "swe7", "tis620", "ucs2",
-                                    "ujis", "utf16", "utf16le", "utf32", "utf8", "utf8mb4",
-                                ],
-                                DatabaseKind::Postgres => &[
-                                    "BIG5", "EUC_CN", "EUC_JP", "EUC_JIS_2004", "EUC_KR", "EUC_TW",
-                                    "GB18030", "GBK", "ISO_8859_5", "ISO_8859_6", "ISO_8859_7",
-                                    "ISO_8859_8", "JOHAB", "KOI8R", "KOI8U", "LATIN1", "LATIN2",
-                                    "LATIN3", "LATIN4", "LATIN5", "LATIN6", "LATIN7", "LATIN8",
-                                    "LATIN9", "LATIN10", "MULE_INTERNAL", "SJIS", "SHIFT_JIS_2004",
-                                    "SQL_ASCII", "UHC", "UTF8", "WIN866", "WIN874", "WIN1250",
-                                    "WIN1251", "WIN1252", "WIN1253", "WIN1254", "WIN1255", "WIN1256",
-                                    "WIN1257", "WIN1258",
-                                ],
-                                DatabaseKind::MongoDb => &[],
-                                DatabaseKind::Sqlite => &[],
-                            };
-                            let charset_combo_id = egui::Id::new("ddl-charset-dropdown");
-                            let collation_combo_id = egui::Id::new("ddl-collation-dropdown");
-                            // 打开一个下拉时关闭另一个
-                            let charset_open = ui.data_mut(|d| d.get_temp::<bool>(charset_combo_id).unwrap_or(false));
-                            let collation_open = ui.data_mut(|d| d.get_temp::<bool>(collation_combo_id).unwrap_or(false));
-                            if charset_open && collation_open {
-                                ui.data_mut(|d| d.insert_temp(collation_combo_id, false));
+                        let inner_rect = ui.max_rect();
+                        let header_rect = egui::Rect::from_min_size(
+                            inner_rect.min,
+                            egui::vec2(inner_rect.width(), header_h),
+                        );
+                        let form_rect = egui::Rect::from_min_size(
+                            egui::pos2(inner_rect.min.x, header_rect.max.y + 12.0),
+                            egui::vec2(inner_rect.width(), form_h),
+                        );
+                        let grid_rect = egui::Rect::from_min_size(
+                            egui::pos2(inner_rect.min.x, form_rect.max.y + 12.0),
+                            egui::vec2(inner_rect.width(), grid_h),
+                        );
+                        let footer_rect = egui::Rect::from_min_size(
+                            egui::pos2(inner_rect.min.x, inner_rect.max.y - footer_h),
+                            egui::vec2(inner_rect.width(), footer_h),
+                        );
+
+                        // 表单控件用更小的圆角（与其它弹窗一致）
+                        let small_radius = egui::CornerRadius::same(4);
+                        ui.style_mut().visuals.widgets.inactive.corner_radius = small_radius;
+                        ui.style_mut().visuals.widgets.hovered.corner_radius = small_radius;
+                        ui.style_mut().visuals.widgets.active.corner_radius = small_radius;
+                        ui.style_mut().visuals.widgets.open.corner_radius = small_radius;
+
+                        ui.allocate_ui_at_rect(header_rect, |ui| {
+                            ui.label(RichText::new(&title).size(self.theme.fonts.xl).color(palette.title).strong());
+                        });
+
+                        ui.allocate_ui_at_rect(form_rect, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 12.0);
+                            let resp = ui.add_sized(
+                                [ui.available_width(), 30.0],
+                                TextEdit::singleline(&mut value)
+                                    .hint_text(RichText::new(&placeholder).color(ui.visuals().weak_text_color()))
+                                    .font(FontId::new(self.theme.fonts.md, FontFamily::Proportional))
+                                    .margin(egui::Margin::symmetric(10, 4))
+                                    .vertical_align(egui::Align::Center),
+                            );
+                            // 首帧聚焦输入框
+                            if !dialog_confirm_on_enter { resp.request_focus(); }
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                should_confirm = true;
+                                should_close = true;
                             }
-                            let charset_sel_items: Vec<(&str, bool)> = charset_items
-                                .iter()
-                                .map(|&c| (c, charset == c))
-                                .collect();
-                            // 使用 Grid 对齐标签和下拉
-                            egui::Grid::new("ddl-charset-collation-grid")
-                                .num_columns(2)
-                                .spacing([8.0, 10.0])
-                                .min_col_width(56.0)
-                                .show(ui, |ui| {
-                                    // 字符集行
-                                    ui.label(RichText::new(tr!("字符集")).size(self.theme.fonts.lg).color(palette.text));
-                                    if let Some(sel) = toolbar_dropdown(
-                                        ui,
-                                        charset_combo_id,
-                                        &charset,
-                                        240.0,
-                                        &charset_sel_items,
-                                    ) {
-                                        charset = charset_items[sel].to_string();
-                                        collation = String::new();
-                                    }
-                                    ui.end_row();
-                                    // 排序规则行（根据字符集联动）
-                                    ui.label(RichText::new(tr!("排序规则")).size(self.theme.fonts.lg).color(palette.text));
-                                    let collation_choices: Vec<&str> = match db_kind {
-                                        DatabaseKind::MySql => get_mysql_collations(&charset),
-                                        DatabaseKind::Postgres => get_pg_collations(&charset),
-                                        DatabaseKind::MongoDb => Vec::new(),
-                                        DatabaseKind::Sqlite => Vec::new(),
-                                    };
-                                    let collation_display = if collation.is_empty() {
-                                        tr!("（默认）").to_string()
-                                    } else {
-                                        collation.clone()
-                                    };
-                                    let mut collation_sel_items: Vec<(&str, bool)> = vec![
-                                        (tr!("（默认）"), collation.is_empty()),
-                                    ];
-                                    for &c in &collation_choices {
-                                        collation_sel_items.push((c, collation == c));
-                                    }
-                                    if let Some(sel) = toolbar_dropdown(
-                                        ui,
-                                        collation_combo_id,
-                                        &collation_display,
-                                        240.0,
-                                        &collation_sel_items,
-                                    ) {
-                                        if sel == 0 {
+                        });
+                        // 新建数据库时显示字符集/排序规则下拉
+                        if show_charset {
+                            ui.allocate_ui_at_rect(grid_rect, |ui| {
+                                let charset_items: &[&str] = match db_kind {
+                                    DatabaseKind::MySql => &[
+                                        "armscii8", "ascii", "big5", "binary", "cp1250", "cp1251", "cp1256",
+                                        "cp1257", "cp850", "cp852", "cp866", "cp932", "dec8", "eucjpms",
+                                        "euckr", "gb18030", "gb2312", "gbk", "geostd8", "greek", "hebrew",
+                                        "hp8", "keybcs2", "koi8r", "koi8u", "latin1", "latin2", "latin5",
+                                        "latin7", "macce", "macroman", "sjis", "swe7", "tis620", "ucs2",
+                                        "ujis", "utf16", "utf16le", "utf32", "utf8", "utf8mb4",
+                                    ],
+                                    DatabaseKind::Postgres => &[
+                                        "BIG5", "EUC_CN", "EUC_JP", "EUC_JIS_2004", "EUC_KR", "EUC_TW",
+                                        "GB18030", "GBK", "ISO_8859_5", "ISO_8859_6", "ISO_8859_7",
+                                        "ISO_8859_8", "JOHAB", "KOI8R", "KOI8U", "LATIN1", "LATIN2",
+                                        "LATIN3", "LATIN4", "LATIN5", "LATIN6", "LATIN7", "LATIN8",
+                                        "LATIN9", "LATIN10", "MULE_INTERNAL", "SJIS", "SHIFT_JIS_2004",
+                                        "SQL_ASCII", "UHC", "UTF8", "WIN866", "WIN874", "WIN1250",
+                                        "WIN1251", "WIN1252", "WIN1253", "WIN1254", "WIN1255", "WIN1256",
+                                        "WIN1257", "WIN1258",
+                                    ],
+                                    DatabaseKind::MongoDb => &[],
+                                    DatabaseKind::Sqlite => &[],
+                                };
+                                let charset_combo_id = egui::Id::new("ddl-charset-dropdown");
+                                let collation_combo_id = egui::Id::new("ddl-collation-dropdown");
+                                // 打开一个下拉时关闭另一个
+                                let charset_open = ui.data_mut(|d| d.get_temp::<bool>(charset_combo_id).unwrap_or(false));
+                                let collation_open = ui.data_mut(|d| d.get_temp::<bool>(collation_combo_id).unwrap_or(false));
+                                if charset_open && collation_open {
+                                    ui.data_mut(|d| d.insert_temp(collation_combo_id, false));
+                                }
+                                let charset_sel_items: Vec<(&str, bool)> = charset_items
+                                    .iter()
+                                    .map(|&c| (c, charset == c))
+                                    .collect();
+                                // 使用 Grid 对齐标签和下拉
+                                egui::Grid::new("ddl-charset-collation-grid")
+                                    .num_columns(2)
+                                    .spacing([16.0, 14.0])
+                                    .min_col_width(56.0)
+                                    .show(ui, |ui| {
+                                        // 字符集行
+                                        ui.label(RichText::new(tr!("字符集")).size(self.theme.fonts.lg).color(palette.text));
+                                        if let Some(sel) = toolbar_dropdown_sized(
+                                            ui,
+                                            charset_combo_id,
+                                            &charset,
+                                            380.0,
+                                            &charset_sel_items,
+                                            30.0,
+                                            4.0,
+                                        ) {
+                                            charset = charset_items[sel].to_string();
                                             collation = String::new();
-                                        } else if let Some(&item) = collation_choices.get(sel - 1) {
-                                            collation = item.to_string();
                                         }
-                                    }
-                                    ui.end_row();
-                                });
+                                        ui.end_row();
+                                        // 排序规则行（根据字符集联动）
+                                        ui.label(RichText::new(tr!("排序规则")).size(self.theme.fonts.lg).color(palette.text));
+                                        let collation_choices: Vec<&str> = match db_kind {
+                                            DatabaseKind::MySql => get_mysql_collations(&charset),
+                                            DatabaseKind::Postgres => get_pg_collations(&charset),
+                                            DatabaseKind::MongoDb => Vec::new(),
+                                            DatabaseKind::Sqlite => Vec::new(),
+                                        };
+                                        let collation_display = if collation.is_empty() {
+                                            tr!("（默认）").to_string()
+                                        } else {
+                                            collation.clone()
+                                        };
+                                        let mut collation_sel_items: Vec<(&str, bool)> = vec![
+                                            (tr!("（默认）"), collation.is_empty()),
+                                        ];
+                                        for &c in &collation_choices {
+                                            collation_sel_items.push((c, collation == c));
+                                        }
+                                        if let Some(sel) = toolbar_dropdown_sized(
+                                            ui,
+                                            collation_combo_id,
+                                            &collation_display,
+                                            380.0,
+                                            &collation_sel_items,
+                                            30.0,
+                                            4.0,
+                                        ) {
+                                            if sel == 0 {
+                                                collation = String::new();
+                                            } else if let Some(&item) = collation_choices.get(sel - 1) {
+                                                collation = item.to_string();
+                                            }
+                                        }
+                                        ui.end_row();
+                                    });
+                            });
                         }
-                        // 首帧聚焦输入框
-                        if !dialog_confirm_on_enter { resp.request_focus(); }
-                        ui.horizontal(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
-                                let ok_btn = egui::Button::new(RichText::new(tr!("确定")).size(self.theme.fonts.lg).color(self.theme.colors.confirm_button_text))
-                                    .fill(colors.confirm_button_bg).corner_radius(self.theme.colors.radius_lg);
-                                if ui.add(ok_btn).clicked() { should_confirm = true; should_close = true; }
-                                let cancel_btn = egui::Button::new(RichText::new(tr!("取消")).size(self.theme.fonts.lg).color(palette.title))
-                                    .fill(palette.input_bg).stroke(Stroke::new(1.0, palette.border)).corner_radius(self.theme.colors.radius_lg);
-                                if ui.add(cancel_btn).clicked() { should_close = true; }
+                        // 底部操作按钮
+                        ui.allocate_ui_at_rect(footer_rect, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add_space(ui.available_width());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                    let ok_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_primary_style(&self.theme.colors, self.theme.fonts.sm) };
+                                    let cancel_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_subtle_style(&self.theme.colors, self.theme.fonts.sm) };
+                                    if mini_button(ui, tr!("确定"), ok_style).clicked() { should_confirm = true; should_close = true; }
+                                    if mini_button(ui, tr!("取消"), cancel_style).clicked() { should_close = true; }
+                                });
                             });
                         });
                     });
@@ -16881,44 +16933,68 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .interactable(true)
             .show(ctx, |ui| {
                 apply_mac_dialog_style(ui, palette);
-                let card_w = 300.0;
-                let card_h = 164.0;
+                let card_w = 348.0;
+                let header_h = 74.0;
+                let footer_h = 26.0;
+                let card_h = 20.0 + header_h + 10.0 + footer_h + 20.0;
                 let card_rect = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(card_w, card_h));
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                    let r = 2.0;
-                    let bg = self.theme.colors.dialog_card_bg;
+                    let r = colors.radius_xxl;
+                    let bg = colors.dialog_card_bg;
+                    let shadow_color = colors.dialog_card_shadow;
+                    ui.painter().rect_filled(ui.max_rect().translate(egui::vec2(0.0, 8.0)), r, shadow_color);
                     ui.painter().rect_filled(ui.max_rect(), r, bg);
                     ui.painter().rect_stroke(ui.max_rect(), r, Stroke::new(1.0, palette.border), egui::StrokeKind::Outside);
-                    let inner = ui.max_rect().shrink(20.0);
+
+                    let inner = ui.max_rect().shrink2(egui::vec2(24.0, 20.0));
                     ui.allocate_ui_at_rect(inner, |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 14.0);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                            ui.label(RichText::new("⚠").size(self.theme.fonts.heading).color(colors.warning_icon));
-                            ui.label(RichText::new(&title).size(self.theme.fonts.code).color(palette.title).strong());
-                        });
-                        if pending.batch_count > 1 {
-                            if pending.is_truncate {
-                                ui.label(RichText::new(tr!("确认要清空 {} 个表吗？此操作不可撤销。", pending.batch_count)).size(self.theme.fonts.lg).color(palette.text));
-                            } else {
-                                ui.label(RichText::new(tr!("确认要删除 {} 个表吗？此操作不可撤销。", pending.batch_count)).size(self.theme.fonts.lg).color(palette.text));
-                            }
-                        } else if pending.is_truncate {
-                            ui.label(RichText::new(tr!("确认要清空「{}」吗？此操作不可撤销。", name)).size(self.theme.fonts.lg).color(palette.text));
-                        } else {
-                            ui.label(RichText::new(tr!("确认要删除「{}」吗？此操作不可撤销。", name)).size(self.theme.fonts.lg).color(palette.text));
-                        }
-                        ui.horizontal(|ui| {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let inner_rect = ui.max_rect();
+                        let header_rect = egui::Rect::from_min_size(
+                            inner_rect.min,
+                            egui::vec2(inner_rect.width(), header_h),
+                        );
+                        let footer_rect = egui::Rect::from_min_size(
+                            egui::pos2(inner_rect.min.x, inner_rect.max.y - footer_h),
+                            egui::vec2(inner_rect.width(), footer_h),
+                        );
+
+                        ui.allocate_ui_at_rect(header_rect, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 10.0);
+                            ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                ui.spacing_mut().button_padding = egui::vec2(14.0, 6.0);
-                                let btn_label = if pending.is_truncate { tr!("清空") } else { tr!("删除") };
-                                let delete_btn = egui::Button::new(RichText::new(btn_label).size(self.theme.fonts.lg).color(self.theme.colors.confirm_button_text))
-                                    .fill(colors.delete_button_bg).corner_radius(self.theme.colors.radius_lg);
-                                if ui.add(delete_btn).clicked() { should_confirm = true; should_close = true; }
-                                let cancel_btn = egui::Button::new(RichText::new(tr!("取消")).size(self.theme.fonts.lg).color(palette.title))
-                                    .fill(palette.input_bg).stroke(Stroke::new(1.0, palette.border)).corner_radius(self.theme.colors.radius_lg);
-                                if ui.add(cancel_btn).clicked() { should_close = true; }
+                                ui.label(RichText::new("⚠").size(self.theme.fonts.heading).color(colors.warning_icon));
+                                ui.label(RichText::new(&title).size(self.theme.fonts.xl).color(palette.title).strong());
+                            });
+                            if pending.batch_count > 1 {
+                                if pending.is_truncate {
+                                    ui.label(RichText::new(tr!("确认要清空 {} 个表吗？此操作不可撤销。", pending.batch_count)).size(self.theme.fonts.md).color(palette.text));
+                                } else {
+                                    ui.label(RichText::new(tr!("确认要删除 {} 个表吗？此操作不可撤销。", pending.batch_count)).size(self.theme.fonts.md).color(palette.text));
+                                }
+                            } else if pending.is_truncate {
+                                ui.label(RichText::new(tr!("确认要清空「{}」吗？此操作不可撤销。", name)).size(self.theme.fonts.md).color(palette.text));
+                            } else {
+                                ui.label(RichText::new(tr!("确认要删除「{}」吗？此操作不可撤销。", name)).size(self.theme.fonts.md).color(palette.text));
+                            }
+                        });
+
+                        ui.allocate_ui_at_rect(footer_rect, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add_space(ui.available_width());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                    let btn_label = if pending.is_truncate { tr!("清空") } else { tr!("删除") };
+                                    let danger_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_danger_style(&self.theme.colors, self.theme.fonts.sm) };
+                                    let subtle_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_subtle_style(&self.theme.colors, self.theme.fonts.sm) };
+                                    if mini_button(ui, btn_label, danger_style).clicked() {
+                                        should_confirm = true;
+                                        should_close = true;
+                                    }
+                                    if mini_button(ui, tr!("取消"), subtle_style).clicked() {
+                                        should_close = true;
+                                    }
+                                });
                             });
                         });
                     });
