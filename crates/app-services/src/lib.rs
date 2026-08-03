@@ -550,6 +550,14 @@ impl AppServices {
         self.history_store.update_saved_query_sort_orders(updates)
     }
 
+    pub fn list_tree_order(&self) -> Result<Vec<(String, i32)>> {
+        self.history_store.list_tree_order()
+    }
+
+    pub fn update_tree_orders(&self, updates: &[(String, i32)]) -> Result<()> {
+        self.history_store.update_tree_orders(updates)
+    }
+
     pub fn export_query_result_csv(
         &self,
         result: &QueryResult,

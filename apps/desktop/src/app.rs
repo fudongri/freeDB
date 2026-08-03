@@ -30,7 +30,7 @@ use crate::autocomplete::{
     AutocompleteState, AutocompleteSuggestion, AutocompleteUsageMemory, SchemaCache, SqlContext, SqlContextParser,
     SuggestionKind,
 };
-use crate::saved_query_tree::{QueryTreeNode, build_tree};
+use crate::saved_query_tree::{QueryTreeNode, build_tree, conn_node_key, db_node_key};
 
 struct AiSettingsForm {
     name: String,
@@ -101,6 +101,8 @@ pub struct DesktopApp {
     expanded_nodes: HashSet<String>,
     /// 已保存查询树展开状态（启动时从 ui_state 加载，供新建 tab 使用）
     saved_query_tree_collapsed: HashSet<String>,
+    /// 已保存查询树自定义排序（启动时从 tree_order 表加载，供新建 tab 使用）
+    saved_query_tree_order: HashMap<String, i32>,
     selected_tree_item: Option<String>,
     selected_connection: Option<String>,
     search_keyword: String,
@@ -743,6 +745,21 @@ enum DropTarget {
     Database(String, String), // (连接 id, 库名)
     /// 落入查询行 → 同分组内重排。insert_after=false 插到该行之前，true 插到该行之后
     QueryBefore { connection_id: String, database: Option<String>, before_id: Option<String>, insert_after: bool },
+    /// 一级排序：连接节点行间插入。before_conn_id=None 表示插到末尾
+    ConnBefore { before_conn_id: Option<String>, insert_after: bool },
+    /// 二级排序：同连接内 level-2 节点（库/无库查询）行间插入。before_key 为节点 key（db:<cid>/<db> 或 query:<qid>）
+    SiblingBefore { connection_id: String, before_key: Option<String>, insert_after: bool },
+}
+
+/// 已保存查询拖拽源：区分查询行与一级/二级节点拖拽
+#[derive(Clone)]
+enum SavedQueryDragSource {
+    /// 查询行拖拽：(查询 id, 标题)
+    Query(String, String),
+    /// 连接节点拖拽：连接 id
+    Conn(String),
+    /// 库节点拖拽：(连接 id, 库名)
+    Db(String, String),
 }
 
 struct QueryTabState {
@@ -788,8 +805,10 @@ struct QueryTabState {
     saved_queries_panel_width: Option<f32>,
     /// 已保存查询树展开状态（节点 key 集合，空 = 全展开）
     saved_query_tree_collapsed: HashSet<String>,
-    /// 已保存查询拖拽状态：正在被拖拽的查询 (ID, 名称)
-    saved_query_drag_source: Option<(String, String)>,
+    /// 已保存查询树自定义排序（node_key → order），与 saved_query_tree_order 表对应
+    saved_query_tree_order: HashMap<String, i32>,
+    /// 已保存查询拖拽状态：正在被拖拽的节点
+    saved_query_drag_source: Option<SavedQueryDragSource>,
     /// 已保存查询拖拽目标位置（用于指示线显示）
     saved_query_drag_target: Option<DropTarget>,
     /// 括号折叠状态（只增删此列表，不改 sql）
@@ -880,6 +899,7 @@ impl Clone for QueryTabState {
             saved_queries_panel_visible: self.saved_queries_panel_visible,
             saved_queries_panel_width: self.saved_queries_panel_width,
             saved_query_tree_collapsed: self.saved_query_tree_collapsed.clone(),
+            saved_query_tree_order: self.saved_query_tree_order.clone(),
             saved_query_drag_source: self.saved_query_drag_source.clone(),
             saved_query_drag_target: self.saved_query_drag_target.clone(),
             folded: self.folded.clone(),
@@ -1783,6 +1803,12 @@ impl DesktopApp {
             .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
             .map(|v| v.into_iter().collect())
             .unwrap_or_default();
+        // 已保存查询树自定义排序：启动时从 tree_order 表加载，供新建 tab 使用
+        let saved_query_tree_order: HashMap<String, i32> = services
+            .list_tree_order()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let mut app = Self {
             runtime,
             services,
@@ -1791,6 +1817,7 @@ impl DesktopApp {
             children_by_node: HashMap::new(),
             expanded_nodes: HashSet::new(),
             saved_query_tree_collapsed,
+            saved_query_tree_order,
             selected_tree_item: None,
             selected_connection,
             search_keyword: String::new(),
@@ -4638,6 +4665,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut tab = QueryTabState::new(connection_id.clone());
         // 应用启动时加载的已保存查询树展开状态（QueryTabState::new 默认为空 = 全展开）
         tab.saved_query_tree_collapsed = self.saved_query_tree_collapsed.clone();
+        tab.saved_query_tree_order = self.saved_query_tree_order.clone();
         tab.database = database;
         if let Some(sql) = initial_sql {
             tab.sql = sql;
@@ -9064,6 +9092,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::SaveSavedQueryTreeState(keys) => {
                 let json = serde_json::to_string(&keys).unwrap_or_default();
                 let _ = self.services.save_ui_state("saved_queries_tree_expanded", &json);
+            }
+            TabUiAction::SaveTreeOrder(updates) => {
+                if let Err(e) = self.services.update_tree_orders(&updates) {
+                    self.status_message = tr!("保存排序失败: {}", e);
+                }
             }
             TabUiAction::RefreshProcesslist => {
                 let services = self.services.clone();
@@ -20021,11 +20054,20 @@ impl eframe::App for DesktopApp {
         }
         // 已保存查询拖拽幽灵名称渲染
         let saved_query_ghost = if let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) {
-            tab.saved_query_drag_source.clone()
+            match &tab.saved_query_drag_source {
+                Some(SavedQueryDragSource::Query(_, title)) => Some((title.clone(), false)),
+                Some(SavedQueryDragSource::Conn(id)) => {
+                    let name = self.connections.iter().find(|c| &c.id == id).map(|c| c.name.clone())
+                        .unwrap_or_else(|| id.clone());
+                    Some((name, true))
+                }
+                Some(SavedQueryDragSource::Db(_, db)) => Some((db.clone(), true)),
+                None => None,
+            }
         } else {
             None
         };
-        if let Some((_, ref query_title)) = saved_query_ghost {
+        if let Some((ghost_text, is_node)) = saved_query_ghost {
             let pointer_pos = ctx.input(|i| i.pointer.hover_pos()).unwrap_or_default();
             let palette = MacUiPalette::from(&self.theme);
             egui::Area::new("saved-query-drag-ghost".into())
@@ -20041,10 +20083,17 @@ impl eframe::App for DesktopApp {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(query_title)
+                                    RichText::new(ghost_text)
                                         .size(self.theme.fonts.md)
                                         .color(palette.text),
                                 );
+                                if is_node {
+                                    ui.label(
+                                        RichText::new(tr!("（节点）"))
+                                            .size(self.theme.fonts.xs)
+                                            .color(palette.weak_text),
+                                    );
+                                }
                             });
                         });
                 });
@@ -20291,6 +20340,7 @@ impl QueryTabState {
             saved_queries_panel_visible: true,
             saved_queries_panel_width: None,
             saved_query_tree_collapsed: HashSet::new(),
+            saved_query_tree_order: HashMap::new(),
             saved_query_drag_source: None,
             saved_query_drag_target: None,
             folded: Vec::new(),
@@ -20564,6 +20614,7 @@ enum TabUiAction {
     ReorderSavedQueries(Vec<(String, i32)>),
     MoveSavedQuery { id: String, target_connection_id: String, target_database: Option<String> },
     SaveSavedQueryTreeState(Vec<String>),
+    SaveTreeOrder(Vec<(String, i32)>),
     RefreshProcesslist,
     LoadFile(std::path::PathBuf),
     AiOptimize,
@@ -35924,7 +35975,7 @@ fn render_saved_queries_panel(
                     let some_expanded = tab.saved_query_tree_collapsed.len() < total_tree_keys(tab);
                     if c_resp.clicked() && some_expanded {
                         let mut keys = HashSet::new();
-                        let tree = build_tree(&tab.all_saved_queries, live_conn_name);
+                        let tree = build_tree(&tab.all_saved_queries, live_conn_name, &tab.saved_query_tree_order);
                         all_tree_keys(&tree, &mut keys);
                         tab.saved_query_tree_collapsed = keys.clone();
                         *action = TabUiAction::SaveSavedQueryTreeState(keys.into_iter().collect());
@@ -35949,7 +36000,7 @@ fn render_saved_queries_panel(
             });
             ui.add_space(6.0);
 
-            let tree = build_tree(&tab.all_saved_queries, live_conn_name);
+            let tree = build_tree(&tab.all_saved_queries, live_conn_name, &tab.saved_query_tree_order);
             egui::ScrollArea::both()
                 .id_salt(format!("saved-queries-tree-{}", tab.id))
                 .auto_shrink([false, false]) // 宽度固定为面板宽，内容超宽时出现水平滚动条
@@ -35970,67 +36021,179 @@ fn render_saved_queries_panel(
                     // 拖拽释放处理：源信息从 saved_query_drag_source 取，目标从 saved_query_drag_target 取
                     let released = ui.input(|i| i.pointer.any_released());
                     if released {
-                        if let Some((from_id, _)) = tab.saved_query_drag_source.take() {
-                            let from_entry = tab.all_saved_queries.iter().find(|e| e.id == from_id).cloned();
-                            if let Some(target) = tab.saved_query_drag_target.take() {
-                                if let Some(from_entry) = from_entry {
-                                    match target {
-                                        DropTarget::Connection(cid) => {
-                                            *action = TabUiAction::MoveSavedQuery {
-                                                id: from_id,
-                                                target_connection_id: cid,
-                                                target_database: None,
-                                            };
+                        let source = tab.saved_query_drag_source.take();
+                        let target = tab.saved_query_drag_target.take();
+                        if let Some(source) = source {
+                            let from_entry = match &source {
+                                SavedQueryDragSource::Query(id, _) => tab.all_saved_queries.iter().find(|e| &e.id == id).cloned(),
+                                _ => None,
+                            };
+                            match (source, target) {
+                                // ── 连接节点排序（一级）──
+                                (SavedQueryDragSource::Conn(from_conn), Some(DropTarget::ConnBefore { before_conn_id, insert_after })) => {
+                                    // 当前连接节点的所有兄弟 key 按当前树顺序
+                                    let mut conn_keys: Vec<String> = build_tree(&tab.all_saved_queries, live_conn_name, &tab.saved_query_tree_order)
+                                        .iter()
+                                        .filter_map(|n| match n {
+                                            QueryTreeNode::Connection { key, .. } => Some(key.clone()),
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if let Some(pos) = conn_keys.iter().position(|k| *k == conn_node_key(&from_conn)) {
+                                        conn_keys.remove(pos);
+                                    }
+                                    let insert_at = match before_conn_id {
+                                        Some(bcid) => {
+                                            let idx = conn_keys.iter().position(|k| *k == conn_node_key(&bcid)).unwrap_or(conn_keys.len());
+                                            (idx + usize::from(insert_after)).min(conn_keys.len())
                                         }
-                                        DropTarget::Database(cid, db) => {
-                                            *action = TabUiAction::MoveSavedQuery {
-                                                id: from_id,
-                                                target_connection_id: cid,
-                                                target_database: Some(db),
-                                            };
+                                        None => conn_keys.len(),
+                                    };
+                                    conn_keys.insert(insert_at, conn_node_key(&from_conn));
+                                    let updates: Vec<(String, i32)> = conn_keys.iter().enumerate()
+                                        .map(|(i, k)| (k.clone(), i as i32))
+                                        .collect();
+                                    tab.saved_query_tree_order = order_map(&updates);
+                                    *action = TabUiAction::SaveTreeOrder(updates);
+                                }
+                                // ── 库/无库查询节点排序（二级，同一连接内）──
+                                (SavedQueryDragSource::Db(from_cid, from_db), Some(DropTarget::SiblingBefore { connection_id, before_key, insert_after })) => {
+                                    if let Some(mut keys) = sibling_keys(&tab.all_saved_queries, &connection_id, &tab.saved_query_tree_order) {
+                                        let from_key = format!("db:{from_cid}/{from_db}");
+                                        if let Some(pos) = keys.iter().position(|k| *k == from_key) {
+                                            keys.remove(pos);
                                         }
-                                        DropTarget::QueryBefore { connection_id, database, before_id, insert_after } => {
-                                            let same_group = from_entry.connection_id == connection_id
-                                                && from_entry.database == database;
-                                            if same_group {
-                                                // 同分组重排：在 before_id 指向的行的 insert_after 侧插入
-                                                let mut group: Vec<&SavedQueryEntry> = tab.all_saved_queries
-                                                    .iter()
-                                                    .filter(|e| e.connection_id == connection_id && e.database == database)
-                                                    .collect();
-                                                group.sort_by_key(|e| e.sort_order);
-                                                if let Some(pos) = group.iter().position(|e| e.id == from_id) {
-                                                    group.remove(pos);
-                                                }
-                                                let insert_at = match before_id {
-                                                    Some(bid) => {
-                                                        let idx = group.iter().position(|e| e.id == bid).unwrap_or(group.len());
-                                                        (idx + usize::from(insert_after)).min(group.len())
-                                                    }
-                                                    None => group.len(),
-                                                };
-                                                group.insert(insert_at, &from_entry);
-                                                let updates: Vec<(String, i32)> = group.iter().enumerate()
-                                                    .map(|(i, e)| (e.id.clone(), i as i32))
-                                                    .collect();
-                                                *action = TabUiAction::ReorderSavedQueries(updates);
-                                            } else {
-                                                // 跨分组：移动归属
+                                        let insert_at = match before_key {
+                                            Some(bk) => {
+                                                let idx = keys.iter().position(|k| *k == bk).unwrap_or(keys.len());
+                                                (idx + usize::from(insert_after)).min(keys.len())
+                                            }
+                                            None => keys.len(),
+                                        };
+                                        keys.insert(insert_at, from_key);
+                                        let updates: Vec<(String, i32)> = keys.iter().enumerate()
+                                            .map(|(i, k)| (k.clone(), i as i32))
+                                            .collect();
+                                        tab.saved_query_tree_order = order_map(&updates);
+                                        *action = TabUiAction::SaveTreeOrder(updates);
+                                    }
+                                }
+                                // ── 无库查询拖到二级兄弟之间 → 二级排序 ──
+                                (SavedQueryDragSource::Query(from_id, _), Some(DropTarget::SiblingBefore { connection_id, before_key, insert_after }))
+                                    if from_entry.as_ref().map(|e| e.connection_id == connection_id && e.database.is_none()).unwrap_or(false) => {
+                                    if let Some(mut keys) = sibling_keys(&tab.all_saved_queries, &connection_id, &tab.saved_query_tree_order) {
+                                        let from_key = format!("query:{from_id}");
+                                        if let Some(pos) = keys.iter().position(|k| *k == from_key) {
+                                            keys.remove(pos);
+                                        }
+                                        let insert_at = match before_key {
+                                            Some(bk) => {
+                                                let idx = keys.iter().position(|k| *k == bk).unwrap_or(keys.len());
+                                                (idx + usize::from(insert_after)).min(keys.len())
+                                            }
+                                            None => keys.len(),
+                                        };
+                                        keys.insert(insert_at, from_key);
+                                        let updates: Vec<(String, i32)> = keys.iter().enumerate()
+                                            .map(|(i, k)| (k.clone(), i as i32))
+                                            .collect();
+                                        tab.saved_query_tree_order = order_map(&updates);
+                                        *action = TabUiAction::SaveTreeOrder(updates);
+                                    }
+                                }
+                                // ── 查询 → 分组/查询（跨分组移动归属 + 组内重排，保持现状）──
+                                (SavedQueryDragSource::Query(from_id, _), Some(target)) => {
+                                    if let Some(from_entry) = from_entry {
+                                        match target {
+                                            DropTarget::Connection(cid) => {
                                                 *action = TabUiAction::MoveSavedQuery {
                                                     id: from_id,
-                                                    target_connection_id: connection_id,
-                                                    target_database: database,
+                                                    target_connection_id: cid,
+                                                    target_database: None,
                                                 };
                                             }
+                                            DropTarget::Database(cid, db) => {
+                                                *action = TabUiAction::MoveSavedQuery {
+                                                    id: from_id,
+                                                    target_connection_id: cid,
+                                                    target_database: Some(db),
+                                                };
+                                            }
+                                            DropTarget::QueryBefore { connection_id, database, before_id, insert_after } => {
+                                                let same_group = from_entry.connection_id == connection_id
+                                                    && from_entry.database == database;
+                                                if same_group {
+                                                    // 同分组重排：在 before_id 指向的行的 insert_after 侧插入
+                                                    let mut group: Vec<&SavedQueryEntry> = tab.all_saved_queries
+                                                        .iter()
+                                                        .filter(|e| e.connection_id == connection_id && e.database == database)
+                                                        .collect();
+                                                    group.sort_by_key(|e| e.sort_order);
+                                                    if let Some(pos) = group.iter().position(|e| e.id == from_id) {
+                                                        group.remove(pos);
+                                                    }
+                                                    let insert_at = match before_id {
+                                                        Some(bid) => {
+                                                            let idx = group.iter().position(|e| e.id == bid).unwrap_or(group.len());
+                                                            (idx + usize::from(insert_after)).min(group.len())
+                                                        }
+                                                        None => group.len(),
+                                                    };
+                                                    group.insert(insert_at, &from_entry);
+                                                    let updates: Vec<(String, i32)> = group.iter().enumerate()
+                                                        .map(|(i, e)| (e.id.clone(), i as i32))
+                                                        .collect();
+                                                    *action = TabUiAction::ReorderSavedQueries(updates);
+                                                } else {
+                                                    // 跨分组：移动归属
+                                                    *action = TabUiAction::MoveSavedQuery {
+                                                        id: from_id,
+                                                        target_connection_id: connection_id,
+                                                        target_database: database,
+                                                    };
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
+                                _ => {}
                             }
                         }
                         tab.saved_query_drag_target = None;
                     }
                 });
         });
+}
+
+/// 从全量 (key, order) 列表构建 order map
+fn order_map(updates: &[(String, i32)]) -> HashMap<String, i32> {
+    updates.iter().cloned().collect()
+}
+
+/// 收集指定连接下二级节点的 key 列表（库 + 无库查询），按当前树顺序
+fn sibling_keys(entries: &[SavedQueryEntry], connection_id: &str, order: &HashMap<String, i32>) -> Option<Vec<String>> {
+    let live = |_: &str| -> Option<String> { None };
+    let tree = build_tree(entries, &live, order);
+    tree.iter().find_map(|n| match n {
+        QueryTreeNode::Connection { key, children, .. } if key == &conn_node_key(connection_id) => {
+            let mut keys = Vec::new();
+            collect_level2_keys(children, &mut keys);
+            Some(keys)
+        }
+        _ => None,
+    })
+}
+
+/// 收集连接节点下所有二级节点 key（库 → db:<cid>/<db>，无库查询 → query:<id>）
+fn collect_level2_keys(children: &[QueryTreeNode], acc: &mut Vec<String>) {
+    for child in children {
+        match child {
+            QueryTreeNode::Database { key, .. } => acc.push(key.clone()),
+            QueryTreeNode::Query { entry_id, .. } => acc.push(format!("query:{entry_id}")),
+            _ => {}
+        }
+    }
 }
 
 fn is_expanded(tab: &QueryTabState, key: &str) -> bool {
@@ -36049,13 +36212,16 @@ fn render_conn_node(
     let expanded = is_expanded(tab, key);
     let row_height = 22.0;
     let label = display_name.clone();
-    let row_rect = ui.horizontal(|ui| {
+    let conn_id = key_conn_id(key);
+    let avail_right = ui.available_rect_before_wrap().right();
+    let inner = ui.horizontal(|ui| {
         ui.add_space(2.0);
         let arrow_rect = egui::Rect::from_center_size(
             ui.cursor().min + egui::vec2(8.0, row_height / 2.0),
             egui::vec2(11.0, 11.0),
         );
-        let arrow_resp = ui.allocate_rect(arrow_rect, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        // 推进布局光标，把后续 label 挤到箭头右侧（pure 绘制不占布局位）
+        ui.advance_cursor_after_rect(arrow_rect);
         let icon = if expanded {
             egui::include_image!("../assets/svg/chevron-down.svg")
         } else {
@@ -36065,37 +36231,77 @@ fn render_conn_node(
             .fit_to_exact_size(egui::vec2(11.0, 11.0))
             .tint(chrome.weak_text)
             .paint_at(ui, arrow_rect);
-        if arrow_resp.clicked() {
-            toggle_expanded(tab, key, action);
-        }
         // 标签（用按钮实现，悬停不显示文本 I-beam 光标）
-        let label_resp = ui.add(
+        ui.add(
             egui::Button::new(
                 RichText::new(&label).size(chrome.fonts.md).color(chrome.weak_text),
             )
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::NONE),
-        ).on_hover_cursor(egui::CursorIcon::PointingHand);
-        if label_resp.clicked() {
-            toggle_expanded(tab, key, action);
-        }
-    }).response.rect;
-    // 拖拽目标：整行可放（连接节点）——复用已占布局的行 rect，不额外占用高度
-    if tab.saved_query_drag_source.is_some() {
-        let resp = ui.interact(
-            row_rect,
-            ui.id().with(("conn-drop", key)),
-            egui::Sense::hover(),
         );
-        if resp.hovered() {
-            ui.painter().rect_stroke(
-                row_rect,
-                chrome.radius_md,
-                Stroke::new(1.0, chrome.selection_stroke),
-                egui::StrokeKind::Inside,
-            );
-            tab.saved_query_drag_target = Some(DropTarget::Connection(key_conn_id(key)));
+    });
+    // 行交互矩形扩展到面板全宽，整行（含右侧空白）可点击展开/收起
+    let row_rect = egui::Rect::from_min_max(
+        inner.response.rect.min,
+        egui::pos2(avail_right, inner.response.rect.max.y),
+    );
+    // 拖拽源 + 点击：整行可拖动排序（SavedQueryDragSource::Conn），点击切换展开。
+    // 注意：该 widget 位于箭头/标签之上，会接管其点击；箭头/标签点击行为本就是 toggle_expanded，故行为一致。
+    let row_sense = ui.interact(
+        row_rect,
+        ui.id().with(("conn-row", key)),
+        egui::Sense::click_and_drag(),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if row_sense.drag_started() {
+        tab.saved_query_drag_source = Some(SavedQueryDragSource::Conn(conn_id.clone()));
+    }
+    if row_sense.clicked() {
+        toggle_expanded(tab, key, action);
+    }
+    // 拖拽目标：
+    // - 拖拽源是连接节点 → 行间插入排序（上半 → 该行前，下半 → 该行后）
+    // - 拖拽源是查询行 → 落入连接节点，归属到该连接（保持原有行为）
+    match &tab.saved_query_drag_source {
+        Some(SavedQueryDragSource::Conn(from_conn)) => {
+            if from_conn != &conn_id {
+                let ptr_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y));
+                if let Some(y) = ptr_y {
+                    if y >= row_rect.top() && y < row_rect.center().y {
+                        ui.painter().hline(
+                            row_rect.x_range(),
+                            row_rect.top(),
+                            Stroke::new(2.0, chrome.selection_stroke),
+                        );
+                        tab.saved_query_drag_target = Some(DropTarget::ConnBefore { before_conn_id: Some(conn_id.clone()), insert_after: false });
+                    } else if y >= row_rect.center().y && y < row_rect.bottom() {
+                        ui.painter().hline(
+                            row_rect.x_range(),
+                            row_rect.bottom(),
+                            Stroke::new(2.0, chrome.selection_stroke),
+                        );
+                        tab.saved_query_drag_target = Some(DropTarget::ConnBefore { before_conn_id: Some(conn_id.clone()), insert_after: true });
+                    }
+                }
+            }
         }
+        Some(SavedQueryDragSource::Query(_, _)) => {
+            let resp = ui.interact(
+                row_rect,
+                ui.id().with(("conn-drop", key)),
+                egui::Sense::hover(),
+            );
+            if resp.hovered() {
+                ui.painter().rect_stroke(
+                    row_rect,
+                    chrome.radius_md,
+                    Stroke::new(1.0, chrome.selection_stroke),
+                    egui::StrokeKind::Inside,
+                );
+                tab.saved_query_drag_target = Some(DropTarget::Connection(conn_id.clone()));
+            }
+        }
+        _ => {}
     }
     if expanded {
         // 子节点用 Frame 左缩进，保持纯垂直流（避免 horizontal 嵌套导致宽度测量扩张）
@@ -36140,13 +36346,16 @@ fn render_db_node(
     let expanded = is_expanded(tab, key);
     let row_height = 22.0;
     let label = name.clone();
+    let (cid, db) = key_db_parts(key);
     // 库节点行：箭头 + 标签（纯水平流一行）
-    let row_rect = ui.horizontal(|ui| {
+    let avail_right = ui.available_rect_before_wrap().right();
+    let inner = ui.horizontal(|ui| {
         let arrow_rect = egui::Rect::from_center_size(
             ui.cursor().min + egui::vec2(8.0, row_height / 2.0),
             egui::vec2(11.0, 11.0),
         );
-        let arrow_resp = ui.allocate_rect(arrow_rect, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        // 推进布局光标，把后续 label 挤到箭头右侧（pure 绘制不占布局位）
+        ui.advance_cursor_after_rect(arrow_rect);
         let icon = if expanded {
             egui::include_image!("../assets/svg/chevron-down.svg")
         } else {
@@ -36156,37 +36365,76 @@ fn render_db_node(
             .fit_to_exact_size(egui::vec2(11.0, 11.0))
             .tint(chrome.weak_text)
             .paint_at(ui, arrow_rect);
-        if arrow_resp.clicked() {
-            toggle_expanded(tab, key, action);
-        }
-        let label_resp = ui.add(
+        ui.add(
             egui::Button::new(
                 RichText::new(&label).size(chrome.fonts.md).color(chrome.weak_text),
             )
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::NONE),
-        ).on_hover_cursor(egui::CursorIcon::PointingHand);
-        if label_resp.clicked() {
-            toggle_expanded(tab, key, action);
-        }
-    }).response.rect;
-    // 拖拽目标：整行可放（库节点）——复用已占布局的行 rect，不额外占用高度
-    if tab.saved_query_drag_source.is_some() {
-        let resp = ui.interact(
-            row_rect,
-            ui.id().with(("db-drop", key)),
-            egui::Sense::hover(),
         );
-        if resp.hovered() {
-            ui.painter().rect_stroke(
-                row_rect,
-                chrome.radius_md,
-                Stroke::new(1.0, chrome.selection_stroke),
-                egui::StrokeKind::Inside,
-            );
-            let (cid, db) = key_db_parts(key);
-            tab.saved_query_drag_target = Some(DropTarget::Database(cid, db));
+    });
+    // 行交互矩形扩展到面板全宽，整行（含右侧空白）可点击展开/收起
+    let row_rect = egui::Rect::from_min_max(
+        inner.response.rect.min,
+        egui::pos2(avail_right, inner.response.rect.max.y),
+    );
+    // 拖拽源 + 点击：整行可拖动排序（SavedQueryDragSource::Db），点击切换展开。
+    // 注意：该 widget 位于箭头/标签之上，会接管其点击；箭头/标签点击行为本就是 toggle_expanded，故行为一致。
+    let row_sense = ui.interact(
+        row_rect,
+        ui.id().with(("db-row", key)),
+        egui::Sense::click_and_drag(),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if row_sense.drag_started() {
+        tab.saved_query_drag_source = Some(SavedQueryDragSource::Db(cid.clone(), db.clone()));
+    }
+    if row_sense.clicked() {
+        toggle_expanded(tab, key, action);
+    }
+    // 拖拽目标：
+    // - 拖拽源是同一连接的库节点 → 行间插入排序（SiblingBefore）
+    // - 拖拽源是查询行 → 落入库节点，归属到该库（保持原有行为）
+    match &tab.saved_query_drag_source {
+        Some(SavedQueryDragSource::Db(from_cid, _)) => {
+            if from_cid == &cid {
+                let ptr_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y));
+                if let Some(y) = ptr_y {
+                    if y >= row_rect.top() && y < row_rect.center().y {
+                        ui.painter().hline(
+                            row_rect.x_range(),
+                            row_rect.top(),
+                            Stroke::new(2.0, chrome.selection_stroke),
+                        );
+                        tab.saved_query_drag_target = Some(DropTarget::SiblingBefore { connection_id: cid.clone(), before_key: Some(key.clone()), insert_after: false });
+                    } else if y >= row_rect.center().y && y < row_rect.bottom() {
+                        ui.painter().hline(
+                            row_rect.x_range(),
+                            row_rect.bottom(),
+                            Stroke::new(2.0, chrome.selection_stroke),
+                        );
+                        tab.saved_query_drag_target = Some(DropTarget::SiblingBefore { connection_id: cid.clone(), before_key: Some(key.clone()), insert_after: true });
+                    }
+                }
+            }
         }
+        Some(SavedQueryDragSource::Query(_, _)) => {
+            let resp = ui.interact(
+                row_rect,
+                ui.id().with(("db-drop", key)),
+                egui::Sense::hover(),
+            );
+            if resp.hovered() {
+                ui.painter().rect_stroke(
+                    row_rect,
+                    chrome.radius_md,
+                    Stroke::new(1.0, chrome.selection_stroke),
+                    egui::StrokeKind::Inside,
+                );
+                tab.saved_query_drag_target = Some(DropTarget::Database(cid.clone(), db.clone()));
+            }
+        }
+        _ => {}
     }
     if expanded {
         // 子查询行用 Frame 左缩进，保持纯垂直流
@@ -36214,6 +36462,9 @@ fn render_query_row(
     let full_title = title.as_str();
 
     let is_selected = tab.selected_saved_query_id.as_deref() == Some(entry_id.as_str());
+    // 内容被改变：编辑器中的 SQL/连接/库 与选中保存查询的基准不一致
+    let is_modified = is_selected
+        && tab.selected_saved_query_sql.as_deref().map(|orig| tab.sql != orig).unwrap_or(false);
     let text_color = if is_selected {
         panel_palette.selection_text
     } else {
@@ -36233,7 +36484,7 @@ fn render_query_row(
         let item_rect_center_y = rect.center().y;
         let item_rect_bottom = rect.bottom();
         if item_response.drag_started() {
-            tab.saved_query_drag_source = Some((entry_id.clone(), title.clone()));
+            tab.saved_query_drag_source = Some(SavedQueryDragSource::Query(entry_id.clone(), title.clone()));
         }
         // 纯文本查询行（无边框、无删除按钮，操作统一走右键菜单）
         let text_pos = egui::pos2(rect.left() + 8.0, rect.center().y);
@@ -36244,12 +36495,18 @@ fn render_query_row(
             font,
             text_color,
         );
-        // 选中指示器：缩短为 14px 高、与文字保持 4px 间距，文字位置不随选中变化
+        // 选中行高亮：被修改时红色整行，否则蓝色整行（不再单独绘制名称前的指示器）
         if is_selected {
+            let highlight = if is_modified {
+                chrome.danger
+            } else {
+                panel_palette.selection_stroke
+            };
+            ui.painter().rect_filled(rect, 2.0, highlight.gamma_multiply(0.12));
             ui.painter().vline(
-                rect.left() + 4.0,
+                rect.left() + 2.0,
                 rect.center().y - 7.0..=rect.center().y + 7.0,
-                Stroke::new(2.0, panel_palette.selection_stroke),
+                Stroke::new(2.0, highlight),
             );
         }
         // 单击：选中
@@ -36293,10 +36550,41 @@ fn render_query_row(
             }
         });
         // 拖拽目标：查询行间重排（排除拖拽源行自身，避免 self-drop 静默移到末尾）
-        if let Some((drag_source_id, _)) = &tab.saved_query_drag_source {
+        if let Some(SavedQueryDragSource::Query(drag_source_id, _)) = &tab.saved_query_drag_source {
             let ptr_y = ui.input(|i| i.pointer.hover_pos().map(|p| p.y));
             if drag_source_id != entry_id {
-                if let Some(y) = ptr_y {
+                // 无库查询作为二级排序节点：源与目标都是同连接下的无库查询行 → SiblingBefore
+                let source_is_flat_of_this_conn = tab.all_saved_queries.iter().any(
+                    |e| &e.id == drag_source_id && e.connection_id == *connection_id && e.database.is_none(),
+                );
+                let target_is_flat = database.is_none();
+                if source_is_flat_of_this_conn && target_is_flat {
+                    if let Some(y) = ptr_y {
+                        if y >= item_rect_center_y && y < item_rect_bottom {
+                            ui.painter().hline(
+                                rect.x_range(),
+                                rect.bottom(),
+                                Stroke::new(2.0, panel_palette.selection_stroke),
+                            );
+                            tab.saved_query_drag_target = Some(DropTarget::SiblingBefore {
+                                connection_id: connection_id.clone(),
+                                before_key: Some(format!("query:{entry_id}")),
+                                insert_after: true,
+                            });
+                        } else if y >= rect.top() && y < item_rect_center_y {
+                            ui.painter().hline(
+                                rect.x_range(),
+                                rect.top(),
+                                Stroke::new(2.0, panel_palette.selection_stroke),
+                            );
+                            tab.saved_query_drag_target = Some(DropTarget::SiblingBefore {
+                                connection_id: connection_id.clone(),
+                                before_key: Some(format!("query:{entry_id}")),
+                                insert_after: false,
+                            });
+                        }
+                    }
+                } else if let Some(y) = ptr_y {
                     if y >= item_rect_center_y && y < item_rect_bottom {
                         ui.painter().hline(
                             rect.x_range(),
@@ -36372,7 +36660,7 @@ fn all_tree_keys(tree: &[QueryTreeNode], acc: &mut HashSet<String>) {
 }
 
 fn total_tree_keys(tab: &QueryTabState) -> usize {
-    let tree = build_tree(&tab.all_saved_queries, &|_: &str| None);
+    let tree = build_tree(&tab.all_saved_queries, &|_: &str| None, &tab.saved_query_tree_order);
     let mut acc = HashSet::new();
     all_tree_keys(&tree, &mut acc);
     acc.len()

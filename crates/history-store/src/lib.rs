@@ -191,6 +191,29 @@ impl HistoryStore {
         Ok(())
     }
 
+    pub fn list_tree_order(&self) -> Result<Vec<(String, i32)>> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT node_key, sort_order FROM saved_query_tree_order ORDER BY sort_order ASC",
+        )?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn update_tree_orders(&self, updates: &[(String, i32)]) -> Result<()> {
+        let connection = self.connection.lock();
+        let tx = connection.unchecked_transaction()?;
+        for (node_key, sort_order) in updates {
+            tx.execute(
+                "INSERT INTO saved_query_tree_order (node_key, sort_order) VALUES (?1, ?2)
+                 ON CONFLICT(node_key) DO UPDATE SET sort_order = excluded.sort_order",
+                params![node_key, sort_order],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn list_saved_queries(
         &self,
         connection_id: &str,
@@ -270,7 +293,11 @@ impl HistoryStore {
                 UNIQUE(connection_id, sql_text)
             );
             CREATE INDEX IF NOT EXISTS idx_saved_queries_connection_id
-                ON saved_queries(connection_id, saved_at DESC);",
+                ON saved_queries(connection_id, saved_at DESC);
+            CREATE TABLE IF NOT EXISTS saved_query_tree_order (
+                node_key TEXT PRIMARY KEY,
+                sort_order INTEGER NOT NULL
+            );",
         )?;
 
         // Migrate: add database column if it doesn't exist (for databases created before v2)
