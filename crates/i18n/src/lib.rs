@@ -612,6 +612,7 @@ fn en(key: &'static str) -> &'static str {
         "已加载保存查询：{}" => "Loaded saved query: {}",
         "重命名" => "Rename",
         "删除" => "Delete",
+        "加载" => "Load",
         "保存失败：查询名称不能为空" => "Save failed: query name cannot be empty",
         "查询" => "Query",
         "主机" => "Host",

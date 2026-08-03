@@ -100,7 +100,7 @@ pub struct DesktopApp {
     children_by_node: HashMap<String, Vec<ExplorerNode>>,
     expanded_nodes: HashSet<String>,
     /// 已保存查询树展开状态（启动时从 ui_state 加载，供新建 tab 使用）
-    saved_query_tree_expanded: HashSet<String>,
+    saved_query_tree_collapsed: HashSet<String>,
     selected_tree_item: Option<String>,
     selected_connection: Option<String>,
     search_keyword: String,
@@ -785,7 +785,7 @@ struct QueryTabState {
     saved_queries_panel_visible: bool,
     saved_queries_panel_width: Option<f32>,
     /// 已保存查询树展开状态（节点 key 集合，空 = 全展开）
-    saved_query_tree_expanded: HashSet<String>,
+    saved_query_tree_collapsed: HashSet<String>,
     /// 已保存查询拖拽状态：正在被拖拽的查询 (ID, 名称)
     saved_query_drag_source: Option<(String, String)>,
     /// 已保存查询拖拽目标位置（用于指示线显示）
@@ -877,7 +877,7 @@ impl Clone for QueryTabState {
             bottom_panel_collapsed: self.bottom_panel_collapsed,
             saved_queries_panel_visible: self.saved_queries_panel_visible,
             saved_queries_panel_width: self.saved_queries_panel_width,
-            saved_query_tree_expanded: self.saved_query_tree_expanded.clone(),
+            saved_query_tree_collapsed: self.saved_query_tree_collapsed.clone(),
             saved_query_drag_source: self.saved_query_drag_source.clone(),
             saved_query_drag_target: self.saved_query_drag_target.clone(),
             folded: self.folded.clone(),
@@ -1772,7 +1772,7 @@ impl DesktopApp {
             form
         };
         // 已保存查询树展开状态：启动时从 ui_state 加载，供新建 tab 使用（空 = 默认全展开）
-        let saved_query_tree_expanded: HashSet<String> = services
+        let saved_query_tree_collapsed: HashSet<String> = services
             .load_ui_state("saved_queries_tree_expanded")
             .ok()
             .flatten()
@@ -1786,7 +1786,7 @@ impl DesktopApp {
             roots_by_connection: HashMap::new(),
             children_by_node: HashMap::new(),
             expanded_nodes: HashSet::new(),
-            saved_query_tree_expanded,
+            saved_query_tree_collapsed,
             selected_tree_item: None,
             selected_connection,
             search_keyword: String::new(),
@@ -4628,7 +4628,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     ) {
         let mut tab = QueryTabState::new(connection_id.clone());
         // 应用启动时加载的已保存查询树展开状态（QueryTabState::new 默认为空 = 全展开）
-        tab.saved_query_tree_expanded = self.saved_query_tree_expanded.clone();
+        tab.saved_query_tree_collapsed = self.saved_query_tree_collapsed.clone();
         tab.database = database;
         if let Some(sql) = initial_sql {
             tab.sql = sql;
@@ -10805,8 +10805,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     if tab.saved_queries_panel_visible {
                                         // 左侧可折叠面板 + 右侧编辑器
                                         let panel_width = tab.saved_queries_panel_width.unwrap_or(220.0);
+                                        // 消除 cell 间 spacing，把手宽度并入面板，避免面板与编辑器之间露出 panel_bg 竖带
+                                        ui.spacing_mut().item_spacing.x = 0.0;
                                         StripBuilder::new(ui)
-                                            .size(Size::exact(panel_width))
+                                            .size(Size::exact(panel_width + 8.0))
                                             .size(Size::exact(8.0)) // 拖拽区域
                                             .size(Size::remainder())
                                             .horizontal(|mut h_strip| {
@@ -10824,9 +10826,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         },
                                                     );
                                                 });
-                                                // 拖拽把手
+                                                // 拖拽把手（背景与两侧同色，视觉上不占独立面板）
                                                 h_strip.cell(|ui| {
                                                     let rect = ui.max_rect();
+                                                    let ep = editor_palette_from_ui(ui);
+                                                    ui.painter().rect_filled(rect, 0.0, ep.editor_bg);
                                                     let palette = mac_ui_palette_from_ui(ui);
                                                     let response = ui.allocate_rect(rect, egui::Sense::drag());
                                                     let interacted = response.hovered() || response.dragged();
@@ -10885,17 +10889,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     if response.clicked() {
                                                         tab.saved_queries_panel_visible = true;
                                                     }
-                                                    let galley = ui.painter().layout_no_wrap(
-                                                        "▶".to_string(),
-                                                        FontId::new(palette.fonts.tiny, FontFamily::Proportional),
-                                                        palette.weak_text,
-                                                    );
-                                                    let text_pos = egui::pos2(
-                                                        rect.center().x - galley.size().x / 2.0,
-                                                        rect.top() + 10.0,
-                                                    );
-                                                    ui.painter().with_clip_rect(rect);
-                                                    ui.painter().galley(text_pos, galley, palette.weak_text);
+                                                    egui::Image::new(egui::include_image!("../assets/svg/layout.svg"))
+                                                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                                                        .tint(palette.weak_text)
+                                                        .paint_at(ui, egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 19.0), egui::vec2(16.0, 16.0)));
                                                 });
                                                 h_strip.cell(|ui| {
                                                     render_query_editor(
@@ -20231,7 +20228,7 @@ impl QueryTabState {
             bottom_panel_collapsed: true,
             saved_queries_panel_visible: true,
             saved_queries_panel_width: None,
-            saved_query_tree_expanded: HashSet::new(),
+            saved_query_tree_collapsed: HashSet::new(),
             saved_query_drag_source: None,
             saved_query_drag_target: None,
             folded: Vec::new(),
@@ -35787,20 +35784,16 @@ fn render_saved_queries_panel(
                         .color(chrome.weak_text),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // 折叠按钮
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("◀")
-                                    .size(chrome.fonts.lg)
-                                    .color(chrome.weak_text),
-                            )
-                            .fill(Color32::TRANSPARENT)
-                            .stroke(Stroke::NONE)
-                            .min_size(Vec2::new(24.0, 22.0)),
-                        )
-                        .clicked()
-                    {
+                    // 折叠按钮（复用侧边栏 layout.svg 图标）
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(rect, chrome.radius_md, ui.visuals().widgets.hovered.weak_bg_fill);
+                    }
+                    egui::Image::new(egui::include_image!("../assets/svg/layout.svg"))
+                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                        .tint(chrome.weak_text)
+                        .paint_at(ui, egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
+                    if resp.clicked() {
                         tab.saved_queries_panel_visible = false;
                     }
                 });
@@ -35815,24 +35808,25 @@ fn render_saved_queries_panel(
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
                 let expand_btn = query_toolbar_button(ui, tr!("展开全部"), style);
                 let collapse_btn = query_toolbar_button(ui, tr!("收起全部"), style);
-                let any_collapsed = tab.saved_query_tree_expanded.len() < total_tree_keys(tab);
+                let some_expanded = tab.saved_query_tree_collapsed.len() < total_tree_keys(tab);
                 if expand_btn.clicked() {
-                    tab.saved_query_tree_expanded.clear();
+                    tab.saved_query_tree_collapsed.clear();
                     *action = TabUiAction::SaveSavedQueryTreeState(Vec::new());
                 }
-                if collapse_btn.clicked() && any_collapsed {
+                if collapse_btn.clicked() && some_expanded {
                     let mut keys = HashSet::new();
                     let tree = build_tree(&tab.all_saved_queries, live_conn_name);
                     all_tree_keys(&tree, &mut keys);
-                    tab.saved_query_tree_expanded = keys.clone();
+                    tab.saved_query_tree_collapsed = keys.clone();
                     *action = TabUiAction::SaveSavedQueryTreeState(keys.into_iter().collect());
                 }
             });
             ui.add_space(6.0);
 
             let tree = build_tree(&tab.all_saved_queries, live_conn_name);
-            egui::ScrollArea::vertical()
+            egui::ScrollArea::both()
                 .id_salt(format!("saved-queries-tree-{}", tab.id))
+                .auto_shrink([false, false]) // 宽度固定为面板宽，内容超宽时出现水平滚动条
                 .show(ui, |ui| {
                     if tree.is_empty() {
                         ui.vertical_centered(|ui| {
@@ -35914,8 +35908,8 @@ fn render_saved_queries_panel(
 }
 
 fn is_expanded(tab: &QueryTabState, key: &str) -> bool {
-    tab.saved_query_tree_expanded.is_empty() // 空 = 全展开
-        || tab.saved_query_tree_expanded.contains(key)
+    // 集合存"收起"的 key：空 = 全展开（默认）
+    !tab.saved_query_tree_collapsed.contains(key)
 }
 
 fn render_conn_node(
@@ -35928,49 +35922,48 @@ fn render_conn_node(
     let QueryTreeNode::Connection { key, display_name, children } = node else { return };
     let expanded = is_expanded(tab, key);
     let row_height = 22.0;
-    let count = child_query_count(children);
-    let label = format!("{}  ({})", display_name, count);
-    ui.horizontal(|ui| {
+    let label = display_name.clone();
+    let row_rect = ui.horizontal(|ui| {
         ui.add_space(2.0);
-        let arrow = if expanded { "▼" } else { "▶" };
-        let arrow_resp = ui.add(
-            egui::Button::new(
-                RichText::new(arrow)
-                    .size(chrome.fonts.xs)
-                    .color(chrome.weak_text),
-            )
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .min_size(Vec2::new(16.0, row_height)),
+        let arrow_rect = egui::Rect::from_center_size(
+            ui.cursor().min + egui::vec2(8.0, row_height / 2.0),
+            egui::vec2(11.0, 11.0),
         );
+        let arrow_resp = ui.allocate_rect(arrow_rect, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let icon = if expanded {
+            egui::include_image!("../assets/svg/chevron-down.svg")
+        } else {
+            egui::include_image!("../assets/svg/chevron-right.svg")
+        };
+        egui::Image::new(icon)
+            .fit_to_exact_size(egui::vec2(11.0, 11.0))
+            .tint(chrome.weak_text)
+            .paint_at(ui, arrow_rect);
         if arrow_resp.clicked() {
             toggle_expanded(tab, key, action);
         }
-        // 标签
+        // 标签（用按钮实现，悬停不显示文本 I-beam 光标）
         let label_resp = ui.add(
-            egui::Label::new(
-                RichText::new(&label).size(chrome.fonts.xs).color(chrome.weak_text),
+            egui::Button::new(
+                RichText::new(&label).size(chrome.fonts.md).color(chrome.weak_text),
             )
-            .sense(egui::Sense::click()),
-        );
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE),
+        ).on_hover_cursor(egui::CursorIcon::PointingHand);
         if label_resp.clicked() {
             toggle_expanded(tab, key, action);
         }
-    });
-    // 拖拽目标：整行可放（连接节点）
-    let dragging = tab.saved_query_drag_source.is_some();
-    if dragging {
-        let resp = ui.scope(|ui| {
-            let (r, resp) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), row_height),
-                egui::Sense::hover(),
-            );
-            ui.painter().rect_filled(r, chrome.radius_md, Color32::TRANSPARENT);
-            resp
-        }).inner;
+    }).response.rect;
+    // 拖拽目标：整行可放（连接节点）——复用已占布局的行 rect，不额外占用高度
+    if tab.saved_query_drag_source.is_some() {
+        let resp = ui.interact(
+            row_rect,
+            ui.id().with(("conn-drop", key)),
+            egui::Sense::hover(),
+        );
         if resp.hovered() {
             ui.painter().rect_stroke(
-                resp.rect,
+                row_rect,
                 chrome.radius_md,
                 Stroke::new(1.0, chrome.selection_stroke),
                 egui::StrokeKind::Inside,
@@ -35979,36 +35972,34 @@ fn render_conn_node(
         }
     }
     if expanded {
-        for child in children {
-            match child {
-                QueryTreeNode::Database { .. } => {
-                    // 库节点带缩进
-                    ui.horizontal(|ui| {
-                        ui.add_space(14.0);
-                        render_db_node(ui, tab, chrome, action, child);
-                    });
+        // 子节点用 Frame 左缩进，保持纯垂直流（避免 horizontal 嵌套导致宽度测量扩张）
+        egui::Frame::new()
+            .inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 0 })
+            .show(ui, |ui| {
+                for child in children {
+                    match child {
+                        QueryTreeNode::Database { .. } => {
+                            render_db_node(ui, tab, chrome, action, child);
+                        }
+                        QueryTreeNode::Query { .. } => {
+                            render_query_row(ui, tab, chrome, action, child, 0);
+                        }
+                        _ => {}
+                    }
                 }
-                QueryTreeNode::Query { .. } => {
-                    ui.horizontal(|ui| {
-                        ui.add_space(14.0);
-                        render_query_row(ui, tab, chrome, action, child, 0);
-                    });
-                }
-                _ => {}
-            }
-        }
+            });
     }
     ui.add_space(2.0);
 }
 
 // 切换展开/收起：改内存状态 + 产生持久化 action（save_ui_state 由 app 主循环处理）
 fn toggle_expanded(tab: &mut QueryTabState, key: &str, action: &mut TabUiAction) {
-    if tab.saved_query_tree_expanded.contains(key) {
-        tab.saved_query_tree_expanded.remove(key);
+    if tab.saved_query_tree_collapsed.contains(key) {
+        tab.saved_query_tree_collapsed.remove(key);
     } else {
-        tab.saved_query_tree_expanded.insert(key.to_string());
+        tab.saved_query_tree_collapsed.insert(key.to_string());
     }
-    let keys: Vec<String> = tab.saved_query_tree_expanded.iter().cloned().collect();
+    let keys: Vec<String> = tab.saved_query_tree_collapsed.iter().cloned().collect();
     *action = TabUiAction::SaveSavedQueryTreeState(keys);
 }
 
@@ -36022,47 +36013,47 @@ fn render_db_node(
     let QueryTreeNode::Database { key, name, children } = node else { return };
     let expanded = is_expanded(tab, key);
     let row_height = 22.0;
-    let count = child_query_count(children);
-    let label = format!("{}  ({})", name, count);
-    ui.horizontal(|ui| {
-        let arrow = if expanded { "▼" } else { "▶" };
-        let arrow_resp = ui.add(
-            egui::Button::new(
-                RichText::new(arrow)
-                    .size(chrome.fonts.xs)
-                    .color(chrome.weak_text),
-            )
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::NONE)
-            .min_size(Vec2::new(16.0, row_height)),
+    let label = name.clone();
+    // 库节点行：箭头 + 标签（纯水平流一行）
+    let row_rect = ui.horizontal(|ui| {
+        let arrow_rect = egui::Rect::from_center_size(
+            ui.cursor().min + egui::vec2(8.0, row_height / 2.0),
+            egui::vec2(11.0, 11.0),
         );
+        let arrow_resp = ui.allocate_rect(arrow_rect, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let icon = if expanded {
+            egui::include_image!("../assets/svg/chevron-down.svg")
+        } else {
+            egui::include_image!("../assets/svg/chevron-right.svg")
+        };
+        egui::Image::new(icon)
+            .fit_to_exact_size(egui::vec2(11.0, 11.0))
+            .tint(chrome.weak_text)
+            .paint_at(ui, arrow_rect);
         if arrow_resp.clicked() {
             toggle_expanded(tab, key, action);
         }
         let label_resp = ui.add(
-            egui::Label::new(
-                RichText::new(&label).size(chrome.fonts.xs).color(chrome.weak_text),
+            egui::Button::new(
+                RichText::new(&label).size(chrome.fonts.md).color(chrome.weak_text),
             )
-            .sense(egui::Sense::click()),
-        );
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE),
+        ).on_hover_cursor(egui::CursorIcon::PointingHand);
         if label_resp.clicked() {
             toggle_expanded(tab, key, action);
         }
-    });
-    // 拖拽目标：整行可放（库节点）
-    let dragging = tab.saved_query_drag_source.is_some();
-    if dragging {
-        let resp = ui.scope(|ui| {
-            let (r, resp) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), row_height),
-                egui::Sense::hover(),
-            );
-            ui.painter().rect_filled(r, chrome.radius_md, Color32::TRANSPARENT);
-            resp
-        }).inner;
+    }).response.rect;
+    // 拖拽目标：整行可放（库节点）——复用已占布局的行 rect，不额外占用高度
+    if tab.saved_query_drag_source.is_some() {
+        let resp = ui.interact(
+            row_rect,
+            ui.id().with(("db-drop", key)),
+            egui::Sense::hover(),
+        );
         if resp.hovered() {
             ui.painter().rect_stroke(
-                resp.rect,
+                row_rect,
                 chrome.radius_md,
                 Stroke::new(1.0, chrome.selection_stroke),
                 egui::StrokeKind::Inside,
@@ -36072,12 +36063,14 @@ fn render_db_node(
         }
     }
     if expanded {
-        for child in children {
-            ui.horizontal(|ui| {
-                ui.add_space(14.0);
-                render_query_row(ui, tab, chrome, action, child, 0);
+        // 子查询行用 Frame 左缩进，保持纯垂直流
+        egui::Frame::new()
+            .inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 0 })
+            .show(ui, |ui| {
+                for child in children {
+                    render_query_row(ui, tab, chrome, action, child, 0);
+                }
             });
-        }
     }
     ui.add_space(2.0);
 }
@@ -36092,89 +36085,67 @@ fn render_query_row(
 ) {
     let QueryTreeNode::Query { entry_id, title, connection_id, database, sql_text } = node else { return };
     let panel_palette = mac_ui_palette_from_ui(ui);
-    let panel_width = ui.available_width();
-    let btn_width = panel_width;
     let full_title = title.as_str();
-    let max_cols = ((btn_width - 36.0) / 7.5) as usize;
-    let display_title = truncate_ui_label_by_width(full_title, max_cols.max(3));
-    let is_truncated = display_title.len() < full_title.len();
 
     let is_selected = tab.selected_saved_query_id.as_deref() == Some(entry_id.as_str());
-    let is_modified = is_selected && {
-        let sql_changed = tab
-            .selected_saved_query_sql
-            .as_deref()
-            .map(|orig| tab.sql != orig)
-            .unwrap_or(false);
-        let conn_changed = tab
-            .selected_saved_query_connection_id
-            .as_deref()
-            .map(|orig| tab.connection_id.as_deref() != Some(orig))
-            .unwrap_or(false);
-        let db_changed = tab.selected_saved_query_database != tab.database;
-        sql_changed || conn_changed || db_changed
-    };
-    let (fill, stroke_color, text_color) = if is_modified {
-        (Color32::TRANSPARENT, panel_palette.modified_button_stroke, panel_palette.modified_button_text)
-    } else if is_selected {
-        (Color32::TRANSPARENT, panel_palette.selection_stroke, panel_palette.selection_text)
+    let text_color = if is_selected {
+        panel_palette.selection_text
     } else {
-        (Color32::TRANSPARENT, chrome.soft_border, chrome.weak_text)
+        chrome.weak_text
     };
+    // 完整标题宽度 + 左右 padding；超宽时超出面板，ScrollArea 产生水平滚动条
+    let font = FontId::new(chrome.fonts.md, FontFamily::Monospace);
+    let text_width = ui.painter().layout_no_wrap(full_title.to_string(), font.clone(), text_color).size().x;
+    let btn_width = (text_width + 16.0).max(ui.available_width());
 
     ui.horizontal(|ui| {
         let (rect, item_response) = ui.allocate_exact_size(
             egui::vec2(btn_width, 22.0),
             egui::Sense::click_and_drag(),
         );
+        let item_response = item_response.on_hover_cursor(egui::CursorIcon::PointingHand);
         let item_rect_center_y = rect.center().y;
         let item_rect_bottom = rect.bottom();
         if item_response.drag_started() {
             tab.saved_query_drag_source = Some((entry_id.clone(), title.clone()));
         }
-        ui.painter().rect_filled(rect, chrome.radius_md, fill);
-        ui.painter().rect_stroke(rect, chrome.radius_md, Stroke::new(1.0, stroke_color), egui::StrokeKind::Inside);
-        let delete_icon_rect = egui::Rect::from_center_size(
-            egui::pos2(rect.right() - 12.0, rect.center().y),
-            egui::vec2(20.0, 20.0),
-        );
+        // 纯文本查询行（无边框、无删除按钮，操作统一走右键菜单）
+        let text_pos = egui::pos2(rect.left() + 8.0, rect.center().y);
         ui.painter().text(
-            egui::pos2(rect.left() + 8.0, rect.center().y),
+            text_pos,
             egui::Align2::LEFT_CENTER,
-            &display_title,
-            FontId::new(chrome.fonts.xs, FontFamily::Monospace),
+            &full_title,
+            font,
             text_color,
         );
-        // 删除图标
-        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-        let hovering_delete = pointer_pos.map(|p| delete_icon_rect.contains(p)).unwrap_or(false);
-        let del_color = if hovering_delete { chrome.text } else { chrome.weak_text };
-        ui.painter().text(
-            delete_icon_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "✕",
-            FontId::new(chrome.fonts.tiny, FontFamily::Proportional),
-            del_color,
-        );
-        if hovering_delete {
-            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+        // 选中指示器：缩短为 14px 高、与文字保持 4px 间距，文字位置不随选中变化
+        if is_selected {
+            ui.painter().vline(
+                rect.left() + 4.0,
+                rect.center().y - 7.0..=rect.center().y + 7.0,
+                Stroke::new(2.0, panel_palette.selection_stroke),
+            );
         }
-        if is_truncated {
-            item_response.clone().on_hover_text(full_title.to_string());
-        }
-        // 单击删除
+        // 单击：选中
         if item_response.clicked() {
-            let click_pos = item_response.interact_pointer_pos();
-            let clicked_delete = click_pos.map(|p| delete_icon_rect.contains(p)).unwrap_or(false);
-            if clicked_delete {
-                *action = TabUiAction::PromptDeleteSavedQuery(make_entry(entry_id, connection_id, database, title, sql_text));
-            }
+            tab.selected_saved_query_id = Some(entry_id.clone());
         }
-        // 双击加载
+        // 双击：加载
         if item_response.double_clicked() {
-            let click_pos = item_response.interact_pointer_pos();
-            let on_delete = click_pos.map(|p| delete_icon_rect.contains(p)).unwrap_or(false);
-            if !on_delete {
+            tab.sql = sql_text.clone();
+            tab.connection_id = Some(connection_id.clone());
+            tab.database = database.clone();
+            tab.title = title.clone();
+            tab.selected_saved_query_id = Some(entry_id.clone());
+            tab.selected_saved_query_sql = Some(sql_text.clone());
+            tab.selected_saved_query_connection_id = Some(connection_id.clone());
+            tab.selected_saved_query_database = database.clone();
+            *action = TabUiAction::LoadSavedQuery(connection_id.clone());
+        }
+        // 右键菜单：统一入口（重命名 / 删除 / 加载）
+        item_response.context_menu(|ui| {
+            ctx_menu_style(ui);
+            if ui.button(tr!("加载")).clicked() {
                 tab.sql = sql_text.clone();
                 tab.connection_id = Some(connection_id.clone());
                 tab.database = database.clone();
@@ -36184,11 +36155,8 @@ fn render_query_row(
                 tab.selected_saved_query_connection_id = Some(connection_id.clone());
                 tab.selected_saved_query_database = database.clone();
                 *action = TabUiAction::LoadSavedQuery(connection_id.clone());
+                ui.close();
             }
-        }
-        // 右键菜单
-        item_response.context_menu(|ui| {
-            ctx_menu_style(ui);
             if ui.button(tr!("重命名")).clicked() {
                 *action = TabUiAction::OpenRenameSavedQueryDialog(make_entry(entry_id, connection_id, database, title, sql_text));
                 ui.close();
@@ -36215,7 +36183,7 @@ fn render_query_row(
                             before_id: Some(entry_id.clone()),
                             insert_after: true,
                         });
-                    } else if y < item_rect_center_y {
+                    } else if y >= rect.top() && y < item_rect_center_y {
                         ui.painter().hline(
                             rect.x_range(),
                             rect.top(),
@@ -36259,17 +36227,6 @@ fn make_entry(
         sort_order: 0,
         connection_name: None,
     }
-}
-
-fn child_query_count(children: &[QueryTreeNode]) -> usize {
-    children
-        .iter()
-        .map(|c| match c {
-            QueryTreeNode::Database { children, .. } => child_query_count(children),
-            QueryTreeNode::Query { .. } => 1,
-            _ => 0,
-        })
-        .sum()
 }
 
 fn all_tree_keys(tree: &[QueryTreeNode], acc: &mut HashSet<String>) {
