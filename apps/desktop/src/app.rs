@@ -15748,9 +15748,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let has_sql = delete_sql.is_some();
         let card_w = if has_sql { 580.0 } else { 340.0 };
         let header_h = if has_sql { 48.0 } else { 62.0 };
-        let footer_h = 40.0;
+        let footer_h = 26.0;
         let sql_h = if has_sql { 112.0 } else { 0.0 };
-        let gap_header_to_sql = if has_sql { 4.0 } else { 0.0 };
+        let gap_header_to_sql = if has_sql { 12.0 } else { 0.0 };
         let gap_sql_to_footer = if has_sql { 16.0 } else { 0.0 };
         let card_h = if has_sql {
             20.0 + header_h + gap_header_to_sql + sql_h + gap_sql_to_footer + footer_h + 20.0
@@ -15769,7 +15769,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     egui::Rect::from_center_size(max_rect.center(), egui::vec2(card_w, card_h));
 
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                    let r = colors.radius_xl;
+                    let r = colors.radius_xxl;
                     let bg = colors.dialog_card_bg;
                     let shadow_color = colors.dialog_card_shadow;
                     ui.painter().rect_filled(
@@ -15780,7 +15780,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.painter().rect_filled(ui.max_rect(), r, bg);
                     ui.painter().rect_stroke(
                         ui.max_rect(), r,
-                        Stroke::new(0.5, colors.dialog_card_border),
+                        Stroke::new(1.0, palette.border),
                         egui::StrokeKind::Outside,
                     );
 
@@ -15798,10 +15798,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                         ui.allocate_ui_at_rect(header_rect, |ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
-                            ui.label(
-                                RichText::new(tr!("删除确认"))
-                                    .size(self.theme.fonts.xl).color(palette.title).strong(),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                ui.label(RichText::new("⚠").size(self.theme.fonts.heading).color(colors.warning_icon));
+                                ui.label(
+                                    RichText::new(tr!("删除确认"))
+                                        .size(self.theme.fonts.xl).color(palette.title).strong(),
+                                );
+                            });
                             ui.label(
                                 RichText::new(&message)
                                     .size(self.theme.fonts.md).color(palette.text),
@@ -15843,25 +15847,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.add_space(ui.available_width());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                    ui.spacing_mut().button_padding = egui::vec2(18.0, 7.0);
+                                    let danger_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_danger_style(&self.theme.colors, self.theme.fonts.sm) };
+                                    let subtle_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_subtle_style(&self.theme.colors, self.theme.fonts.sm) };
 
-                                    if destructive_dialog_button(
-                                        ui,
-                                        tr!("删除"),
-                                        &self.theme.colors,
-                                        &self.theme.fonts,
-                                    ).clicked() {
+                                    if mini_button(ui, tr!("删除"), danger_style).clicked() {
                                         should_confirm = true;
                                         should_close = true;
                                     }
 
-                                    if dialog_button(
-                                        ui,
-                                        tr!("取消"),
-                                        false,
-                                        &self.theme.colors,
-                                        &self.theme.fonts,
-                                    ).clicked() {
+                                    if mini_button(ui, tr!("取消"), subtle_style).clicked() {
                                         should_close = true;
                                     }
                                 });
@@ -16180,9 +16174,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let total_sql = sql_statements.len();
         let card_w = 680.0;
         let header_h = 48.0;
-        let footer_h = 40.0;
+        let footer_h = 26.0;
         let sql_h = 124.0;
-        let gap_header_to_sql = 2.0;
+        let gap_header_to_sql = 12.0;
         let gap_sql_to_footer = 18.0;
         let card_h = if saving {
             132.0
@@ -16201,7 +16195,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     egui::Rect::from_center_size(max_rect.center(), egui::vec2(card_w, card_h));
 
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                        let r = colors.radius_xl;
+                        let r = colors.radius_xxl;
                         let bg = colors.dialog_card_bg;
                         let shadow_color = colors.dialog_card_shadow;
                         ui.painter().rect_filled(
@@ -16212,7 +16206,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.painter().rect_filled(ui.max_rect(), r, bg);
                         ui.painter().rect_stroke(
                             ui.max_rect(), r,
-                            Stroke::new(0.5, colors.dialog_card_border),
+                            Stroke::new(1.0, palette.border),
                             egui::StrokeKind::Outside,
                         );
 
@@ -16248,10 +16242,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                                     ui.allocate_ui_at_rect(header_rect, |ui| {
                                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
-                                        ui.label(
-                                            RichText::new(tr!("确认保存"))
-                                                .size(self.theme.fonts.xl).color(palette.title).strong(),
-                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                            ui.label(RichText::new("✓").size(self.theme.fonts.heading).color(colors.success));
+                                            ui.label(
+                                                RichText::new(tr!("确认保存"))
+                                                    .size(self.theme.fonts.xl).color(palette.title).strong(),
+                                            );
+                                        });
                                         ui.label(
                                             RichText::new(tr!("即将执行 {} 条 SQL，修改 {} 个单元格：", total_sql, cell_count))
                                                 .size(self.theme.fonts.md).color(palette.text),
@@ -16291,26 +16289,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
                                                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                                ui.spacing_mut().button_padding = egui::vec2(18.0, 7.0);
+                                                    let ok_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_primary_style(&self.theme.colors, self.theme.fonts.sm) };
+                                                    let cancel_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_subtle_style(&self.theme.colors, self.theme.fonts.sm) };
 
-                                                if dialog_button(
-                                                    ui,
-                                                    tr!("确认"),
-                                                    true,
-                                                    &self.theme.colors,
-                                                    &self.theme.fonts,
-                                                ).clicked() {
+                                                    if mini_button(ui, tr!("确认"), ok_style).clicked() {
                                                         should_confirm = true;
                                                         should_close = true;
                                                     }
 
-                                                if dialog_button(
-                                                    ui,
-                                                    tr!("取消"),
-                                                    false,
-                                                    &self.theme.colors,
-                                                    &self.theme.fonts,
-                                                ).clicked() {
+                                                    if mini_button(ui, tr!("取消"), cancel_style).clicked() {
                                                         should_close = true;
                                                     }
                                                 },
@@ -16513,9 +16500,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         let card_w = 680.0;
         let header_h = 48.0;
-        let footer_h = 40.0;
+        let footer_h = 26.0;
         let sql_h = 124.0;
-        let gap_header_to_sql = 2.0;
+        let gap_header_to_sql = 12.0;
         let gap_sql_to_footer = 18.0;
         let card_h = 20.0 + header_h + gap_header_to_sql + sql_h + gap_sql_to_footer + footer_h + 20.0;
 
@@ -16530,7 +16517,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     egui::Rect::from_center_size(max_rect.center(), egui::vec2(card_w, card_h));
 
                 ui.allocate_ui_at_rect(card_rect, |ui| {
-                    let r = colors.radius_xl;
+                    let r = colors.radius_xxl;
                     let bg = colors.dialog_card_bg;
                     let shadow_color = colors.dialog_card_shadow;
                     ui.painter().rect_filled(
@@ -16560,10 +16547,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                         ui.allocate_ui_at_rect(header_rect, |ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
-                            ui.label(
-                                RichText::new(tr!("确认保存"))
-                                    .size(self.theme.fonts.xl).color(palette.title).strong(),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                                ui.label(RichText::new("✓").size(self.theme.fonts.heading).color(colors.success));
+                                ui.label(
+                                    RichText::new(tr!("确认保存"))
+                                        .size(self.theme.fonts.xl).color(palette.title).strong(),
+                                );
+                            });
                             ui.label(
                                 RichText::new(tr!("即将执行 {} 条 SQL，修改 {} 个单元格：", total_sql, cell_count))
                                     .size(self.theme.fonts.md).color(palette.text),
@@ -16603,26 +16594,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                        ui.spacing_mut().button_padding = egui::vec2(18.0, 7.0);
+                                        let ok_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_primary_style(&self.theme.colors, self.theme.fonts.sm) };
+                                        let cancel_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_subtle_style(&self.theme.colors, self.theme.fonts.sm) };
 
-                                        if dialog_button(
-                                            ui,
-                                            tr!("执行"),
-                                            true,
-                                            &self.theme.colors,
-                                            &self.theme.fonts,
-                                        ).clicked() {
+                                        if mini_button(ui, tr!("执行"), ok_style).clicked() {
                                             should_confirm = true;
                                             should_close = true;
                                         }
 
-                                        if dialog_button(
-                                            ui,
-                                            tr!("取消"),
-                                            false,
-                                            &self.theme.colors,
-                                            &self.theme.fonts,
-                                        ).clicked() {
+                                        if mini_button(ui, tr!("取消"), cancel_style).clicked() {
                                             should_close = true;
                                         }
                                     },
@@ -31990,44 +31970,6 @@ fn apply_mac_dialog_style(ui: &mut egui::Ui, palette: MacDialogPalette) {
     style.visuals.widgets.hovered.corner_radius = cr;
     style.visuals.widgets.active.corner_radius = cr;
     style.visuals.widgets.open.corner_radius = cr;
-}
-
-fn dialog_button(ui: &mut egui::Ui, label: &str, primary: bool, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> egui::Response {
-    let palette = mac_dialog_palette_from_ui(ui);
-    let (stroke, text) = if primary {
-        (
-            Stroke::new(1.0, palette.primary_button_stroke),
-            palette.primary_button_text,
-        )
-    } else {
-        (
-            Stroke::new(1.0, palette.secondary_button_stroke),
-            palette.secondary_button_text,
-        )
-    };
-
-    ui.add(
-        egui::Button::new(RichText::new(label).size(fonts.lg).strong().color(text))
-            .fill(Color32::TRANSPARENT)
-            .stroke(stroke)
-            .corner_radius(colors.radius_xl)
-            .min_size(Vec2::new(108.0, 36.0)),
-    )
-}
-
-fn destructive_dialog_button(ui: &mut egui::Ui, label: &str, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            RichText::new(label)
-                .size(fonts.lg)
-                .strong()
-                .color(colors.delete_button_bg),
-        )
-        .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, colors.delete_button_bg))
-        .corner_radius(colors.radius_xl)
-        .min_size(Vec2::new(108.0, 36.0)),
-    )
 }
 
 fn form_grid_row(ui: &mut egui::Ui, label: &str, add_value: impl FnOnce(&mut egui::Ui)) {
