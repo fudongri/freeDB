@@ -1517,6 +1517,8 @@ struct ExplainNode {
 struct SavedQueryDialogState {
     mode: SavedQueryDialogMode,
     connection_id: String,
+    connection_name: String,
+    database: Option<String>,
     title_input: String,
 }
 
@@ -9244,18 +9246,27 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             })
             .unwrap_or_default();
         let existing = saved_queries.iter().find(|e| e.sql_text.trim() == sql.trim());
+        let conn_name = self.connection_name(&connection_id);
+        let tab_database = self.tabs.get(self.active_tab).and_then(|t| match t {
+            WorkspaceTab::Query(tab) => tab.database.clone(),
+            _ => None,
+        });
         if let Some(entry) = existing {
             self.pending_saved_query_dialog = Some(SavedQueryDialogState {
                 mode: SavedQueryDialogMode::Update {
                     entry_id: entry.id.clone(),
                 },
                 connection_id: connection_id.to_string(),
+                connection_name: conn_name,
+                database: entry.database.clone(),
                 title_input: entry.title.clone(),
             });
         } else {
             self.pending_saved_query_dialog = Some(SavedQueryDialogState {
                 mode: SavedQueryDialogMode::Save,
                 connection_id: connection_id.to_string(),
+                connection_name: conn_name,
+                database: tab_database,
                 title_input: String::new(),
             });
         }
@@ -9306,6 +9317,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 entry_id: entry.id.clone(),
             },
             connection_id: entry.connection_id.clone(),
+            connection_name: self.connection_name(&entry.connection_id),
+            database: entry.database.clone(),
             title_input: entry.title.clone(),
         });
     }
@@ -15930,47 +15943,61 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .show(ctx, |ui| {
                 ui.scope(|ui| {
                     apply_mac_dialog_style(ui, palette);
+                    // 与其它弹窗一致：表单控件用更小的圆角
+                    let small_radius = egui::CornerRadius::same(4);
+                    ui.style_mut().visuals.widgets.inactive.corner_radius = small_radius;
+                    ui.style_mut().visuals.widgets.hovered.corner_radius = small_radius;
+                    ui.style_mut().visuals.widgets.active.corner_radius = small_radius;
+                    ui.style_mut().visuals.widgets.open.corner_radius = small_radius;
                     ui.set_width(400.0);
                     ui.spacing_mut().item_spacing = egui::vec2(14.0, 12.0);
-                    ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
 
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(dialog_title).size(self.theme.fonts.heading).strong().color(palette.title));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("✕").size(self.theme.fonts.xl).color(palette.subtitle))
-                                        .fill(Color32::TRANSPARENT)
-                                        .stroke(Stroke::NONE),
-                                )
-                                .clicked()
-                            {
+                            if mini_button(ui, tr!("关闭"), mini_hide_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                                 should_close = true;
                             }
                         });
                     });
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
 
-                    ui.label(RichText::new(tr!("查询名称")).size(self.theme.fonts.lg).color(palette.weak_text));
-                    let input_response = ui.add(
+                    // 一级节点：连接名
+                    ui.horizontal(|ui| {
+                        ui.add_space(2.0);
+                        ui.label(RichText::new(dialog.connection_name.clone()).size(self.theme.fonts.md).color(palette.weak_text));
+                    });
+                    // 二级节点：数据库名（若存在）
+                    if let Some(ref db) = dialog.database {
+                        if !db.trim().is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(RichText::new(db).size(self.theme.fonts.md).color(palette.weak_text));
+                            });
+                        }
+                    }
+                    ui.add_space(10.0);
+
+                    let input_response = ui.add_sized(
+                        [ui.available_width(), 30.0],
                         egui::TextEdit::singleline(&mut dialog.title_input)
                             .hint_text(RichText::new(tr!("输入查询名称")).color(ui.visuals().weak_text_color()))
-                            .font(FontId::new(self.theme.fonts.xl, FontFamily::Proportional))
-                            .desired_width(ui.available_width()),
+                            .font(FontId::new(self.theme.fonts.md, FontFamily::Proportional))
+                            .margin(egui::Margin::symmetric(10, 4))
+                            .vertical_align(egui::Align::Center),
                     );
                     input_response.request_focus();
 
-                    ui.add_space(16.0);
-                    ui.separator();
-                    ui.add_space(8.0);
+                    ui.add_space(12.0);
 
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if dialog_button(ui, button_label, true, &self.theme.colors, &self.theme.fonts).clicked() {
+                            if mini_button(ui, button_label, mini_primary_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                                 confirmed = true;
                                 should_close = true;
                             }
-                            if dialog_button(ui, tr!("取消"), false, &self.theme.colors, &self.theme.fonts).clicked() {
+                            ui.add_space(8.0);
+                            if mini_button(ui, tr!("取消"), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                                 should_close = true;
                             }
                         });
