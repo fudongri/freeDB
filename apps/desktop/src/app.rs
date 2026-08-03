@@ -705,6 +705,8 @@ struct OptionDragStart {
 #[derive(Clone, Default)]
 struct QueryResultSelectionState {
     selected_columns: BTreeSet<usize>,
+    /// Shift 连选列的锚点列索引
+    column_selection_anchor: Option<usize>,
     selected_result_rows: BTreeSet<usize>,
     selected_result_row: Option<usize>,
     selection_anchor_row: Option<usize>,
@@ -1028,6 +1030,8 @@ struct TableTabState {
     pending_insert_row: Option<BTreeMap<String, QueryCellValue>>,
     scroll_to_insert_row: bool,
     selected_columns: BTreeSet<usize>,
+    /// Shift 连选列的锚点列索引
+    column_selection_anchor: Option<usize>,
     // 矩形选区
     cell_selection_anchor: Option<(usize, usize)>,
     cell_selection_current: Option<(usize, usize)>,
@@ -3425,6 +3429,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             WorkspaceTab::Query(query_tab) => {
                 let sel = query_tab.current_selections_mut();
                 sel.selected_columns.clear();
+                sel.column_selection_anchor = None;
                 sel.selected_result_rows.clear();
                 sel.selected_result_row = None;
                 sel.selection_anchor_row = None;
@@ -3437,6 +3442,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             WorkspaceTab::Table(table_tab) => {
                 table_tab.selected_columns.clear();
+                table_tab.column_selection_anchor = None;
                 table_tab.selected_preview_row = None;
                 table_tab.selected_preview_rows.clear();
                 table_tab.selection_anchor_row = None;
@@ -3600,6 +3606,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ctx.copy_text(text);
                 self.status_message = tr!("已复制 {} 列, {} 行", col_count, row_count);
                 query_tab.current_selections_mut().selected_columns.clear();
+                query_tab.current_selections_mut().column_selection_anchor = None;
             }
             WorkspaceTab::Table(table_tab) => {
                 if table_tab.selected_columns.is_empty() {
@@ -3634,6 +3641,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 ctx.copy_text(text);
                 self.status_message = tr!("已复制 {} 列, {} 行", col_count, row_count);
                 table_tab.selected_columns.clear();
+                table_tab.column_selection_anchor = None;
             }
             WorkspaceTab::CreateTable(_) => {}
             WorkspaceTab::Dashboard => {}
@@ -3918,6 +3926,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             pending_insert_row: None,
             scroll_to_insert_row: false,
             selected_columns: BTreeSet::new(),
+            column_selection_anchor: None,
             // 矩形选区
             cell_selection_anchor: None,
             cell_selection_current: None,
@@ -11219,6 +11228,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     ui, &tab.id, result, edit_ctx,
                                                     &mut tab.result_sort,
                                                     &mut sel.selected_columns,
+                                                    &mut sel.column_selection_anchor,
                                                     &mut sel.selected_result_rows,
                                                     &mut sel.selected_result_row,
                                                     &mut sel.selection_anchor_row,
@@ -11243,7 +11253,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 }
                                             }
                                         } else {
-                                            let result_action = render_result_table(ui, &tab.id, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag, &mut tab.result_column_widths, &mut tab.result_column_resize_drag, &mut tab.result_row_number_width, &mut tab.result_row_num_resize_drag, &mut sel.cell_selection_anchor, &mut sel.cell_selection_current, &mut sel.cell_selection_drag_started);
+                                            let result_action = render_result_table(ui, &tab.id, result, &mut tab.result_sort, false, &mut sel.selected_columns, &mut sel.column_selection_anchor, &mut sel.selected_result_rows, &mut sel.selected_result_row, &mut sel.selection_anchor_row, &mut tab.search, &mut tab.column_order, &mut tab.column_drag, &mut tab.result_column_widths, &mut tab.result_column_resize_drag, &mut tab.result_row_number_width, &mut tab.result_row_num_resize_drag, &mut sel.cell_selection_anchor, &mut sel.cell_selection_current, &mut sel.cell_selection_drag_started);
                                             if !matches!(result_action.action, TabUiAction::None) {
                                                 action = result_action.action;
                                             }
@@ -20289,6 +20299,7 @@ impl QueryTabState {
 
 static EMPTY_SELECTIONS: QueryResultSelectionState = QueryResultSelectionState {
     selected_columns: BTreeSet::new(),
+    column_selection_anchor: None,
     selected_result_rows: BTreeSet::new(),
     selected_result_row: None,
     selection_anchor_row: None,
@@ -21635,6 +21646,7 @@ fn render_result_table(
     sort_state: &mut TableSortState,
     sql_driven_sort: bool,
     selected_columns: &mut BTreeSet<usize>,
+    column_selection_anchor: &mut Option<usize>,
     selected_rows: &mut BTreeSet<usize>,
     selected_row: &mut Option<usize>,
     selection_anchor: &mut Option<usize>,
@@ -21775,6 +21787,7 @@ fn render_result_table(
                                     select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
                                     // 全选/取消全选行时清除列选中
                                     selected_columns.clear();
+                                    *column_selection_anchor = None;
                                     ui.ctx().request_repaint();
                                 }
                                 // Cmd+A → 全选行（无矩形选区时）
@@ -21782,6 +21795,7 @@ fn render_result_table(
                                     if cell_selection_anchor.is_none() {
                                         select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
                                         selected_columns.clear();
+                                        *column_selection_anchor = None;
                                     }
                                 }
                                 let cell_rect = ui.max_rect();
@@ -21840,15 +21854,12 @@ fn render_result_table(
                                         pending_header_copy.set(Some((act, column.clone(), None)));
                                     }
                                     if clicked {
-                                        if ctrl_held {
-                                            if selected_columns.contains(&col_idx) {
-                                                selected_columns.remove(&col_idx);
-                                            } else {
-                                                selected_columns.insert(col_idx);
-                                            }
+                                        if modifiers.shift {
+                                            extend_column_selection(selected_columns, column_selection_anchor, col_idx);
+                                        } else if ctrl_held {
+                                            toggle_column_selection(selected_columns, column_selection_anchor, col_idx);
                                         } else {
-                                            selected_columns.clear();
-                                            selected_columns.insert(col_idx);
+                                            set_single_column_selection(selected_columns, column_selection_anchor, col_idx);
                                         }
                                         // 选列时清除行选中
                                         *selected_row = None;
@@ -21948,6 +21959,7 @@ fn render_result_table(
                                         }
                                         // 选行时清除列选中
                                         selected_columns.clear();
+                                        *column_selection_anchor = None;
                                         ui.ctx().request_repaint();
                                     }
                                     response.context_menu(|ui| {
@@ -22021,6 +22033,7 @@ fn render_result_table(
                                             selected_rows.clear();
                                             *selection_anchor = None;
                                             selected_columns.clear();
+                                            *column_selection_anchor = None;
                                             let editor_id = egui::Id::from(format!("query-editor-{}", tab_id));
                                             ui.ctx().memory_mut(|mem| mem.surrender_focus(editor_id));
                                         }
@@ -22323,6 +22336,7 @@ fn render_editable_result_table(
     edit: &mut QueryEditContext,
     sort_state: &mut TableSortState,
     selected_columns: &mut BTreeSet<usize>,
+    column_selection_anchor: &mut Option<usize>,
     selected_rows: &mut BTreeSet<usize>,
     selected_row: &mut Option<usize>,
     selection_anchor: &mut Option<usize>,
@@ -22479,6 +22493,7 @@ fn render_editable_result_table(
                                     select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
                                     // 全选/取消全选行时清除列选中和矩形选区
                                     selected_columns.clear();
+                                    *column_selection_anchor = None;
                                     clear_query_cell_selection(
                                         cell_selection_anchor, cell_selection_current,
                                         cell_selection_typing, cell_selection_input, cell_selection_is_null,
@@ -22491,6 +22506,7 @@ fn render_editable_result_table(
                                     if cell_selection_anchor.is_none() {
                                         select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
                                         selected_columns.clear();
+                                        *column_selection_anchor = None;
                                     }
                                 }
                                 let cell_rect = ui.max_rect();
@@ -22548,15 +22564,12 @@ fn render_editable_result_table(
                                         pending_header_copy.set(Some((act, column.clone(), col_data_type)));
                                     }
                                     if clicked {
-                                        if ctrl_held {
-                                            if selected_columns.contains(&col_idx) {
-                                                selected_columns.remove(&col_idx);
-                                            } else {
-                                                selected_columns.insert(col_idx);
-                                            }
+                                        if modifiers.shift {
+                                            extend_column_selection(selected_columns, column_selection_anchor, col_idx);
+                                        } else if ctrl_held {
+                                            toggle_column_selection(selected_columns, column_selection_anchor, col_idx);
                                         } else {
-                                            selected_columns.clear();
-                                            selected_columns.insert(col_idx);
+                                            set_single_column_selection(selected_columns, column_selection_anchor, col_idx);
                                         }
                                         // 选列时清除行选中和矩形选区
                                         *selected_row = None;
@@ -22651,6 +22664,7 @@ fn render_editable_result_table(
                                         }
                                         // 选行时清除列选中和矩形选区
                                         selected_columns.clear();
+                                        *column_selection_anchor = None;
                                         *cell_selection_anchor = None;
                                         *cell_selection_current = None;
                                         *cell_selection_typing = false;
@@ -22846,6 +22860,7 @@ fn render_editable_result_table(
                                                 selected_rows.clear();
                                                 *selection_anchor = None;
                                                 selected_columns.clear();
+                                                *column_selection_anchor = None;
                                                 // 让 SQL 编辑器失去焦点
                                                 let editor_id = egui::Id::from(format!("query-editor-{}", tab_id));
                                                 ui.ctx().memory_mut(|mem| mem.surrender_focus(editor_id));
@@ -22976,6 +22991,7 @@ fn render_editable_result_table(
                                                 selected_rows.clear();
                                                 *selection_anchor = None;
                                                 selected_columns.clear();
+                                                *column_selection_anchor = None;
                                                 ui.ctx().request_repaint();
                                             }
                                         }
@@ -23540,6 +23556,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         }
                                         // 全选/取消全选行时清除列选中和矩形选区
                                         tab.selected_columns.clear();
+                                        tab.column_selection_anchor = None;
                                         clear_table_cell_selection(tab);
                                         ui.ctx().request_repaint();
                                     }
@@ -23550,6 +23567,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 select_all_preview_rows(tab, preview.rows.len());
                                             }
                                             tab.selected_columns.clear();
+                                            tab.column_selection_anchor = None;
                                             clear_table_cell_selection(tab);
                                         }
                                     }
@@ -23610,15 +23628,12 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         selected_sort = Some((column.clone(), choice));
                                     }
                                     if clicked {
-                                        if ctrl_held {
-                                            if tab.selected_columns.contains(&col_idx) {
-                                                tab.selected_columns.remove(&col_idx);
-                                            } else {
-                                                tab.selected_columns.insert(col_idx);
-                                            }
+                                        if modifiers.shift {
+                                            extend_column_selection(&mut tab.selected_columns, &tab.column_selection_anchor, col_idx);
+                                        } else if ctrl_held {
+                                            toggle_column_selection(&mut tab.selected_columns, &mut tab.column_selection_anchor, col_idx);
                                         } else {
-                                            tab.selected_columns.clear();
-                                            tab.selected_columns.insert(col_idx);
+                                            set_single_column_selection(&mut tab.selected_columns, &mut tab.column_selection_anchor, col_idx);
                                         }
                                         // 选列时清除行选中和矩形选区
                                         tab.selected_preview_row = None;
@@ -23823,6 +23838,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                             }
                                             // 选行时清除列选中和矩形选区
                                             tab.selected_columns.clear();
+                                            tab.column_selection_anchor = None;
                                             clear_table_cell_selection(tab);
                                             ui.ctx().request_repaint();
                                         }
@@ -24075,6 +24091,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     tab.selected_preview_rows.clear();
                                                     tab.selection_anchor_row = None;
                                                     tab.selected_columns.clear();
+                                                    tab.column_selection_anchor = None;
                                                 }
                                                 // 拖拽中：指针持续按下且移动到当前单元格
                                                 if tab.cell_selection_drag_started
@@ -24179,6 +24196,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 tab.selected_preview_rows.clear();
                                                 tab.selection_anchor_row = None;
                                                 tab.selected_columns.clear();
+                                                tab.column_selection_anchor = None;
                                                 if tab.pending_insert_row.is_none() {
                                                     // 无选区：进入编辑模式，不选中行
                                                     commit_current_edit_to_pending(tab);
@@ -25774,6 +25792,39 @@ fn normalize_query_selection(
     }
     if anchor.is_none() {
         *anchor = *selected_row;
+    }
+}
+
+fn set_single_column_selection(
+    selected_columns: &mut BTreeSet<usize>,
+    anchor: &mut Option<usize>,
+    col_idx: usize,
+) {
+    selected_columns.clear();
+    selected_columns.insert(col_idx);
+    *anchor = Some(col_idx);
+}
+
+fn toggle_column_selection(
+    selected_columns: &mut BTreeSet<usize>,
+    anchor: &mut Option<usize>,
+    col_idx: usize,
+) {
+    if !selected_columns.remove(&col_idx) {
+        selected_columns.insert(col_idx);
+    }
+    *anchor = Some(col_idx);
+}
+
+fn extend_column_selection(
+    selected_columns: &mut BTreeSet<usize>,
+    anchor: &Option<usize>,
+    col_idx: usize,
+) {
+    let a = anchor.unwrap_or(col_idx);
+    selected_columns.clear();
+    for index in a.min(col_idx)..=a.max(col_idx) {
+        selected_columns.insert(index);
     }
 }
 
