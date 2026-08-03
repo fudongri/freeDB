@@ -10703,7 +10703,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                                 // AI 助手下拉按钮
                                 let ai_items: Vec<&str> = vec![
-                                    tr!("打开 AI 助手面板"),
+                                    tr!("AI 助手面板"),
                                     tr!("优化语句"),
                                     tr!("解释语句"),
                                     tr!("数据质量检查"),
@@ -10711,13 +10711,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     tr!("AI 设置..."),
                                 ];
                                 let ai_item_refs: Vec<(&str, bool)> = ai_items.iter().map(|s| (*s, false)).collect();
-                                let btn_label = tr!("AI助手");
                                 let btn = ui.add(
-                                    egui::Button::new(RichText::new(format!("{btn_label} ▾")).size(chrome.fonts.md).color(chrome.text))
+                                    egui::Button::new(egui::RichText::new("").size(chrome.fonts.md))
                                         .fill(Color32::TRANSPARENT)
                                         .stroke(Stroke::NONE)
                                         .corner_radius(chrome.radius_lg)
-                                        .min_size(Vec2::new(120.0, 26.0)),
+                                        .min_size(Vec2::new(36.0, 26.0)),
+                                );
+                                let icon_size = egui::vec2(16.0, 16.0);
+                                let icon_color = if btn.hovered() { chrome.text } else { chrome.weak_text };
+                                egui::Image::new(egui::include_image!("../assets/svg/ai-assistant.svg"))
+                                    .fit_to_exact_size(icon_size)
+                                    .tint(icon_color)
+                                    .paint_at(ui, egui::Rect::from_min_size(btn.rect.min + egui::vec2(3.0, 5.0), icon_size));
+                                ui.painter().text(
+                                    btn.rect.right_top() + egui::vec2(-10.0, 5.5),
+                                    egui::Align2::RIGHT_TOP,
+                                    "▾",
+                                    egui::FontId::proportional(chrome.fonts.md),
+                                    icon_color,
                                 );
                                 if btn.hovered() {
                                     ui.painter().rect_filled(btn.rect, chrome.radius_lg, chrome.secondary_button_stroke.linear_multiply(0.15));
