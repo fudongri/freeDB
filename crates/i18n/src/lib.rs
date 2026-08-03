@@ -337,6 +337,7 @@ fn en(key: &'static str) -> &'static str {
         "操作失败: {}" => "Operation failed: {}",
         "已切换为 {}" => "Switched to {}",
         "已折叠连接 {}" => "Collapsed connection {}",
+        "已折叠全部连接" => "Collapsed all connections",
         "正在刷新..." => "Refreshing...",
         "正在刷新表信息..." => "Refreshing table info...",
         "正在刷新集合信息..." => "Refreshing collection info...",

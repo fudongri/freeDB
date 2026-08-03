@@ -5691,6 +5691,66 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if has_update {
             cursor_x -= 100.0;
         }
+        // 侧边栏折叠按钮（最右侧，复用 layout.svg 图标）
+        cursor_x -= 4.0;
+        let col_icon_w = 26.0;
+        cursor_x -= col_icon_w;
+        let col_rect = egui::Rect::from_min_size(
+            egui::pos2(cursor_x, title_btn_y),
+            Vec2::new(col_icon_w, title_btn_h),
+        );
+        let col_resp = ui.allocate_rect(col_rect, egui::Sense::click());
+        let col_fill = if col_resp.hovered() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            ui.visuals().widgets.hovered.weak_bg_fill
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(col_rect, title_btn_cr, col_fill);
+        let col_tint = if self.sidebar_collapsed {
+            palette.accent_button_text
+        } else {
+            palette.text
+        };
+        egui::Image::new(egui::include_image!("../assets/svg/layout.svg"))
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
+            .tint(col_tint)
+            .paint_at(ui, egui::Rect::from_center_size(col_rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
+        if col_resp.clicked() {
+            self.sidebar_collapsed = !self.sidebar_collapsed;
+            let _ = self.services.save_ui_state("sidebar_collapsed", if self.sidebar_collapsed { "1" } else { "0" });
+        }
+        let col_tooltip = if self.sidebar_collapsed {
+            tr!("展开侧边栏 ({}+1)", MOD_KEY)
+        } else {
+            tr!("折叠侧边栏 ({}+1)", MOD_KEY)
+        };
+        col_resp.on_hover_text(col_tooltip);
+        // 收起全部连接树按钮（折叠按钮左侧，复用 collapse-all.svg 图标）
+        cursor_x -= 4.0;
+        let colall_icon_w = 26.0;
+        cursor_x -= colall_icon_w;
+        let colall_rect = egui::Rect::from_min_size(
+            egui::pos2(cursor_x, title_btn_y),
+            Vec2::new(colall_icon_w, title_btn_h),
+        );
+        let colall_resp = ui.allocate_rect(colall_rect, egui::Sense::click());
+        let colall_fill = if colall_resp.hovered() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            ui.visuals().widgets.hovered.weak_bg_fill
+        } else {
+            Color32::TRANSPARENT
+        };
+        ui.painter().rect_filled(colall_rect, title_btn_cr, colall_fill);
+        egui::Image::new(egui::include_image!("../assets/svg/collapse-all.svg"))
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
+            .tint(palette.text)
+            .paint_at(ui, egui::Rect::from_center_size(colall_rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
+        if colall_resp.clicked() {
+            self.expanded_nodes.clear();
+            self.status_message = tr!("已折叠全部连接").into();
+        }
+        colall_resp.on_hover_text(tr!("收起全部"));
         // 新建查询按钮（透明背景 + 描边，与 mini_button 一致）
         let nq_label = tr!("新建查询");
         let nq_style = mini_primary_style(&self.theme.colors, self.theme.fonts.sm);
@@ -5736,41 +5796,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if ao_resp.clicked() {
             self.sidebar_active_only = !self.sidebar_active_only;
         }
-        // 侧边栏折叠按钮（"仅活跃"左侧，复用 layout.svg 图标）
-        cursor_x -= 10.0;
-        let col_icon_w = 26.0;
-        cursor_x -= col_icon_w;
-        let col_rect = egui::Rect::from_min_size(
-            egui::pos2(cursor_x, title_btn_y),
-            Vec2::new(col_icon_w, title_btn_h),
-        );
-        let col_resp = ui.allocate_rect(col_rect, egui::Sense::click());
-        let col_fill = if col_resp.hovered() {
-            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
-            ui.visuals().widgets.hovered.weak_bg_fill
-        } else {
-            Color32::TRANSPARENT
-        };
-        ui.painter().rect_filled(col_rect, title_btn_cr, col_fill);
-        let col_tint = if self.sidebar_collapsed {
-            palette.accent_button_text
-        } else {
-            palette.text
-        };
-        egui::Image::new(egui::include_image!("../assets/svg/layout.svg"))
-            .fit_to_exact_size(egui::vec2(16.0, 16.0))
-            .tint(col_tint)
-            .paint_at(ui, egui::Rect::from_center_size(col_rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
-        if col_resp.clicked() {
-            self.sidebar_collapsed = !self.sidebar_collapsed;
-            let _ = self.services.save_ui_state("sidebar_collapsed", if self.sidebar_collapsed { "1" } else { "0" });
-        }
-        let col_tooltip = if self.sidebar_collapsed {
-            tr!("展开侧边栏 ({}+1)", MOD_KEY)
-        } else {
-            tr!("折叠侧边栏 ({}+1)", MOD_KEY)
-        };
-        col_resp.on_hover_text(col_tooltip);
         // 更新 badge — 标题栏区域（交通灯同一排），绝对定位
         if let Some(ref state) = self.update_state {
             if !self.update_dismissed {
@@ -19290,14 +19315,11 @@ impl eframe::App for DesktopApp {
                         self.sidebar_collapsed = false;
                         let _ = self.services.save_ui_state("sidebar_collapsed", "0");
                     }
-                    // 绘制展开箭头（指向右侧，示意点击展开），放在窄条右缘
-                    ui.painter().text(
-                        egui::pos2(rect.right() - 8.0, rect.center().y),
-                        egui::Align2::RIGHT_CENTER,
-                        "❯",
-                        egui::FontId::proportional(13.0),
-                        palette.weak_text,
-                    );
+                    // 绘制展开图标（复用 layout.svg），放在窄条中央
+                    egui::Image::new(egui::include_image!("../assets/svg/layout.svg"))
+                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                        .tint(palette.weak_text)
+                        .paint_at(ui, egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
                 })
         } else {
             egui::SidePanel::left("sidebar")
