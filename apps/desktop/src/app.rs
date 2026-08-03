@@ -1,5 +1,5 @@
 use app_services::AppServices;
-use ai_service::config::{AiConfig, AiModelStore, CLAUDE_BASE_URL, OPENAI_PRESETS, PROVIDER_MODELS};
+use ai_service::config::{AiConfig, AiModelStore, CLAUDE_BASE_URL, OPENAI_PRESETS};
 use ai_service::AiProviderKind;
 use egui_commonmark::{CommonMarkViewer, CommonMarkCache};
 use i18n::{self, tr, Locale, get_locale, set_locale};
@@ -40,6 +40,7 @@ struct AiSettingsForm {
     model: String,
     show_api_key: bool,
     test_status: Option<String>,
+    save_status: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -58,6 +59,7 @@ impl Default for AiSettingsForm {
             model: "gpt-5.6-sol".into(),
             show_api_key: false,
             test_status: None,
+            save_status: None,
         }
     }
 }
@@ -1542,7 +1544,7 @@ struct ConnectionFormState {
     kind: DatabaseKind,
     group_name: String,
     host: String,
-    port: u16,
+    port: String,
     username: String,
     password: String,
     default_database: String,
@@ -1561,7 +1563,7 @@ impl Default for ConnectionFormState {
             kind: DatabaseKind::MySql,
             group_name: String::new(),
             host: "127.0.0.1".into(),
-            port: 3306,
+            port: "3306".into(),
             username: String::new(),
             password: String::new(),
             default_database: String::new(),
@@ -15382,14 +15384,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         .show(ctx, |ui| {
             ui.scope(|ui| {
                 apply_mac_dialog_style(ui, palette);
+                // 与 AI 设置弹窗一致：表单控件用更小的圆角
+                let small_radius = egui::CornerRadius::same(4);
+                ui.style_mut().visuals.widgets.inactive.corner_radius = small_radius;
+                ui.style_mut().visuals.widgets.hovered.corner_radius = small_radius;
+                ui.style_mut().visuals.widgets.active.corner_radius = small_radius;
+                ui.style_mut().visuals.widgets.open.corner_radius = small_radius;
                 ui.set_width(580.0);
                 ui.spacing_mut().item_spacing = egui::vec2(14.0, 12.0);
-                ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
 
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(title).size(self.theme.fonts.title).strong().color(palette.title));
+                    ui.label(RichText::new(title).size(self.theme.fonts.heading).strong().color(palette.title));
                     ui.add_space(14.0);
-                    ui.small(RichText::new(tr!("配置数据库连接信息")).color(palette.subtitle));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if mini_button(ui, tr!("关闭"), mini_hide_style(&self.theme.colors, self.theme.fonts.sm))
                             .clicked()
@@ -15410,7 +15416,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.style_mut().visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
                         egui::Grid::new("connection-form-grid")
                             .num_columns(2)
-                            .spacing([16.0, 12.0])
+                            .spacing([16.0, 18.0])
                             .min_col_width(108.0)
                             .show(ui, |ui| {
                                 form_grid_row(ui, tr!("数据库"), |ui| {
@@ -15426,32 +15432,34 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         ("MongoDB", matches!(self.connection_form.kind, DatabaseKind::MongoDb)),
                                         ("SQLite", matches!(self.connection_form.kind, DatabaseKind::Sqlite)),
                                     ];
-                                    if let Some(sel) = toolbar_dropdown(
+                                    if let Some(sel) = toolbar_dropdown_sized(
                                         ui,
                                         egui::Id::new("connection-db-kind"),
                                         kind_label,
                                         380.0,
                                         &kind_items,
+                                        30.0,
+                                        4.0,
                                     ) {
                                         match sel {
                                             0 => {
                                                 self.connection_form.kind = DatabaseKind::MySql;
-                                                self.connection_form.port = 3306;
+                                                self.connection_form.port = "3306".into();
                                                 self.connection_form.direct_connection = false;
                                             }
                                             1 => {
                                                 self.connection_form.kind = DatabaseKind::Postgres;
-                                                self.connection_form.port = 5432;
+                                                self.connection_form.port = "5432".into();
                                                 self.connection_form.direct_connection = false;
                                             }
                                             3 => {
                                                 self.connection_form.kind = DatabaseKind::Sqlite;
-                                                self.connection_form.port = 0;
+                                                self.connection_form.port = "0".into();
                                                 self.connection_form.direct_connection = false;
                                             }
                                             _ => {
                                                 self.connection_form.kind = DatabaseKind::MongoDb;
-                                                self.connection_form.port = 27017;
+                                                self.connection_form.port = "27017".into();
                                                 self.connection_form.direct_connection = true;
                                             }
                                         }
@@ -15462,7 +15470,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         ui.horizontal(|ui| {
                                             ui.add_sized(
                                                 [280.0, 30.0],
-                                                TextEdit::singleline(&mut self.connection_form.file_path),
+                                                TextEdit::singleline(&mut self.connection_form.file_path).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center),
                                             );
                                             if mini_button(ui, tr!("浏览..."), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                                                 if let Some(path) = rfd::FileDialog::new()
@@ -15491,12 +15499,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 form_row(ui, tr!("名称"), &mut self.connection_form.name);
                                 if self.connection_form.kind != DatabaseKind::Sqlite {
                                     form_row(ui, tr!("主机"), &mut self.connection_form.host);
-                                    form_row_u16(ui, tr!("端口"), &mut self.connection_form.port);
+                                    form_row(ui, tr!("端口"), &mut self.connection_form.port);
                                     form_row(ui, tr!("用户名"), &mut self.connection_form.username);
                                     form_grid_row(ui, tr!("密码"), |ui| {
                                         ui.add_sized(
                                             [380.0, 30.0],
-                                            TextEdit::singleline(&mut self.connection_form.password).password(true),
+                                            TextEdit::singleline(&mut self.connection_form.password).password(true).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center),
                                         );
                                     });
                                     form_row(ui, tr!("默认数据库"), &mut self.connection_form.default_database);
@@ -15511,12 +15519,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             ("Prefer", self.connection_form.ssl_mode == SslMode::Prefer),
                                             ("Require", self.connection_form.ssl_mode == SslMode::Require),
                                         ];
-                                        if let Some(sel) = toolbar_dropdown(
+                                        if let Some(sel) = toolbar_dropdown_sized(
                                             ui,
                                             egui::Id::new("connection-ssl-mode"),
                                             ssl_label,
-                                            140.0,
+                                            380.0,
                                             &ssl_items,
+                                            30.0,
+                                            4.0,
                                         ) {
                                             self.connection_form.ssl_mode = match sel {
                                                 0 => SslMode::Disable,
@@ -15530,36 +15540,35 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         ui.style_mut().visuals.widgets.inactive.bg_stroke = prev_inactive;
                         ui.style_mut().visuals.widgets.noninteractive.bg_fill = prev_non_bg;
                         ui.style_mut().visuals.widgets.noninteractive.bg_stroke = prev_non_stroke;
-                    });
 
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if self.connection_form.kind != DatabaseKind::Sqlite {
-                        ui.checkbox(&mut self.connection_form.save_password, tr!("保存密码"));
-                    }
-                    if self.connection_form.kind == DatabaseKind::MongoDb {
-                        ui.add_space(16.0);
-                        ui.checkbox(&mut self.connection_form.direct_connection, tr!("直接连接"));
-                    }
-                });
-
-                if self.connection_form.kind == DatabaseKind::MongoDb {
-                    ui.add_space(8.0);
-                    egui::Grid::new("mongo-replica-grid")
-                        .num_columns(2)
-                        .spacing([16.0, 12.0])
-                        .min_col_width(108.0)
-                        .show(ui, |ui| {
-                            form_row(ui, tr!("副本集名称"), &mut self.connection_form.replica_set);
-                            ui.end_row();
-                            form_row(ui, tr!("自定义 URI"), &mut self.connection_form.connection_uri);
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if self.connection_form.kind != DatabaseKind::Sqlite {
+                                ui.checkbox(&mut self.connection_form.save_password, tr!("保存密码"));
+                            }
+                            if self.connection_form.kind == DatabaseKind::MongoDb {
+                                ui.add_space(16.0);
+                                ui.checkbox(&mut self.connection_form.direct_connection, tr!("直接连接"));
+                            }
                         });
-                    ui.add_space(4.0);
-                    ui.small(
-                        RichText::new(tr!("填写 URI 后将忽略主机/端口/用户等字段，可直接粘贴 mongodb+srv:// 连接字符串"))
-                            .color(palette.subtitle),
-                    );
-                }
+
+                        if self.connection_form.kind == DatabaseKind::MongoDb {
+                            ui.add_space(6.0);
+                            egui::Grid::new("mongo-replica-grid")
+                                .num_columns(2)
+                                .spacing([16.0, 18.0])
+                                .min_col_width(108.0)
+                                .show(ui, |ui| {
+                                    form_row(ui, tr!("副本集名称"), &mut self.connection_form.replica_set);
+                                    form_row(ui, tr!("自定义 URI"), &mut self.connection_form.connection_uri);
+                                });
+                            ui.add_space(4.0);
+                            ui.small(
+                                RichText::new(tr!("填写 URI 后将忽略主机/端口/用户等字段，可直接粘贴 mongodb+srv:// 连接字符串"))
+                                    .color(palette.subtitle),
+                            );
+                        }
+                    });
 
                 ui.add_space(12.0);
                 if let Some(rx) = self.pending_test_connection.take() {
@@ -18109,14 +18118,32 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .show(ctx, |ui| {
                 ui.scope(|ui| {
                     apply_mac_dialog_style(ui, palette);
+                    // AI 设置表单控件用更小的圆角
+                    let small_radius = egui::CornerRadius::same(4);
+                    ui.style_mut().visuals.widgets.inactive.corner_radius = small_radius;
+                    ui.style_mut().visuals.widgets.hovered.corner_radius = small_radius;
+                    ui.style_mut().visuals.widgets.active.corner_radius = small_radius;
+                    ui.style_mut().visuals.widgets.open.corner_radius = small_radius;
                     ui.set_width(620.0);
                     ui.spacing_mut().item_spacing = egui::vec2(14.0, 12.0);
 
                     // ── 标题栏 ──
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(tr!("AI 设置")).size(self.theme.fonts.title).strong().color(palette.title));
+                        ui.set_min_width(ui.available_width());
+                        ui.label(RichText::new(tr!("AI 设置")).size(self.theme.fonts.heading).strong().color(palette.title));
+                        // 当前激活模型
+                        if let Some(active_model) = self.ai_model_store.models.get(self.ai_model_store.active_index) {
+                            ui.add_space(2.0);
+                            let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot_rect.center(), 3.0, self.theme.colors.success);
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new(format!("{} · {}", tr!("已激活"), active_model.name))
+                                    .size(self.theme.fonts.md)
+                                    .color(palette.weak_text),
+                            );
+                        }
                         ui.add_space(14.0);
-                        ui.small(RichText::new(tr!("配置 AI 模型与密钥")).color(palette.subtitle));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if mini_button(ui, tr!("关闭"), mini_hide_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                                 should_close = true;
@@ -18128,10 +18155,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     // ── 左右分栏：模型列表 + 编辑表单 ──
                     ui.horizontal_top(|ui| {
                         // 左侧：模型列表
-                        let form_height = 260.0_f32; // 与右侧表单高度匹配
+                        let form_height = 300.0_f32; // 与右侧表单高度匹配
                         egui::Frame::new()
                             .fill(palette.section_bg)
-                            .stroke(Stroke::new(1.0, palette.section_border))
                             .corner_radius(self.theme.colors.radius_lg)
                             .inner_margin(egui::Margin::same(10))
                             .show(ui, |ui| {
@@ -18151,19 +18177,41 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             ui.set_width(ui.available_width());
                                             let store = &self.ai_model_store;
                                             let editing = self.ai_settings_editing_index;
-                                        let mut clicked_index = None;
-                                        for (i, entry) in store.models.iter().enumerate() {
-                                            let is_active = i == store.active_index;
-                                            let label = if is_active {
-                                                format!("{} \u{2713}", entry.name)
-                                            } else {
-                                                entry.name.clone()
-                                            };
-                                            let resp = ui.selectable_label(i == editing, label);
-                                            if resp.clicked() {
-                                                clicked_index = Some(i);
+                                            let mut clicked_index = None;
+                                            let row_height = 22.0;
+                                            for (i, entry) in store.models.iter().enumerate() {
+                                                let is_selected = i == editing;
+                                                let (rect, resp) = ui.allocate_exact_size(
+                                                    egui::vec2(ui.available_width(), row_height),
+                                                    egui::Sense::click(),
+                                                );
+                                                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                                                let text_color = if is_selected {
+                                                    self.theme.colors.selection_text
+                                                } else {
+                                                    palette.weak_text
+                                                };
+                                                ui.painter().text(
+                                                    egui::pos2(rect.left() + 8.0, rect.center().y),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    &entry.name,
+                                                    FontId::new(self.theme.fonts.md, FontFamily::Proportional),
+                                                    text_color,
+                                                );
+                                                // 选中高亮：与已保存查询节点一致（整行半透明填充 + 左侧竖线）
+                                                if is_selected {
+                                                    let highlight = self.theme.colors.selection_stroke;
+                                                    ui.painter().rect_filled(rect, 2.0, highlight.gamma_multiply(0.12));
+                                                    ui.painter().vline(
+                                                        rect.left() + 2.0,
+                                                        rect.center().y - 7.0..=rect.center().y + 7.0,
+                                                        Stroke::new(2.0, highlight),
+                                                    );
+                                                }
+                                                if resp.clicked() {
+                                                    clicked_index = Some(i);
+                                                }
                                             }
-                                        }
                                         if let Some(idx) = clicked_index {
                                             self.ai_settings_editing_index = idx;
                                             self.ai_model_store.set_active(idx);
@@ -18211,11 +18259,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.set_width(400.0);
                                 egui::Grid::new("ai-settings-form-grid")
                                     .num_columns(2)
-                                    .spacing([16.0, 12.0])
+                                    .spacing([16.0, 18.0])
                                     .min_col_width(80.0)
                                     .show(ui, |ui| {
                                         form_grid_row(ui, tr!("名称"), |ui| {
-                                            ui.add_sized([280.0, 30.0], egui::TextEdit::singleline(&mut form.name).char_limit(20));
+                                            ui.add_sized([264.0, 30.0], egui::TextEdit::singleline(&mut form.name).char_limit(20).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center));
                                         });
                                         form_grid_row(ui, tr!("提供商"), |ui| {
                                             // 统一提供商列表：所有预设 + Claude
@@ -18236,7 +18284,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 .map(|(name, _, _, _)| (*name, false))
                                                 .chain(std::iter::once((tr!("自定义"), is_custom)))
                                                 .collect();
-                                            if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("ai-provider"), current_label, 200.0, &items) {
+                                            if let Some(sel) = toolbar_dropdown_sized(ui, egui::Id::new("ai-provider"), current_label, 264.0, &items, 30.0, 4.0) {
                                                 if let Some((_, url, model, is_claude)) = all_providers.get(sel) {
                                                     form.base_url = url.to_string();
                                                     form.model = model.to_string();
@@ -18244,80 +18292,31 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 }
                                             }
                                         });
+                                        form_grid_row(ui, "Base URL", |ui| {
+                                            ui.add_sized([264.0, 30.0], egui::TextEdit::singleline(&mut form.base_url).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center));
+                                        });
                                         form_grid_row(ui, "API Key", |ui| {
                                             let api_key_field = if form.show_api_key {
-                                                egui::TextEdit::singleline(&mut form.api_key)
+                                                egui::TextEdit::singleline(&mut form.api_key).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center)
                                             } else {
-                                                egui::TextEdit::singleline(&mut form.api_key).password(true)
+                                                egui::TextEdit::singleline(&mut form.api_key).password(true).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center)
                                             };
-                                            ui.add_sized([240.0, 30.0], api_key_field);
-                                            if mini_button(ui, if form.show_api_key { "\u{1f648}" } else { "\u{1f441}" }, mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
+                                            // 眼睛按钮放在输入框右侧，不挤占输入框对齐宽度
+                                            ui.add_sized([264.0, 30.0], api_key_field);
+                                            let eye_icon = if form.show_api_key { "\u{1f648}" } else { "\u{1f441}" };
+                                            let eye_btn = ui.add_sized(
+                                                [26.0, 30.0],
+                                                egui::Button::new(RichText::new(eye_icon).size(self.theme.fonts.lg).color(palette.text))
+                                                    .fill(Color32::TRANSPARENT)
+                                                    .stroke(Stroke::NONE)
+                                                    .corner_radius(4.0),
+                                            );
+                                            if eye_btn.clicked() {
                                                 form.show_api_key = !form.show_api_key;
                                             }
                                         });
-                                        // Base URL 始终显示（预设时只读）
-                                        let is_preset = OPENAI_PRESETS.iter().any(|(_, url, _)| form.base_url == *url)
-                                            || form.provider_type == AiSettingsProviderType::Claude;
-                                        form_grid_row(ui, "Base URL", |ui| {
-                                            if is_preset {
-                                                ui.add_sized([280.0, 30.0], egui::TextEdit::singleline(&mut form.base_url).interactive(false));
-                                            } else {
-                                                ui.add_sized([280.0, 30.0], egui::TextEdit::singleline(&mut form.base_url));
-                                            }
-                                        });
                                         form_grid_row(ui, tr!("模型"), |ui| {
-                                            let palette = mac_ui_palette_from_ui(ui);
-                                            let preset_models: &[&str] = PROVIDER_MODELS.iter()
-                                                .find(|(_, url, _)| *url == form.base_url.as_str())
-                                                .map(|(_, _, models)| *models)
-                                                .unwrap_or(&[]);
-                                            ui.spacing_mut().item_spacing.x = 2.0;
-                                            let text_response = ui.add_sized(
-                                                [248.0, 22.0],
-                                                egui::TextEdit::singleline(&mut form.model)
-                                                    .font(egui::TextStyle::Monospace),
-                                            );
-                                            let popup_id = egui::Id::new("ai-model-suggest");
-                                            let dropdown_btn = ui.add(
-                                                egui::Button::new(RichText::new("▾").size(palette.fonts.md).color(palette.text))
-                                                    .fill(Color32::TRANSPARENT)
-                                                    .stroke(Stroke::new(1.0, palette.secondary_button_stroke))
-                                                    .corner_radius(palette.radius_lg)
-                                                    .min_size(Vec2::new(22.0, 22.0)),
-                                            );
-                                            if dropdown_btn.clicked() {
-                                                let is_open = ui.memory(|m| m.is_popup_open(popup_id));
-                                                if is_open {
-                                                    ui.memory_mut(|m| m.close_popup(popup_id));
-                                                } else {
-                                                    ui.memory_mut(|m| m.open_popup(popup_id));
-                                                }
-                                            }
-                                            // 点击其它区域时关闭（排除按钮和文本输入框自身）
-                                            if ui.memory(|m| m.is_popup_open(popup_id))
-                                                && ui.input(|i| i.pointer.any_released())
-                                                && !dropdown_btn.hovered()
-                                                && !text_response.hovered()
-                                            {
-                                                ui.memory_mut(|m| m.close_popup(popup_id));
-                                            }
-                                            egui::popup_below_widget(
-                                                ui,
-                                                popup_id,
-                                                &dropdown_btn,
-                                                egui::PopupCloseBehavior::CloseOnClickOutside,
-                                                |ui| {
-                                                    ui.set_min_width(230.0);
-                                                    for &model_name in preset_models {
-                                                        let is_current = model_name == form.model.as_str();
-                                                        let resp = ui.selectable_label(is_current, model_name);
-                                                        if resp.clicked() {
-                                                            form.model = model_name.to_string();
-                                                            ui.memory_mut(|m| m.close_popup(popup_id));
-                                                        }
-                                                    }
-                                                },
-                                            );
+                                            ui.add_sized([264.0, 30.0], egui::TextEdit::singleline(&mut form.model).font(egui::TextStyle::Monospace).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center));
                                         });
                                     });
                             });
@@ -18325,39 +18324,46 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                     ui.add_space(8.0);
 
-                    // 测试连接状态
-                    let test_status = self.ai_settings_form.test_status.clone();
+                    // 测试连接状态（仅轮询更新，渲染在底部按钮行，避免撑高面板）
                     if let Some(rx) = self.pending_ai_test.take() {
                         match rx.try_recv() {
-                            Ok(Ok(msg)) => {
+                            Ok(Ok(_)) => {
                                 self.ai_settings_form.test_status = Some(tr!("连接成功").to_string());
-                                self.pending_ai_test = None;
                             }
                             Ok(Err(e)) => {
                                 self.ai_settings_form.test_status = Some(format!("{}: {}", tr!("连接失败"), e));
-                                self.pending_ai_test = None;
                             }
                             Err(std::sync::mpsc::TryRecvError::Empty) => {
                                 self.pending_ai_test = Some(rx);
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.label(tr!("正在测试连接..."));
-                                });
                             }
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                                 self.ai_settings_form.test_status = Some(tr!("连接测试失败: 后台任务异常终止").into());
-                                self.pending_ai_test = None;
                             }
-                        }
-                    }
-                    if let Some(ref status) = self.ai_settings_form.test_status {
-                        if !status.contains(&tr!("正在测试连接...").to_string()) {
-                            ui.label(RichText::new(status).color(palette.weak_text));
                         }
                     }
 
                     // ── 底部按钮行 ──
                     ui.horizontal(|ui| {
+                        ui.set_min_width(ui.available_width());
+                        // 左侧：状态（与按钮同高，不撑高面板）
+                        if self.pending_ai_test.is_some() {
+                            ui.spinner();
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(tr!("正在测试连接...")).color(palette.weak_text).size(self.theme.fonts.sm));
+                        } else if let Some(ref status) = self.ai_settings_form.test_status {
+                            let is_success = status.starts_with(&tr!("连接成功").to_string());
+                            ui.label(
+                                RichText::new(status)
+                                    .color(if is_success { self.theme.colors.success } else { self.theme.colors.danger })
+                                    .size(self.theme.fonts.sm),
+                            );
+                        } else if let Some(ref status) = self.ai_settings_form.save_status {
+                            ui.label(
+                                RichText::new(status)
+                                    .color(self.theme.colors.success)
+                                    .size(self.theme.fonts.sm),
+                            );
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if mini_button(ui, tr!("保存"), mini_primary_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
                                 let idx = self.ai_settings_editing_index;
@@ -18388,8 +18394,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     let _ = self.services.save_password(&key_id, &api_key);
                                 }
                                 let _ = self.services.save_ui_state("ai_model_store", &self.ai_model_store.to_json());
-                                should_close = true;
-                                self.status_message = tr!("AI 配置已保存").to_string();
+                                self.ai_settings_form.save_status = Some(tr!("AI 配置已保存").to_string());
+                                self.ai_settings_form.test_status = None;
                             }
                             ui.add_space(8.0);
                             if mini_button(ui, tr!("测试连接"), mini_subtle_style(&self.theme.colors, self.theme.fonts.sm)).clicked() {
@@ -18431,6 +18437,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if let Some(entry) = store.models.get(idx) {
             form.name = entry.name.clone();
             form.test_status = None;
+            form.save_status = None;
             match &entry.config.provider {
                 AiProviderKind::OpenAI { api_key, base_url, model } => {
                     form.provider_type = AiSettingsProviderType::OpenAI;
@@ -20498,7 +20505,7 @@ impl ConnectionFormState {
             kind: profile.kind,
             group_name: profile.group_name.clone().unwrap_or_default(),
             host: profile.host.clone(),
-            port: profile.port,
+            port: profile.port.to_string(),
             username: profile.username.clone(),
             password: String::new(),
             default_database: profile.default_database.clone().unwrap_or_default(),
@@ -20518,7 +20525,7 @@ impl ConnectionFormState {
             kind: self.kind,
             group_name: optional_string(&self.group_name),
             host: self.host.clone(),
-            port: self.port,
+            port: self.port.trim().parse::<u16>().unwrap_or(0),
             username: self.username.clone(),
             password: optional_string(&self.password),
             default_database: optional_string(&self.default_database),
@@ -31928,13 +31935,7 @@ fn form_grid_row(ui: &mut egui::Ui, label: &str, add_value: impl FnOnce(&mut egu
 
 fn form_row(ui: &mut egui::Ui, label: &str, value: &mut String) {
     form_grid_row(ui, label, |ui| {
-        ui.add_sized([380.0, 30.0], TextEdit::singleline(value));
-    });
-}
-
-fn form_row_u16(ui: &mut egui::Ui, label: &str, value: &mut u16) {
-    form_grid_row(ui, label, |ui| {
-        ui.add_sized([120.0, 30.0], egui::DragValue::new(value).range(1..=65535));
+        ui.add_sized([380.0, 30.0], TextEdit::singleline(value).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center));
     });
 }
 
@@ -32995,7 +32996,21 @@ fn toolbar_dropdown(
     items: &[(&str, bool)],
 ) -> Option<usize> {
     let palette = mac_ui_palette_from_ui(ui);
-    toolbar_dropdown_impl(ui, id, label, width, items, palette.secondary_button_stroke)
+    toolbar_dropdown_impl(ui, id, label, width, items, palette.secondary_button_stroke, 22.0, palette.radius_lg, false)
+}
+
+/// 带自定义尺寸/圆角的下拉框：AI 设置弹窗使用更高控件与更小圆角
+fn toolbar_dropdown_sized(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    label: &str,
+    width: f32,
+    items: &[(&str, bool)],
+    height: f32,
+    corner_radius: f32,
+) -> Option<usize> {
+    let palette = mac_ui_palette_from_ui(ui);
+    toolbar_dropdown_impl(ui, id, label, width, items, palette.secondary_button_stroke, height, corner_radius, true)
 }
 
 /// 带自定义边框色的下拉框：连接/数据库选择器使用更淡的边框
@@ -33007,7 +33022,8 @@ fn toolbar_dropdown_with_border(
     items: &[(&str, bool)],
     border_color: Color32,
 ) -> Option<usize> {
-    toolbar_dropdown_impl(ui, id, label, width, items, border_color)
+    let palette = mac_ui_palette_from_ui(ui);
+    toolbar_dropdown_impl(ui, id, label, width, items, border_color, 22.0, palette.radius_lg, false)
 }
 
 fn toolbar_dropdown_impl(
@@ -33017,16 +33033,52 @@ fn toolbar_dropdown_impl(
     width: f32,
     items: &[(&str, bool)],
     border_color: Color32,
+    height: f32,
+    corner_radius: f32,
+    left_align: bool,
 ) -> Option<usize> {
     let palette = mac_ui_palette_from_ui(ui);
-    let btn_label = format!("{label} ▾");
-    let btn = ui.add(
-        egui::Button::new(RichText::new(btn_label).size(palette.fonts.md).color(palette.text))
-            .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, border_color))
-            .corner_radius(palette.radius_lg)
-            .min_size(Vec2::new(width, 22.0)),
-    );
+    let btn = if left_align {
+        // 左对齐下拉按钮：文本靠左，右侧 ▾ 箭头（egui Button 默认居中，故手动布局）
+        let (btn_rect, btn) = ui.allocate_exact_size(
+            egui::vec2(width, height),
+            egui::Sense::click(),
+        );
+        let btn = btn.on_hover_cursor(egui::CursorIcon::PointingHand);
+        ui.painter().rect_stroke(
+            btn_rect,
+            corner_radius,
+            Stroke::new(1.0, border_color),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            egui::pos2(btn_rect.left() + 10.0, btn_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            FontId::new(palette.fonts.md, FontFamily::Proportional),
+            palette.text,
+        );
+        let arrow_icon = "▾";
+        let arrow_font = FontId::new(palette.fonts.sm, FontFamily::Proportional);
+        let arrow_w = ui.painter().layout_no_wrap(arrow_icon.to_string(), arrow_font.clone(), palette.weak_text).size().x;
+        ui.painter().text(
+            egui::pos2(btn_rect.right() - 10.0 - arrow_w / 2.0, btn_rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            arrow_icon,
+            arrow_font,
+            palette.weak_text,
+        );
+        btn
+    } else {
+        let btn_label = format!("{label} ▾");
+        ui.add(
+            egui::Button::new(RichText::new(btn_label).size(palette.fonts.md).color(palette.text))
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::new(1.0, border_color))
+                .corner_radius(corner_radius)
+                .min_size(Vec2::new(width, height)),
+        )
+    };
 
     let is_open = ui.data_mut(|d| d.get_temp::<bool>(id).unwrap_or(false));
     if btn.clicked() {

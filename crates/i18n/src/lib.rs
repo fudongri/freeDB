@@ -911,6 +911,7 @@ fn en(key: &'static str) -> &'static str {
         "连接成功" => "Connection successful",
         "连接失败: {}" => "Connection failed: {}",
         "AI 配置已保存" => "AI settings saved",
+        "已激活" => "Active",
         "请先配置 AI 设置" => "Please configure AI settings first",
         "继续提问… (/clear 清空)" => "Ask a follow-up... (/clear to reset)",
         "AI 错误: {}" => "AI Error: {}",
