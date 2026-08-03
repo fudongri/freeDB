@@ -6425,7 +6425,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         cached_sort_asc: true,
                         cached_data_len: 0,
                         cached_summary_filter: SummaryFilter::Tables,
-                        ddl_panel_visible: false,
+                        ddl_panel_visible: self.ddl_panel_default_expanded,
                         ddl_panel_width: 320.0,
                         ddl_loading: false,
                         ddl_target: None,
@@ -8171,7 +8171,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         cached_sort_asc: true,
                                         cached_data_len: 0,
                                         cached_summary_filter: SummaryFilter::Tables,
-                                        ddl_panel_visible: false,
+                                        ddl_panel_visible: self.ddl_panel_default_expanded,
                                         ddl_panel_width: 320.0,
                                         ddl_loading: false,
                                         ddl_target: None,
@@ -12609,15 +12609,42 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             if tab.ddl_panel_visible {
                                 let (dv, lv) = read_theme_variants(ui);
                                 let colors = ui_theme::Theme::from_visuals(ui.visuals(), dv, lv).colors;
-                                egui::SidePanel::right(format!("ddl_panel_{}", tab.id))
+                                // 拖拽线参照已保存查询面板方案：默认弱化、悬停/拖拽高亮、满面板高度（上下各留 4px）
+                                // 用内容区完整高度确定 y 范围；绘制到 Foreground 层，避免被左侧表格内容盖住
+                                let full_rect = ui.available_rect_before_wrap();
+                                let panel_id = egui::Id::new(format!("ddl_panel_{}", tab.id));
+                                let (resize_hover, is_resizing) = ui
+                                    .ctx()
+                                    .read_response(panel_id.with("__resize"))
+                                    .map(|r| (r.hovered(), r.dragged()))
+                                    .unwrap_or((false, false));
+                                let ddl_panel_resp = egui::SidePanel::right(panel_id)
                                     .resizable(true)
                                     .default_width(tab.ddl_panel_width)
                                     .min_width(150.0)
                                     .max_width(1000.0)
+                                    .show_separator_line(false)
                                     .show_inside(ui, |ui| {
                                         ui.set_min_height(ui.available_height());
                                         render_summary_ddl_panel(ui, tab, &colors, fonts);
                                     });
+                                let line_x = ddl_panel_resp.response.rect.left();
+                                let interacted = resize_hover || is_resizing;
+                                let line_color = if interacted {
+                                    palette.accent_button_stroke
+                                } else {
+                                    palette.accent_button_stroke.linear_multiply(0.35)
+                                };
+                                let painter = ui.ctx().layer_painter(
+                                    egui::LayerId::new(egui::Order::Foreground, egui::Id::new("ddl_panel_resize_line")),
+                                );
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(line_x, full_rect.top() + 4.0),
+                                        egui::pos2(line_x, full_rect.bottom() - 4.0),
+                                    ],
+                                    Stroke::new(1.0, line_color),
+                                );
                             }
 
                             // 外层水平 ScrollArea（与数据表格一致），TableBuilder 负责垂直滚动
