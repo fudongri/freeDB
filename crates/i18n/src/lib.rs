@@ -356,6 +356,7 @@ fn en(key: &'static str) -> &'static str {
         "正在执行..." => "Executing...",
         "已取消" => "Cancelled",
         "当前没有可导出的结果" => "No results to export",
+        "导出 Excel" => "Export to Excel",
         "已导出到 {}" => "Exported to {}",
         "导出失败: {}" => "Failed to export: {}",
         "正在生成转储…" => "Generating dump...",

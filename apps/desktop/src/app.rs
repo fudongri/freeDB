@@ -11261,6 +11261,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             }
                                         }
                                     };
+                                    // 导出 Excel 图标按钮（有查询结果时可用）
+                                    if tab.active_bottom_tab == QueryBottomTab::Results {
+                                        let has_result = tab.result.is_some();
+                                        let tint = if has_result { chrome.text } else { chrome.weak_text };
+                                        let export_resp = export_icon_button(ui, tint);
+                                        if export_resp.on_hover_text(tr!("导出 Excel")).clicked() && has_result {
+                                            action = TabUiAction::ExportActiveResult(ExportFormat::Xlsx);
+                                        }
+                                    }
                                     ui.label(RichText::new(summary).size(chrome.fonts.sm).color(chrome.weak_text));
                                     // 模型名（靠右，summary 左侧）
                                     if let Some(entry) = ai_model_store.models.get(ai_model_store.active_index) {
@@ -33347,6 +33356,23 @@ fn locate_icon_button(ui: &mut egui::Ui, tint: egui::Color32) -> egui::Response 
             painter.rect_filled(rect, ui.visuals().widgets.hovered.corner_radius, ui.visuals().widgets.hovered.weak_bg_fill);
         }
         egui::Image::new(egui::include_image!("../assets/svg/locate.svg"))
+            .fit_to_exact_size(egui::vec2(18.0, 18.0))
+            .tint(tint)
+            .paint_at(ui, egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 1.0), egui::vec2(18.0, 18.0)));
+    }
+    response
+}
+
+/// 导出 Excel 图标按钮：白色 SVG tint 成标题色，hover 显示浅底，与侧边栏定位按钮一致
+fn export_icon_button(ui: &mut egui::Ui, tint: egui::Color32) -> egui::Response {
+    let size = egui::vec2(26.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, ui.visuals().widgets.hovered.corner_radius, ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        egui::Image::new(egui::include_image!("../assets/svg/export.svg"))
             .fit_to_exact_size(egui::vec2(18.0, 18.0))
             .tint(tint)
             .paint_at(ui, egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 1.0), egui::vec2(18.0, 18.0)));
