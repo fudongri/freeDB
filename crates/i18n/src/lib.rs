@@ -1010,6 +1010,7 @@ fn en(key: &'static str) -> &'static str {
         "保存排序失败: {}" => "Failed to save sort: {}",
         "展开全部" => "Expand All",
         "收起全部" => "Collapse All",
+        "定位当前查询" => "Locate current query",
         "（节点）" => " (node)",
         "已移动保存查询" => "Saved query moved",
         "移动查询失败: {}" => "Failed to move query: {}",

@@ -820,6 +820,8 @@ struct QueryTabState {
     /// 生成 fold_display 时的 sql 快照，用于检测是否需要重建
     fold_display_sql_snapshot: String,
     selected_saved_query_id: Option<String>,
+    /// 定位按钮触发的待定位节点 key（树渲染到该行时滚动到可见并清空）
+    saved_query_locate_target: Option<String>,
     /// Original SQL text when a saved query was loaded; used to detect modifications.
     selected_saved_query_sql: Option<String>,
     /// Original connection_id when a saved query was loaded; used to detect modifications.
@@ -907,6 +909,7 @@ impl Clone for QueryTabState {
             fold_display: self.fold_display.clone(),
             fold_display_sql_snapshot: self.fold_display_sql_snapshot.clone(),
             selected_saved_query_id: self.selected_saved_query_id.clone(),
+            saved_query_locate_target: self.saved_query_locate_target.clone(),
             selected_saved_query_sql: self.selected_saved_query_sql.clone(),
             selected_saved_query_connection_id: self.selected_saved_query_connection_id.clone(),
             selected_saved_query_database: self.selected_saved_query_database.clone(),
@@ -20360,6 +20363,7 @@ impl QueryTabState {
             fold_display: None,
             fold_display_sql_snapshot: String::new(),
             selected_saved_query_id: None,
+            saved_query_locate_target: None,
             selected_saved_query_sql: None,
             selected_saved_query_connection_id: None,
             selected_saved_query_database: None,
@@ -36012,6 +36016,32 @@ fn render_saved_queries_panel(
                         tab.saved_query_tree_collapsed.clear();
                         *action = TabUiAction::SaveSavedQueryTreeState(Vec::new());
                     }
+                    // 定位当前打开/选中的保存查询（locate.svg），在展开全部左侧
+                    let (l_rect, l_resp) = ui.allocate_exact_size(egui::vec2(24.0, 22.0), egui::Sense::click());
+                    let l_resp = l_resp
+                        .on_hover_text(tr!("定位当前查询"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if l_resp.hovered() {
+                        ui.painter().rect_filled(l_rect, chrome.radius_md, ui.visuals().widgets.hovered.weak_bg_fill);
+                    }
+                    egui::Image::new(egui::include_image!("../assets/svg/locate.svg"))
+                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                        .tint(chrome.weak_text)
+                        .paint_at(ui, egui::Rect::from_center_size(l_rect.center() + egui::vec2(0.0, 1.0), egui::vec2(16.0, 16.0)));
+                    if l_resp.clicked() {
+                        let target_entry = tab.selected_saved_query_id.as_deref().and_then(|id| {
+                            tab.all_saved_queries.iter().find(|e| e.id == *id)
+                        });
+                        if let Some(entry) = target_entry {
+                            let conn_key = conn_node_key(&entry.connection_id);
+                            tab.saved_query_tree_collapsed.remove(&conn_key);
+                            if let Some(db) = &entry.database {
+                                tab.saved_query_tree_collapsed.remove(&db_node_key(&entry.connection_id, db));
+                            }
+                            // 展开祖先路径只写内存（不落盘展开状态），滚动完成后清空定位标记
+                            tab.saved_query_locate_target = Some(format!("query:{}", entry.id));
+                        }
+                    }
                 });
             });
             ui.add_space(6.0);
@@ -36272,7 +36302,7 @@ fn render_conn_node(
     if row_sense.drag_started() {
         tab.saved_query_drag_source = Some(SavedQueryDragSource::Conn(conn_id.clone()));
     }
-    if row_sense.clicked() {
+    if row_sense.clicked_by(egui::PointerButton::Primary) && !row_sense.double_clicked() {
         toggle_expanded(tab, key, action);
     }
     // 拖拽目标：
@@ -36405,7 +36435,7 @@ fn render_db_node(
     if row_sense.drag_started() {
         tab.saved_query_drag_source = Some(SavedQueryDragSource::Db(cid.clone(), db.clone()));
     }
-    if row_sense.clicked() {
+    if row_sense.clicked_by(egui::PointerButton::Primary) && !row_sense.double_clicked() {
         toggle_expanded(tab, key, action);
     }
     // 拖拽目标：
@@ -36491,6 +36521,13 @@ fn render_query_row(
     let text_width = ui.painter().layout_no_wrap(full_title.to_string(), font.clone(), text_color).size().x;
     let btn_width = (text_width + 16.0).max(ui.available_width());
 
+    // 定位目标：渲染到该行时滚动到可见并清空标记（不分配 widget，避免推进布局光标）
+    if tab.saved_query_locate_target.as_deref() == Some(&format!("query:{entry_id}")) {
+        let target_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(1.0, 1.0));
+        ui.scroll_to_rect(target_rect, Some(egui::Align::Center));
+        tab.saved_query_locate_target = None;
+    }
+
     ui.horizontal(|ui| {
         let (rect, item_response) = ui.allocate_exact_size(
             egui::vec2(btn_width, 22.0),
@@ -36525,12 +36562,8 @@ fn render_query_row(
                 Stroke::new(2.0, highlight),
             );
         }
-        // 单击：选中
+        // 单击：选中并加载展示内容
         if item_response.clicked() {
-            tab.selected_saved_query_id = Some(entry_id.clone());
-        }
-        // 双击：加载
-        if item_response.double_clicked() {
             tab.sql = sql_text.clone();
             tab.connection_id = Some(connection_id.clone());
             tab.database = database.clone();
