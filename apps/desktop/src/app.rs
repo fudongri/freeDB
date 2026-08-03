@@ -35845,23 +35845,27 @@ fn render_query_editor(
             // 折叠箭头（行号右侧，贴 gutter 右缘）；交互由 gutter_resp 统一处理
             if let Some(&(open_line, is_folded)) = fold_arrows.get(line) {
                 let fold_arrow_x = gutter_rect.right() - 14.0;
-                let arrow = if is_folded { "+" } else { "-" };
-                let arrow_color = if is_folded { palette.line_number_active } else { palette.line_number };
-                clip_painter.text(
-                    egui::pos2(fold_arrow_x, *center_y),
-                    Align2::CENTER_CENTER,
-                    arrow,
-                    FontId::new(fonts.code, FontFamily::Monospace),
-                    arrow_color,
-                );
+                let icon = if is_folded {
+                    egui::include_image!("../assets/svg/chevron-right.svg")
+                } else {
+                    egui::include_image!("../assets/svg/chevron-down.svg")
+                };
+                egui::Image::new(icon)
+                    .fit_to_exact_size(egui::vec2(11.0, 11.0))
+                    .tint(colors.weak_text)
+                    .paint_at(ui, egui::Rect::from_center_size(
+                        egui::pos2(fold_arrow_x, *center_y),
+                        egui::vec2(11.0, 11.0),
+                    ));
                 let arrow_rect = egui::Rect::from_center_size(
                     egui::pos2(fold_arrow_x, *center_y),
                     egui::vec2(18.0, gutter_row_height),
                 );
-                if arrow_rect.contains(pointer_pos.unwrap_or(egui::pos2(-9999.0, -9999.0)))
-                    && gutter_resp.clicked()
-                {
-                    clicked_fold_line = Some(open_line);
+                if arrow_rect.contains(pointer_pos.unwrap_or(egui::pos2(-9999.0, -9999.0))) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    if gutter_resp.clicked() {
+                        clicked_fold_line = Some(open_line);
+                    }
                 }
             }
         }
