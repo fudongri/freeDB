@@ -4721,6 +4721,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let table = tab.table.clone();
         let database_kind = tab.database_kind;
 
+        // 关闭限制时无分页概念，强制回到第 1 页
+        if !tab.preview_limit_enabled && tab.current_page != 0 {
+            tab.current_page = 0;
+            tab.mongo_page_cursors.clear();
+        }
+
         // Show spinner immediately by clearing old data
         tab.error = None;
         tab.preview = None;
@@ -4744,25 +4750,30 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             && (sort_active_clauses.is_empty()
                 || (sort_active_clauses.len() == 1
                     && sort_active_clauses[0].column.as_deref() == Some("_id")));
-        let cursor_id = if use_cursor_pagination && tab.current_page > 0 {
+        let cursor_id = if tab.preview_limit_enabled && use_cursor_pagination && tab.current_page > 0 {
             tab.mongo_page_cursors.get(tab.current_page.saturating_sub(1)).cloned()
         } else {
             None
         };
 
-        let offset = if cursor_id.is_some() {
+        let offset = if !tab.preview_limit_enabled || cursor_id.is_some() {
             None
         } else {
             Some(tab.current_page * tab.preview_page_size.max(1) as usize)
         };
         let cursor_ref = cursor_id.as_deref();
+        let preview_limit = if tab.preview_limit_enabled {
+            Some(tab.preview_page_size.max(1))
+        } else {
+            None
+        };
 
         let display_sql = build_table_preview_display_sql(
             database_kind,
             &table,
             &tab.preview_filter,
             &tab.preview_sort,
-            Some(tab.preview_page_size.max(1)),
+            preview_limit,
             offset,
             definition_for_filter.as_ref(),
             cursor_ref,
@@ -4772,7 +4783,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             &table,
             &tab.preview_filter,
             &tab.preview_sort,
-            Some(tab.preview_page_size.max(1)),
+            preview_limit,
             offset,
             definition_for_filter.as_ref(),
             cursor_ref,
@@ -14048,7 +14059,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             match tab.active_view {
                                 TableViewMode::Data => {
                                     if tab.preview.is_some() || tab.error.is_some() {
-                                        let live_preview_cursor = if tab.database_kind == DatabaseKind::MongoDb
+                                        let live_preview_cursor = if tab.preview_limit_enabled
+                                            && tab.database_kind == DatabaseKind::MongoDb
                                             && {
                                                 let active: Vec<_> = tab.preview_sort.clauses.iter().filter(|c| c.enabled && c.column.is_some()).collect();
                                                 active.is_empty()
@@ -14060,17 +14072,22 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         } else {
                                             None
                                         };
-                                        let live_preview_offset = if live_preview_cursor.is_some() {
+                                        let live_preview_offset = if !tab.preview_limit_enabled || live_preview_cursor.is_some() {
                                             None
                                         } else {
                                             Some(tab.current_page * tab.preview_page_size.max(1) as usize)
+                                        };
+                                        let live_preview_limit = if tab.preview_limit_enabled {
+                                            Some(tab.preview_page_size.max(1))
+                                        } else {
+                                            None
                                         };
                                         let live_preview_sql = build_table_preview_display_sql(
                                             tab.database_kind,
                                             &tab.table,
                                             &tab.preview_filter,
                                             &tab.preview_sort,
-                                            Some(tab.preview_page_size.max(1)),
+                                            live_preview_limit,
                                             live_preview_offset,
                                             tab.definition.as_ref(),
                                             live_preview_cursor,
@@ -15309,7 +15326,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 if show_footer {
                 strip.cell(|ui| {
                     let row_count = tab.preview.as_ref().map(|item| item.rows.len()).unwrap_or(0);
-                    let page_size = tab.preview_page_size.max(1);
+                    let page_size = if tab.preview_limit_enabled {
+                        tab.preview_page_size.max(1) as u32
+                    } else {
+                        u32::MAX
+                    };
                     let (result_column_count, result_elapsed_ms) = ui
                         .data(|data| {
                             data.get_temp::<(usize, u128)>(egui::Id::new("table-preview-meta"))
@@ -15324,7 +15345,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let current_page = tab.current_page.min(total_pages.saturating_sub(1));
                         let mut footer_refresh_requested = false;
 
-                        let page_size = tab.preview_page_size.max(1) as usize;
+                        let page_size = if tab.preview_limit_enabled {
+                            tab.preview_page_size.max(1) as usize
+                        } else {
+                            usize::MAX
+                        };
                         let current_page = tab.current_page;
                         let row_count = tab.preview.as_ref().map(|p| p.rows.len()).unwrap_or(0);
                         // Last page detection: fewer rows than page_size means no more data
@@ -15466,6 +15491,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 .clicked()
                             {
                                 tab.preview_limit_enabled = !tab.preview_limit_enabled;
+                                if !tab.preview_limit_enabled {
+                                    tab.current_page = 0;
+                                    tab.mongo_page_cursors.clear();
+                                }
                                 footer_refresh_requested = true;
                                 ui.close();
                             }
