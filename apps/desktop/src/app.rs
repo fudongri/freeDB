@@ -5297,6 +5297,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn test_connection_form(&mut self) {
+        if self.connection_form.kind == DatabaseKind::Postgres
+            && self.connection_form.default_database.trim().is_empty()
+        {
+            self.connection_test_result = Some((false, tr!("默认数据库为必填项").into()));
+            return;
+        }
         let input = self.connection_form.to_input();
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
@@ -5312,6 +5318,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn save_connection_form(&mut self) {
+        if self.connection_form.kind == DatabaseKind::Postgres
+            && self.connection_form.default_database.trim().is_empty()
+        {
+            self.connection_test_result = Some((false, tr!("默认数据库为必填项").into()));
+            return;
+        }
         let input = self.connection_form.to_input();
         let result = if let Some(connection_id) = self.editing_connection_id.clone() {
             self.services.update_connection(&connection_id, input)
@@ -15699,7 +15711,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             TextEdit::singleline(&mut self.connection_form.password).password(true).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center),
                                         );
                                     });
-                                    form_row(ui, tr!("默认数据库"), &mut self.connection_form.default_database);
+                                    match self.connection_form.kind {
+                                        DatabaseKind::Postgres => {
+                                            form_grid_row(ui, tr!("默认数据库"), |ui| {
+                                                ui.add_sized(
+                                                    [380.0, 30.0],
+                                                    TextEdit::singleline(&mut self.connection_form.default_database).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center),
+                                                );
+                                            });
+                                        }
+                                        DatabaseKind::MongoDb => {
+                                            form_grid_row(ui, tr!("验证数据库"), |ui| {
+                                                ui.add_sized(
+                                                    [380.0, 30.0],
+                                                    TextEdit::singleline(&mut self.connection_form.default_database).margin(egui::Margin::symmetric(10, 4)).vertical_align(egui::Align::Center),
+                                                );
+                                            });
+                                        }
+                                        _ => {}
+                                    }
                                     form_grid_row(ui, "SSL", |ui| {
                                         let ssl_label = match self.connection_form.ssl_mode {
                                             SslMode::Disable => "Disable",

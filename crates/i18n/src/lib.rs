@@ -627,6 +627,8 @@ fn en(key: &'static str) -> &'static str {
         "配置数据库连接信息" => "Configure database connection",
         "（默认）" => "(default)",
         "默认数据库" => "Default Database",
+        "验证数据库" => "Auth Database",
+        "默认数据库为必填项" => "Default database is required",
         "名称" => "Name",
         "限制" => "Limit",
         "开启限制" => "Enable Limit",
