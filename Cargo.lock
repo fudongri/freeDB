@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "ai-service"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -210,7 +210,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app-services"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "connection-pool"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "core-domain",
  "driver-api",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "connection-store"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "core-domain"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "chrono",
  "serde",
@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "ai-service",
  "app-services",
@@ -1480,7 +1480,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "driver-api"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "async-trait",
  "core-domain",
@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "driver-mongodb"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "driver-mysql"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1525,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "driver-postgres"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "driver-sqlite"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "async-trait",
  "core-domain",
@@ -1869,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "export-service"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "anyhow",
  "core-domain",
@@ -2692,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "history-store"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "i18n"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "sys-locale",
 ]
@@ -3453,7 +3453,7 @@ dependencies = [
 
 [[package]]
 name = "metadata-cache"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5229,7 +5229,7 @@ dependencies = [
 
 [[package]]
 name = "secure-store"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "aes",
  "anyhow",
@@ -5382,7 +5382,7 @@ dependencies = [
 
 [[package]]
 name = "session-manager"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "anyhow",
  "connection-pool",
@@ -5511,7 +5511,7 @@ dependencies = [
 
 [[package]]
 name = "slowlog-parser"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "i18n",
  "regex",
@@ -6307,7 +6307,7 @@ dependencies = [
 
 [[package]]
 name = "ui-theme"
-version = "1.1.7"
+version = "1.1.8"
 dependencies = [
  "egui",
 ]
