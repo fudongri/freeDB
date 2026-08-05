@@ -195,13 +195,16 @@ impl AppServices {
                 core_domain::ExplorerNodeType::Table | core_domain::ExplorerNodeType::View => {
                     result.push(node);
                 }
-                _ => {
+                // 只展开可展开节点（Database/Schema）。MySQL 的 Procedure/Function 节点
+                // 无子节点，若对它们调用 list_children 会返回整库内容造成 BFS 死循环。
+                _ if node.expandable => {
                     let children = self
                         .load_node_children_with(&profile, &password, &node)
                         .await
                         .unwrap_or_default();
                     queue.extend(children);
                 }
+                _ => {}
             }
         }
         Ok(result)
