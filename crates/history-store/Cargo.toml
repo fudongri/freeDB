@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+connection-store = { path = "../connection-store" }
 anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true

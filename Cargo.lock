@@ -2697,6 +2697,7 @@ version = "1.1.8"
 dependencies = [
  "anyhow",
  "chrono",
+ "connection-store",
  "dirs",
  "parking_lot",
  "rusqlite",
