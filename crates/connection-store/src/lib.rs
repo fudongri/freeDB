@@ -14,6 +14,7 @@ impl ConnectionStore {
     pub fn new() -> Result<Self> {
         let path = database_path()?;
         let connection = Connection::open(path)?;
+        install_sql_trace(&connection);
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
         };
