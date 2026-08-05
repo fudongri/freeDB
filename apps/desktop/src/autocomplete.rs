@@ -301,6 +301,39 @@ impl SchemaCache {
             .count()
     }
 
+    /// 缓存中的表/库/模式总数（诊断用）
+    pub fn len(&self) -> usize {
+        self.tables.len() + self.databases.len() + self.schemas.len()
+    }
+
+    /// 估算缓存占用的字节数（表名/库名/模式名/列定义名与类型，粗略求和，诊断用）
+    pub fn estimated_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        let table_bytes: usize = self
+            .tables
+            .iter()
+            .map(|(name, (_, cols))| {
+                name.len()
+                    + cols.iter().map(|c| c.name.len() + c.data_type.len()).sum::<usize>()
+                    + cols.len() * size_of::<ColumnDefinition>()
+            })
+            .sum();
+        let db_bytes: usize = self
+            .database_tables
+            .iter()
+            .map(|(name, list)| name.len() + list.iter().map(|s| s.len()).sum::<usize>())
+            .sum();
+        let schema_bytes: usize = self
+            .schema_tables
+            .iter()
+            .map(|(name, list)| name.len() + list.iter().map(|s| s.len()).sum::<usize>())
+            .sum();
+        let db_pairs: usize = self.databases.iter().map(|(c, n)| c.len() + n.len()).sum();
+        let schema_pairs: usize = self.schemas.iter().map(|(c, n)| c.len() + n.len()).sum();
+        table_bytes + db_bytes + schema_bytes + db_pairs + schema_pairs
+    }
+
     /// Clear all cached tables.
     pub fn clear(&mut self) {
         self.tables.clear();

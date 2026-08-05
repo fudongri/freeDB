@@ -237,6 +237,8 @@ pub struct DesktopApp {
     locale: Locale,
     /// 帧计数器：延迟最大化到窗口完全显示后执行
     frame_count: usize,
+    /// 上次打印缓存大小统计的时间，用于定时诊断内存增长
+    last_cache_stats_log: Option<std::time::Instant>,
 }
 
 struct SchemaLoadResult {
@@ -452,6 +454,44 @@ impl WorkspaceTab {
             Self::Dashboard | Self::SlowQuery(_) => None,
         }
     }
+
+    /// 估算标签页占用的字节数（查询结果/历史/预览等，粗略求和，诊断用）
+    fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Query(t) => {
+                t.result.as_ref().map(|r| query_result_bytes(r)).unwrap_or(0)
+                    + t.multi_results.iter().map(query_result_bytes).sum::<usize>()
+                    + t.history.iter().map(|(c, s, _, _, _)| c.len() + s.len()).sum::<usize>()
+                    + t.saved_queries.iter().map(|q| q.title.len() + q.sql_text.len()).sum::<usize>()
+                    + t.sql.len()
+                    + t.messages.iter().map(|m| m.len()).sum::<usize>()
+            }
+            Self::Table(t) => {
+                t.preview.as_ref().map(|r| query_result_bytes(r)).unwrap_or(0)
+                    + t.definition.as_ref().map(|d| {
+                        d.columns.iter().map(|c| c.name.len() + c.data_type.len()).sum::<usize>()
+                    }).unwrap_or(0)
+            }
+            Self::SlowQuery(t) => {
+                t.raw_entries.as_ref().map(|e| e.len()).unwrap_or(0) * 512
+            }
+            _ => 0,
+        }
+    }
+}
+
+/// 估算 QueryResult 占用字节数（行数 × 每行文本长度 + 列名，粗略求和，诊断用）
+fn query_result_bytes(result: &QueryResult) -> usize {
+    let columns: usize = result.columns.iter().map(|c| c.len()).sum();
+    let rows: usize = result.rows.iter().map(|row| {
+        row.values().map(|v| {
+            match v {
+                QueryCellValue::Null => 0,
+                QueryCellValue::Text(s) => s.len(),
+            }
+        }).sum::<usize>()
+    }).sum();
+    columns + rows
 }
 
 /// 慢查询分析标签页状态
@@ -1951,6 +1991,7 @@ impl DesktopApp {
             pending_ai_test: None,
             locale,
             frame_count: 0,
+            last_cache_stats_log: None,
         };
 
         // 加载最近打开的标签页
@@ -3369,6 +3410,95 @@ impl DesktopApp {
                     self.update_state = Some(UpdateState::Error(tr!("下载任务异常终止").to_string()));
                 }
             }
+        }
+
+        // 定时打印各缓存大小，用于诊断内存持续增长
+        const CACHE_STATS_INTERVAL: Duration = Duration::from_secs(60);
+        if self.last_cache_stats_log.map_or(true, |t| t.elapsed() >= CACHE_STATS_INTERVAL) {
+            self.log_cache_stats();
+            self.last_cache_stats_log = Some(Instant::now());
+        }
+    }
+
+    /// 打印各缓存当前大小（条数 + 估算字节数），转为 KB/MB/GB 可读格式
+    fn log_cache_stats(&self) {
+        use std::mem::size_of;
+
+        let mut rows: Vec<(String, usize, usize)> = Vec::new();
+
+        // 连接树缓存：roots + children 节点
+        let roots_entries = self.roots_by_connection.len();
+        let roots_bytes = self.roots_by_connection.values().map(|nodes| {
+            nodes.len() * size_of::<ExplorerNode>()
+                + nodes.iter().map(|n| n.id.len() + n.name.len()).sum::<usize>()
+        }).sum::<usize>();
+        rows.push(("roots_by_connection".to_string(), roots_entries, roots_bytes));
+
+        let children_entries = self.children_by_node.len();
+        let children_bytes = self.children_by_node.values().map(|nodes| {
+            nodes.len() * size_of::<ExplorerNode>()
+                + nodes.iter().map(|n| n.id.len() + n.name.len()).sum::<usize>()
+        }).sum::<usize>();
+        rows.push(("children_by_node".to_string(), children_entries, children_bytes));
+
+        // 展开/活跃状态集合
+        let expanded_bytes = self.expanded_nodes.iter().map(|s| s.len()).sum::<usize>();
+        rows.push(("expanded_nodes".to_string(), self.expanded_nodes.len(), expanded_bytes));
+
+        let active_entries = self.active_connections.len();
+        let active_bytes = self.active_connections.values().map(|set| {
+            set.iter().map(|s| s.len()).sum::<usize>()
+        }).sum::<usize>();
+        rows.push(("active_connections".to_string(), active_entries, active_bytes));
+
+        // 数据库列表缓存
+        let db_entries = self.database_cache.len();
+        let db_bytes = self.database_cache.values().map(|dbs| {
+            dbs.iter().map(|s| s.len()).sum::<usize>()
+        }).sum::<usize>();
+        rows.push(("database_cache".to_string(), db_entries, db_bytes));
+
+        // schema 元数据缓存（表名/库名/模式名/列定义）
+        let schema_bytes = self.schema_cache.estimated_bytes();
+        rows.push(("schema_cache".to_string(), self.schema_cache.len(), schema_bytes));
+
+        // 加载中状态集合
+        let loading_bytes = self.loading_nodes.iter().map(|s| s.len()).sum::<usize>();
+        rows.push(("loading_nodes".to_string(), self.loading_nodes.len(), loading_bytes));
+
+        // 标签页：查询结果/预览/历史等
+        let tab_entries = self.tabs.len();
+        let tab_bytes = self.tabs.iter().map(|t| t.estimated_bytes()).sum::<usize>();
+        rows.push(("tabs(query_results)".to_string(), tab_entries, tab_bytes));
+
+        // 运行日志缓冲
+        let log_entries = self.log_buffer.lock().map(|b| b.len()).unwrap_or(0);
+        let log_bytes = self.log_buffer.lock().map(|b| b.iter().map(|s| s.len()).sum::<usize>()).unwrap_or(0);
+        rows.push(("log_buffer".to_string(), log_entries, log_bytes));
+
+        // 总条目数与总字节数
+        let total_entries: usize = rows.iter().map(|(_, n, _)| n).sum();
+        let total_bytes: usize = rows.iter().map(|(_, _, b)| b).sum();
+
+        let fmt = |bytes: usize| -> String {
+            if bytes >= 1024 * 1024 * 1024 {
+                format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+            } else if bytes >= 1024 * 1024 {
+                format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+            } else if bytes >= 1024 {
+                format!("{:.2} KB", bytes as f64 / 1024.0)
+            } else {
+                format!("{bytes} B")
+            }
+        };
+
+        let mut lines = Vec::new();
+        lines.push(format!("==== 缓存大小统计 (总条目 {} / 总估算 {} ) ====", total_entries, fmt(total_bytes)));
+        for (name, entries, bytes) in rows {
+            lines.push(format!("  {name:<28} {:>6} 条  {:>10}", entries, fmt(bytes)));
+        }
+        for line in lines {
+            tracing::info!("[mem] {}", line);
         }
     }
 
