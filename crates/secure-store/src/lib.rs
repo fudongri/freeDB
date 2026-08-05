@@ -19,6 +19,7 @@ impl SecureStore {
     pub fn new() -> Result<Self> {
         let path = database_path()?;
         let connection = Connection::open(path)?;
+        connection_store::install_sql_trace(&connection);
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
         };
