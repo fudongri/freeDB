@@ -447,3 +447,80 @@ pub fn install_sql_trace(conn: &Connection) {
         Some(sqlite_trace_callback),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    // 捕获 info 事件的测试订阅者
+    #[derive(Clone)]
+    struct CaptureLayer(Arc<Mutex<Vec<String>>>);
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: Context<'_, S>,
+        ) {
+            let mut visitor = CaptureVisitor(String::new());
+            event.record(&mut visitor);
+            if let Ok(mut buf) = self.0.lock() {
+                buf.push(visitor.0);
+            }
+        }
+    }
+
+    struct CaptureVisitor(String);
+
+    impl tracing::field::Visit for CaptureVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if self.0.is_empty() {
+                self.0 = format!("{}: {}", field.name(), value);
+            } else {
+                self.0.push_str(&format!(" {}: {}", field.name(), value));
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if self.0.is_empty() {
+                self.0 = format!("{}: {:?}", field.name(), value);
+            } else {
+                self.0.push_str(&format!(" {}: {:?}", field.name(), value));
+            }
+        }
+    }
+
+    #[test]
+    fn install_sql_trace_records_all_statements() {
+        let conn = Connection::open_in_memory().unwrap();
+        install_sql_trace(&conn);
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            conn.execute_batch("CREATE TABLE t (id INTEGER, name TEXT)").unwrap();
+            conn.execute(
+                "INSERT INTO t (id, name) VALUES (?1, ?2)",
+                rusqlite::params![1, "hello"],
+            )
+            .unwrap();
+            conn.query_row("SELECT name FROM t WHERE id = ?1", [1], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        });
+
+        let logs = captured.lock().unwrap();
+        let joined: String = logs.join("\n");
+        assert!(joined.contains("[freedb.sqlite3] CREATE TABLE t (id INTEGER, name TEXT)"), "应记录 DDL，实际:\n{joined}");
+        assert!(joined.contains("[freedb.sqlite3] INSERT INTO t (id, name) VALUES (?1, ?2)"), "应记录 INSERT，实际:\n{joined}");
+        assert!(joined.contains("[freedb.sqlite3] SELECT name FROM t WHERE id = ?1"), "应记录 SELECT（保留占位符形态），实际:\n{joined}");
+    }
+}
