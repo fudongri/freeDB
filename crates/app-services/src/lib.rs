@@ -148,7 +148,7 @@ impl AppServices {
 
     pub async fn load_connection_tree(&self, connection_id: &str) -> Result<Vec<ExplorerNode>> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         let nodes = self
             .session_manager
             .load_connection_tree(&profile, &password)
@@ -180,17 +180,24 @@ impl AppServices {
         connection_id: &str,
     ) -> Result<Vec<ExplorerNode>> {
         let roots = self.load_connection_tree(connection_id).await?;
+        // profile/密码只取一次，整棵树遍历复用，避免每个节点重复查 freedb.sqlite3
+        let profile = self.require_connection(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         let mut result = Vec::new();
         // BFS: Database → Schema (PG) → Table/View
         let mut queue: Vec<ExplorerNode> = roots;
         while let Some(node) = queue.pop() {
+            // 连接已断开则提前终止，避免关闭连接后仍继续遍历真实数据库
+            if self.connection_status(connection_id).state == core_domain::ConnectionState::Disconnected {
+                break;
+            }
             match node.node_type {
                 core_domain::ExplorerNodeType::Table | core_domain::ExplorerNodeType::View => {
                     result.push(node);
                 }
                 _ => {
                     let children = self
-                        .load_node_children(connection_id, &node)
+                        .load_node_children_with(&profile, &password, &node)
                         .await
                         .unwrap_or_default();
                     queue.extend(children);
@@ -200,13 +207,26 @@ impl AppServices {
         Ok(result)
     }
 
+    /// 带预取的 profile/密码加载子节点，供批量遍历复用
+    async fn load_node_children_with(
+        &self,
+        profile: &ConnectionProfile,
+        password: &str,
+        node: &ExplorerNode,
+    ) -> Result<Vec<ExplorerNode>> {
+        self.session_manager
+            .load_node_children(profile, password, node)
+            .await
+            .map_err(into_anyhow)
+    }
+
     pub async fn load_node_children(
         &self,
         connection_id: &str,
         node: &ExplorerNode,
     ) -> Result<Vec<ExplorerNode>> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .load_node_children(&profile, &password, node)
             .await
@@ -269,7 +289,7 @@ impl AppServices {
 
     pub async fn load_table_definition(&self, table: &TableRef) -> Result<TableDefinition> {
         let profile = self.require_connection(&table.connection_id)?;
-        let password = self.require_saved_password(&table.connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .load_table_definition(&profile, &password, table)
             .await
@@ -278,7 +298,7 @@ impl AppServices {
 
     pub async fn load_routine_definition(&self, routine: &core_domain::RoutineRef) -> Result<core_domain::RoutineDefinition> {
         let profile = self.require_connection(&routine.connection_id)?;
-        let password = self.require_saved_password(&routine.connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .load_routine_definition(&profile, &password, routine)
             .await
@@ -287,7 +307,7 @@ impl AppServices {
 
     pub async fn open_table_preview(&self, table: &TableRef, limit: u32) -> Result<QueryResult> {
         let profile = self.require_connection(&table.connection_id)?;
-        let password = self.require_saved_password(&table.connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .preview_table(&profile, &password, table, limit)
             .await
@@ -305,7 +325,7 @@ impl AppServices {
 
     async fn execute_sql_inner(&self, execution: QueryExecution, record_history: bool) -> Result<QueryResult> {
         let profile = self.require_connection(&execution.connection_id)?;
-        let password = self.require_saved_password(&execution.connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         let result = self
             .session_manager
             .execute_sql(&profile, &password, execution.clone())
@@ -357,7 +377,7 @@ impl AppServices {
             Ok(p) => p,
             Err(e) => return statements.into_iter().map(|_| Err(anyhow::anyhow!("{}", e))).collect(),
         };
-        let password = match self.require_saved_password(connection_id) {
+        let password = match self.require_saved_password(&profile) {
             Ok(p) => p,
             Err(e) => return statements.into_iter().map(|_| Err(anyhow::anyhow!("{}", e))).collect(),
         };
@@ -400,7 +420,7 @@ impl AppServices {
                 return;
             }
         };
-        let password = match self.require_saved_password(connection_id) {
+        let password = match self.require_saved_password(&profile) {
             Ok(p) => p,
             Err(e) => {
                 let msg = e.to_string();
@@ -426,7 +446,7 @@ impl AppServices {
 
     pub async fn apply_table_changes(&self, changes: TableChangeSet) -> Result<QueryResult> {
         let profile = self.require_connection(&changes.table.connection_id)?;
-        let password = self.require_saved_password(&changes.table.connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .apply_table_changes(&profile, &password, changes)
             .await
@@ -435,7 +455,7 @@ impl AppServices {
 
     pub async fn show_processlist(&self, connection_id: &str) -> Result<Vec<core_domain::ProcessInfo>> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .show_processlist(&profile, &password)
             .await
@@ -600,7 +620,7 @@ impl AppServices {
         db_kind: DatabaseKind,
     ) -> Result<String> {
         let profile = self.require_connection(&table.connection_id)?;
-        let password = self.require_saved_password(&table.connection_id)?;
+        let password = self.require_saved_password(&profile)?;
 
         let table_def = self.session_manager.load_table_definition(&profile, &password, table).await.map_err(into_anyhow)?;
 
@@ -637,7 +657,7 @@ impl AppServices {
         db_kind: DatabaseKind,
     ) -> Result<String> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
 
         // Build a parent node to list children (tables/views)
         let parent = ExplorerNode {
@@ -700,7 +720,7 @@ impl AppServices {
     /// 预热连接池：后台建立一个额外连接，供并发操作复用。
     pub async fn prewarm_connection(&self, connection_id: &str) -> Result<()> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         let db = profile.default_database.clone();
         self.session_manager.prewarm_connection(&profile, &password, db.as_deref()).await;
         Ok(())
@@ -718,49 +738,49 @@ impl AppServices {
 
     pub async fn create_database(&self, connection_id: &str, name: &str, charset: Option<&str>, collation: Option<&str>) -> Result<()> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager.create_database(&profile, &password, name, charset, collation).await.map_err(into_anyhow)
     }
 
     pub async fn rename_database(&self, connection_id: &str, old_name: &str, new_name: &str) -> Result<()> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager.rename_database(&profile, &password, old_name, new_name).await.map_err(into_anyhow)
     }
 
     pub async fn drop_database(&self, connection_id: &str, name: &str) -> Result<()> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager.drop_database(&profile, &password, name).await.map_err(into_anyhow)
     }
 
     pub async fn create_schema(&self, connection_id: &str, database: &str, name: &str) -> Result<()> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager.create_schema(&profile, &password, database, name).await.map_err(into_anyhow)
     }
 
     pub async fn rename_schema(&self, connection_id: &str, database: &str, old_name: &str, new_name: &str) -> Result<()> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager.rename_schema(&profile, &password, database, old_name, new_name).await.map_err(into_anyhow)
     }
 
     pub async fn drop_schema(&self, connection_id: &str, database: &str, name: &str) -> Result<()> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager.drop_schema(&profile, &password, database, name).await.map_err(into_anyhow)
     }
 
     pub async fn rename_table(&self, connection_id: &str, database: &str, schema: Option<&str>, old_name: &str, new_name: &str) -> Result<()> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager.rename_table(&profile, &password, database, schema, old_name, new_name).await.map_err(into_anyhow)
     }
 
     pub async fn load_tables_summary(&self, connection_id: &str, database: &str, schema: Option<&str>) -> Result<Vec<driver_api::TableSummary>> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .load_tables_summary(&profile, &password, database, schema)
             .await
@@ -769,7 +789,7 @@ impl AppServices {
 
     pub async fn load_routines_summary(&self, connection_id: &str, database: &str, schema: Option<&str>) -> Result<Vec<driver_api::TableSummary>> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .load_routines_summary(&profile, &password, database, schema)
             .await
@@ -778,7 +798,7 @@ impl AppServices {
 
     pub async fn load_schemas_summary(&self, connection_id: &str, database: &str) -> Result<Vec<driver_api::SchemaSummary>> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .load_schemas_summary(&profile, &password, database)
             .await
@@ -787,7 +807,7 @@ impl AppServices {
 
     pub async fn load_collection_stats(&self, connection_id: &str, database: &str, collection: &str) -> Result<Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)>> {
         let profile = self.require_connection(connection_id)?;
-        let password = self.require_saved_password(connection_id)?;
+        let password = self.require_saved_password(&profile)?;
         self.session_manager
             .load_collection_stats(&profile, &password, database, collection)
             .await
@@ -827,15 +847,13 @@ impl AppServices {
             .ok_or_else(|| anyhow!("connection not found"))
     }
 
-    fn require_saved_password(&self, connection_id: &str) -> Result<String> {
+    fn require_saved_password(&self, profile: &ConnectionProfile) -> Result<String> {
         // SQLite 无需密码，直接返回空密码，避免误报"未保存密码"
-        if let Some(profile) = self.connection_store.get_connection(connection_id)? {
-            if profile.kind == DatabaseKind::Sqlite {
-                return Ok(String::new());
-            }
+        if profile.kind == DatabaseKind::Sqlite {
+            return Ok(String::new());
         }
         self.secure_store
-            .load_password(connection_id)?
+            .load_password(&profile.id)?
             .ok_or_else(|| anyhow!("{}", tr!("该连接未保存密码，请重新编辑连接后保存密码")))
     }
 

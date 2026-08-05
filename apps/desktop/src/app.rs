@@ -2054,6 +2054,17 @@ impl DesktopApp {
         }
         // 取消该连接的 pending 树加载，避免后台任务完成后意外恢复
         self.pending_connection_tree = None;
+        // 取消在途的 schema 预加载 / 数据库列表任务，防止关闭连接后继续遍历真实数据库
+        self.pending_schema_load = None;
+        self.pending_database_list = None;
+        // 若定位目标属于该连接，清除定位标记，避免侧边栏每帧重新触发连接
+        if self
+            .sidebar_locate_node
+            .as_ref()
+            .is_some_and(|target| target.split(':').nth(1) == Some(connection_id))
+        {
+            self.sidebar_locate_node = None;
+        }
         self.status_message = tr!("已关闭 {}", name);
     }
 
