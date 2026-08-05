@@ -426,3 +426,23 @@ fn to_sql_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqli
         Box::new(error),
     )
 }
+
+// ---- freedb.sqlite3 全量 SQL 运行日志 ----
+
+fn sqlite_trace_callback(event: rusqlite::trace::TraceEvent<'_>) {
+    // 只记录语句首次执行的 SQL，不处理 Row（每行触发一次会刷屏）
+    if let rusqlite::trace::TraceEvent::Stmt(_stmt, sql) = event {
+        // 压平换行/制表符，保证日志窗口单行显示
+        let flat = sql.replace(['\n', '\r', '\t'], " ");
+        tracing::info!("[freedb.sqlite3] {}", flat);
+    }
+}
+
+/// 为 freedb.sqlite3 连接注册 SQL 全量 trace，SQLite 执行层自动回调每条语句。
+pub fn install_sql_trace(conn: &Connection) {
+    use rusqlite::trace::TraceEventCodes;
+    conn.trace_v2(
+        TraceEventCodes::SQLITE_TRACE_STMT,
+        Some(sqlite_trace_callback),
+    );
+}

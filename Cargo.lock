@@ -991,6 +991,7 @@ dependencies = [
  "parking_lot",
  "rusqlite",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

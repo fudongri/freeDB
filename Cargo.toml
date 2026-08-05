@@ -56,7 +56,7 @@ regex-syntax = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"], default-features = false }
 rfd = "0.15"
 rust_xlsxwriter = "0.84"
-rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.37", features = ["bundled", "chrono", "trace"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
