@@ -26,7 +26,7 @@ impl ConnectionProvider for PostgresDriver {
         password: &str,
         database: Option<&str>,
     ) -> AppResult<ConnectionHandle> {
-        let db = profile.default_database.as_deref().unwrap_or("postgres");
+        let db = database.or(profile.default_database.as_deref()).unwrap_or("postgres");
         let conn_str = format!(
             "host={} port={} user={} password={} dbname={}",
             profile.host, profile.port, profile.username, password, db
