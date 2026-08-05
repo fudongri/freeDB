@@ -82,7 +82,15 @@ impl ConnectionPool {
         password: &str,
         database: Option<&str>,
     ) -> AppResult<Arc<AsyncMutex<ConnectionHandle>>> {
-        let key = pool_key(&profile.id, profile.kind, database);
+        // PostgreSQL 连接绑定到固定数据库，忽略调用方传入的 database 参数，
+        // 始终使用连接配置中的 default_database。Hologres 等代理下 pg_database
+        // 列出的逻辑库不能单独作为 dbname 连接，必须连配置的默认库。
+        let effective_db = if matches!(profile.kind, DatabaseKind::Postgres) {
+            profile.default_database.as_deref()
+        } else {
+            database
+        };
+        let key = pool_key(&profile.id, profile.kind, effective_db);
 
         let mut backoff_ms = 50u64;
         loop {
@@ -105,7 +113,7 @@ impl ConnectionPool {
 
             // 建新连接
             tracing::info!(key = %key, host = %profile.host, port = profile.port, "连接池新建连接");
-            let new = self.provider(profile.kind).connect(profile, password, database).await?;
+            let new = self.provider(profile.kind).connect(profile, password, effective_db).await?;
             let handle = Arc::new(AsyncMutex::new(new));
             self.push(&key, handle.clone());
             return Ok(handle);
@@ -166,13 +174,18 @@ impl ConnectionPool {
         password: &str,
         database: Option<&str>,
     ) -> AppResult<()> {
-        let key = pool_key(&profile.id, profile.kind, database);
+        let effective_db = if matches!(profile.kind, DatabaseKind::Postgres) {
+            profile.default_database.as_deref()
+        } else {
+            database
+        };
+        let key = pool_key(&profile.id, profile.kind, effective_db);
         let count = self.entries.lock().unwrap().get(&key).map_or(0, |v| v.len());
         if count >= 2 {
             return Ok(());
         }
         tracing::info!(key = %key, "预热连接池");
-        let conn = self.provider(profile.kind).connect(profile, password, database).await?;
+        let conn = self.provider(profile.kind).connect(profile, password, effective_db).await?;
         self.push(&key, Arc::new(AsyncMutex::new(conn)));
         Ok(())
     }
