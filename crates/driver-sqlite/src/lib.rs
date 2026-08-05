@@ -438,41 +438,101 @@ impl DatabaseDriver for SqliteDriver {
         _schema: Option<&str>,
     ) -> AppResult<Vec<TableSummary>> {
         let conn = sqlite_conn(handle)?;
-        let sql = "SELECT name, type FROM sqlite_master \
-                   WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' \
-                   ORDER BY name";
         run_blocking(conn, move |c| {
-            let mut stmt = c.prepare(sql)?;
+            // 表大小通过 dbstat 虚拟表统计（按页聚合），索引按 sqlite_master.tbl_name 归并到所属表，
+            // 与 MySQL 的 data_length/index_length 口径对齐。dbstat 不可用时（极少数编译配置）静默降级为空。
+            let sizes = query_table_sizes(c).unwrap_or_default();
+            let mut stmt = c.prepare(
+                "SELECT name, type FROM sqlite_master \
+                 WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' \
+                 ORDER BY name",
+            )?;
             let rows = stmt.query_map([], |row| {
                 let name: String = row.get(0)?;
                 let ty: String = row.get(1)?;
                 Ok((name, ty))
             })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .await
-        .map(|nodes| {
-            nodes
-                .into_iter()
-                .map(|(name, ty)| TableSummary {
+            let nodes = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut summaries = Vec::with_capacity(nodes.len());
+            for (name, ty) in nodes {
+                // 行数：无系统目录可查，仅对普通表 COUNT(*)（视图行数动态，与其他驱动一致留空）
+                let row_count: Option<i64> = if ty == "table" {
+                    c.query_row(
+                        &format!("SELECT COUNT(*) FROM {}", quote_ident(&name)),
+                        [],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                } else {
+                    None
+                };
+                // 主键：PRAGMA table_info 的 pk > 0 的列（复合主键按列序）
+                let primary_keys = {
+                    let mut pstmt = c.prepare(&format!("PRAGMA table_info({})", quote_ident(&name)))?;
+                    let pk_rows = pstmt.query_map([], |row| {
+                        let col: String = row.get(1)?;
+                        let pk: i64 = row.get(5)?;
+                        Ok((col, pk))
+                    })?;
+                    pk_rows
+                        .filter_map(|r| r.ok())
+                        .filter(|(_, pk)| *pk > 0)
+                        .map(|(col, _)| col)
+                        .collect::<Vec<String>>()
+                };
+                let (total_size, data_size, index_size) = sizes
+                    .get(&name)
+                    .copied()
+                    .map(|(t, d, i)| (Some(t), Some(d), Some(i)))
+                    .unwrap_or((None, None, None));
+                summaries.push(TableSummary {
                     name,
                     table_type: if ty == "view" { "VIEW".into() } else { "TABLE".into() },
-                    row_count: None,
-                    total_size: None,
-                    data_size: None,
-                    index_size: None,
+                    row_count,
+                    total_size,
+                    data_size,
+                    index_size,
                     engine: None,
                     collation: None,
-                    primary_keys: Vec::new(),
+                    primary_keys,
                     comment: None,
                     create_time: None,
-                })
-                .collect()
+                });
+            }
+            Ok(summaries)
         })
+        .await
     }
 }
 
 // ── helpers ──
+
+/// 用 dbstat 虚拟表统计每张表的总/数据/索引大小（字节）。
+/// 返回 `name -> (total, data, index)`；查询失败返回 Err（调用方降级为空）。
+fn query_table_sizes(c: &Connection) -> rusqlite::Result<BTreeMap<String, (i64, i64, i64)>> {
+    let sql = "SELECT m.tbl_name, \
+                      SUM(d.pgsize), \
+                      SUM(CASE WHEN m.type = 'table' THEN d.pgsize ELSE 0 END), \
+                      SUM(CASE WHEN m.type = 'index' THEN d.pgsize ELSE 0 END) \
+               FROM dbstat d \
+               JOIN sqlite_master m ON m.name = d.name \
+               WHERE m.type IN ('table', 'index') AND m.tbl_name NOT LIKE 'sqlite_%' \
+               GROUP BY m.tbl_name";
+    let mut stmt = c.prepare(sql)?;
+    let rows = stmt.query_map([], |row| {
+        let name: String = row.get(0)?;
+        let total: i64 = row.get(1)?;
+        let data: i64 = row.get(2)?;
+        let index: i64 = row.get(3)?;
+        Ok((name, total, data, index))
+    })?;
+    let mut map = BTreeMap::new();
+    for row in rows {
+        let (name, total, data, index) = row?;
+        map.insert(name, (total, data, index));
+    }
+    Ok(map)
+}
 
 async fn query_rows(conn: SharedConn, sql: &str) -> AppResult<QueryResult> {
     let start = Instant::now();

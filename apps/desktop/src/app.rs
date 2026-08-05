@@ -25854,6 +25854,9 @@ fn summary_table_columns(db_kind: DatabaseKind) -> Vec<(&'static str, f32, bool)
         DatabaseKind::Sqlite => vec![
             (tr!("表名"), 150.0, false),
             (tr!("行数"), 90.0, true),
+            (tr!("总大小"), 80.0, true),
+            (tr!("数据大小"), 80.0, true),
+            (tr!("索引大小"), 80.0, true),
             (tr!("主键"), 100.0, false),
             (tr!("类型"), 100.0, false),
         ],
