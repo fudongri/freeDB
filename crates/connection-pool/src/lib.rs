@@ -82,10 +82,11 @@ impl ConnectionPool {
         password: &str,
         database: Option<&str>,
     ) -> AppResult<Arc<AsyncMutex<ConnectionHandle>>> {
-        // PostgreSQL 连接绑定到固定数据库，忽略调用方传入的 database 参数，
+        // PostgreSQL / MongoDB 连接绑定到固定数据库，忽略调用方传入的 database 参数，
         // 始终使用连接配置中的 default_database。Hologres 等代理下 pg_database
-        // 列出的逻辑库不能单独作为 dbname 连接，必须连配置的默认库。
-        let effective_db = if matches!(profile.kind, DatabaseKind::Postgres) {
+        // 列出的逻辑库不能单独作为 dbname 连接，必须连配置的默认库；MongoDB 同理，
+        // 建连接时只用表单填的「验证数据库」。
+        let effective_db = if matches!(profile.kind, DatabaseKind::Postgres | DatabaseKind::MongoDb) {
             profile.default_database.as_deref()
         } else {
             database
@@ -174,7 +175,7 @@ impl ConnectionPool {
         password: &str,
         database: Option<&str>,
     ) -> AppResult<()> {
-        let effective_db = if matches!(profile.kind, DatabaseKind::Postgres) {
+        let effective_db = if matches!(profile.kind, DatabaseKind::Postgres | DatabaseKind::MongoDb) {
             profile.default_database.as_deref()
         } else {
             database
