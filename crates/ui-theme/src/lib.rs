@@ -105,7 +105,6 @@ pub struct ThemeColors {
 
     // ── 特殊标记 ──
     pub index_badge: Color32,
-    pub new_row_bg: Color32,
 
     // ── 对话框 ──
     pub dialog_window_bg: Color32,
@@ -394,7 +393,6 @@ impl Theme {
 
                 // ── 特殊标记 ──
                 index_badge: Color32::from_rgb(68, 188, 125),
-                new_row_bg: Color32::from_rgba_premultiplied(40, 80, 40, 60),
 
                 // ── 对话框 ──
                 dialog_window_bg: Color32::from_rgb(50, 50, 52),
@@ -583,7 +581,6 @@ impl Theme {
 
                 // ── 特殊标记 ──
                 index_badge: Color32::from_rgb(48, 167, 104),
-                new_row_bg: Color32::from_rgba_premultiplied(40, 120, 40, 40),
 
                 // ── 对话框 ──
                 dialog_window_bg: Color32::from_rgb(246, 246, 246),

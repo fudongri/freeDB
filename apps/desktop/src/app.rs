@@ -12118,54 +12118,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let mut action = TabUiAction::None;
         let palette = mac_ui_palette_from_ui(ui);
 
-        // 工具栏
+        // 工具栏（保存）
         ui.horizontal(|ui| {
-            if toolbar_button(ui, tr!("＋ 添加字段"), subtle_button_style(colors, fonts.md)).clicked() {
-                tab.columns.push(EditableColumn {
-                    name: String::new(),
-                    original_name: String::new(),
-                    data_type: String::new(),
-                    nullable: true,
-                    primary_key: false,
-                    auto_increment: false,
-                    on_update_current_timestamp: false,
-                    default_value: String::new(),
-                    comment: String::new(),
-                    is_new: true,
-                    is_dropped: false,
-                    needs_focus: true,
-                });
-            }
-            ui.add_space(4.0);
-            if toolbar_button(ui, tr!("← 插入字段"), subtle_button_style(colors, fonts.md)).clicked() {
-                let insert_idx = tab.selected_column_index.unwrap_or(0);
-                tab.columns.insert(insert_idx, EditableColumn {
-                    name: String::new(),
-                    original_name: String::new(),
-                    data_type: String::new(),
-                    nullable: true,
-                    primary_key: false,
-                    auto_increment: false,
-                    on_update_current_timestamp: false,
-                    default_value: String::new(),
-                    comment: String::new(),
-                    is_new: true,
-                    is_dropped: false,
-                    needs_focus: true,
-                });
-            }
             let can_execute = !tab.loading && !tab.table_name.trim().is_empty() && tab.columns.iter().any(|c| !c.is_dropped && !c.name.trim().is_empty());
             if can_execute {
-                ui.add_space(8.0);
                 if toolbar_button(ui, tr!("💾 保存"), accent_button_style(colors, fonts.md)).clicked() {
                     action = TabUiAction::CreateTableExecute;
                 }
             } else if tab.loading {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new(tr!("创建中...")).color(palette.weak_text));
-                });
+                ui.spinner();
+                ui.label(RichText::new(tr!("创建中...")).color(palette.weak_text));
             }
         });
         ui.add_space(6.0);
@@ -12224,6 +12186,45 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             ui.add(comment_edit);
         });
         ui.add_space(6.0);
+
+        // 添加字段 / 插入字段（挨着表格上方，无边框 + hover 高亮）
+        ui.horizontal(|ui| {
+            if query_toolbar_button(ui, tr!("添加字段"), accent_button_style(colors, fonts.md)).clicked() {
+                tab.columns.push(EditableColumn {
+                    name: String::new(),
+                    original_name: String::new(),
+                    data_type: String::new(),
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    on_update_current_timestamp: false,
+                    default_value: String::new(),
+                    comment: String::new(),
+                    is_new: true,
+                    is_dropped: false,
+                    needs_focus: true,
+                });
+            }
+            ui.add_space(4.0);
+            if query_toolbar_button(ui, tr!("插入字段"), accent_button_style(colors, fonts.md)).clicked() {
+                let insert_idx = tab.selected_column_index.unwrap_or(0);
+                tab.columns.insert(insert_idx, EditableColumn {
+                    name: String::new(),
+                    original_name: String::new(),
+                    data_type: String::new(),
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    on_update_current_timestamp: false,
+                    default_value: String::new(),
+                    comment: String::new(),
+                    is_new: true,
+                    is_dropped: false,
+                    needs_focus: true,
+                });
+            }
+        });
+        ui.add_space(4.0);
 
         egui::Frame::new()
             .fill(palette.card_bg)
@@ -12288,13 +12289,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 for (visible_idx, &ci) in visible.iter().enumerate() {
                                     let col = &tab.columns[ci];
                                     let is_selected = tab.selected_column_index == Some(ci);
-                                    let fill = if col.is_new {
-                                        palette.new_row_bg
-                                    } else if is_selected {
-                                        palette.selection_bg
-                                    } else {
-                                        palette.card_bg
-                                    };
                                     let name = col.name.clone();
                                     let data_type = col.data_type.clone();
                                     let default_value = col.default_value.clone();
@@ -12303,16 +12297,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     let pk = col.primary_key;
 
                                     body.row(28.0, |mut row| {
+                                        // 选中行用斑马纹色高亮（行号列铺斑马纹色；表单组件内部用 card_bg 盖住）
+                                        let index_fill = if is_selected { palette.table_alt_bg } else { Color32::TRANSPARENT };
                                         // 序号（点击选中行）
                                         row.col(|ui| {
-                                            let resp = table_text_cell(ui, &palette, fill, &format!("{}", visible_idx + 1), false);
+                                            let resp = table_index_cell(ui, &palette, index_fill, &format!("{}", visible_idx + 1));
+                                            // 点击交替选中/取消
                                             if resp.clicked() {
-                                                tab.selected_column_index = Some(ci);
+                                                tab.selected_column_index = if is_selected { None } else { Some(ci) };
                                             }
                                         });
                                         // 字段名
                                         row.col(|ui| {
-                                            apply_cell_input_style(ui);
+                                            apply_cell_input_style(ui, is_selected);
                                             let col = &mut tab.columns[ci];
                                             let rect = ui.max_rect().shrink(4.0);
                                             let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
@@ -12328,7 +12325,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         });
                                         // 类型
                                         row.col(|ui| {
-                                            apply_cell_input_style(ui);
+                                            apply_cell_input_style(ui, is_selected);
                                             let col = &mut tab.columns[ci];
                                             let rect = ui.max_rect().shrink(4.0);
                                             let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
@@ -12337,6 +12334,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         });
                                         // 非空
                                         row.col(|ui| {
+                                            apply_cell_input_style(ui, is_selected);
                                             let col = &mut tab.columns[ci];
                                             let mut not_null = !col.nullable;
                                             let rect = ui.max_rect();
@@ -12349,7 +12347,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         });
                                         // 默认值
                                         row.col(|ui| {
-                                            apply_cell_input_style(ui);
+                                            apply_cell_input_style(ui, is_selected);
                                             let col = &mut tab.columns[ci];
                                             let rect = ui.max_rect().shrink(4.0);
                                             let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
@@ -12361,7 +12359,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         });
                                         // 注释
                                         row.col(|ui| {
-                                            apply_cell_input_style(ui);
+                                            apply_cell_input_style(ui, is_selected);
                                             let col = &mut tab.columns[ci];
                                             let rect = ui.max_rect().shrink(4.0);
                                             let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
@@ -12372,6 +12370,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         });
                                         // 主键
                                         row.col(|ui| {
+                                            apply_cell_input_style(ui, is_selected);
                                             let col = &mut tab.columns[ci];
                                             let rect = ui.max_rect();
                                             let center = rect.center();
@@ -12381,6 +12380,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         // 自增
                                         if show_auto_increment {
                                             row.col(|ui| {
+                                                apply_cell_input_style(ui, is_selected);
                                                 let col = &mut tab.columns[ci];
                                                 let rect = ui.max_rect();
                                                 let center = rect.center();
@@ -12391,6 +12391,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         // 更新时刷新
                                         if show_on_update {
                                             row.col(|ui| {
+                                                apply_cell_input_style(ui, is_selected);
                                                 let col = &mut tab.columns[ci];
                                                 let is_time_type = {
                                                     let dt = col.data_type.to_lowercase();
@@ -21557,7 +21558,6 @@ struct MacUiPalette {
     subtle_button_stroke: Color32,
     subtle_button_text: Color32,
     index_badge: Color32,
-    new_row_bg: Color32,
     null_preview: Color32,
     sidebar_search_match_fg: Color32,
     fonts: ui_theme::FontSizes,
@@ -21609,7 +21609,6 @@ impl From<&ui_theme::Theme> for MacUiPalette {
             subtle_button_stroke: c.subtle_button_stroke,
             subtle_button_text: c.subtle_button_text,
             index_badge: c.index_badge,
-            new_row_bg: c.new_row_bg,
             null_preview: c.null_preview,
             sidebar_search_match_fg: c.sidebar_search_match_fg,
             fonts: t.fonts.clone(),
@@ -27646,7 +27645,9 @@ fn render_table_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState, defin
                                 let fill = palette.card_bg;
                                 body.row(28.0, |mut row| {
                                     row.col(|ui| {
-                                        table_text_cell(ui, &palette, fill, &format!("{}", index + 1), false);
+                                        let resp = table_index_cell(ui, &palette, palette.card_bg, &format!("{}", index + 1));
+                                        // 只读模式行号列补画水平分割线（竖线仍不画）
+                                        paint_table_grid_lines(ui, resp.rect, Color32::TRANSPARENT, subtle_grid_color(palette.table_grid, 30));
                                     });
                                     row.col(|ui| {
                                         table_text_cell(
@@ -27693,7 +27694,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState, defin
                                         );
                                     });
                                     row.col(|ui| {
-                                        table_status_badge_cell(
+                                        table_status_text_cell(
                                             ui,
                                             &palette,
                                             fill,
@@ -27703,7 +27704,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState, defin
                                     });
                                     if show_auto_increment {
                                         row.col(|ui| {
-                                            table_status_badge_cell(
+                                            table_status_text_cell(
                                                 ui,
                                                 &palette,
                                                 fill,
@@ -27714,7 +27715,7 @@ fn render_table_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState, defin
                                     }
                                     if show_on_update {
                                         row.col(|ui| {
-                                            table_status_badge_cell(
+                                            table_status_text_cell(
                                                 ui,
                                                 &palette,
                                                 fill,
@@ -28231,43 +28232,6 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
         }
 
         if tab.editing_structure {
-            // 添加字段
-            if toolbar_button(ui, tr!("＋ 添加字段"), subtle_button_style(colors, fonts.md)).clicked() {
-                tab.edited_columns.push(EditableColumn {
-                    name: String::new(),
-                    original_name: String::new(),
-                    data_type: String::new(),
-                    nullable: true,
-                    primary_key: false,
-                    auto_increment: false,
-                    on_update_current_timestamp: false,
-                    default_value: String::new(),
-                    comment: String::new(),
-                    is_new: true,
-                    is_dropped: false,
-                    needs_focus: true,
-                });
-            }
-            ui.add_space(4.0);
-            // 插入字段（在选中行前面插入）
-            if toolbar_button(ui, tr!("← 插入字段"), subtle_button_style(colors, fonts.md)).clicked() {
-                let insert_idx = tab.selected_structure_row.unwrap_or(0);
-                tab.edited_columns.insert(insert_idx, EditableColumn {
-                    name: String::new(),
-                    original_name: String::new(),
-                    data_type: String::new(),
-                    nullable: true,
-                    primary_key: false,
-                    auto_increment: false,
-                    on_update_current_timestamp: false,
-                    default_value: String::new(),
-                    comment: String::new(),
-                    is_new: true,
-                    is_dropped: false,
-                    needs_focus: true,
-                });
-            }
-
             // 取消编辑
             if toolbar_button(ui, tr!("✕ 取消编辑"), danger_button_style(colors, fonts.md)).clicked() {
                 tab.editing_structure = false;
@@ -28394,6 +28358,45 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
             ui.add(egui::TextEdit::singleline(&mut tab.edited_table_comment).desired_width(300.0));
         });
         ui.add_space(6.0);
+
+        // 添加字段 / 插入字段（挨着表格上方，无边框 + hover 高亮）
+        ui.horizontal(|ui| {
+            if query_toolbar_button(ui, tr!("添加字段"), accent_button_style(colors, fonts.md)).clicked() {
+                tab.edited_columns.push(EditableColumn {
+                    name: String::new(),
+                    original_name: String::new(),
+                    data_type: String::new(),
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    on_update_current_timestamp: false,
+                    default_value: String::new(),
+                    comment: String::new(),
+                    is_new: true,
+                    is_dropped: false,
+                    needs_focus: true,
+                });
+            }
+            ui.add_space(4.0);
+            if query_toolbar_button(ui, tr!("插入字段"), accent_button_style(colors, fonts.md)).clicked() {
+                let insert_idx = tab.selected_structure_row.unwrap_or(0);
+                tab.edited_columns.insert(insert_idx, EditableColumn {
+                    name: String::new(),
+                    original_name: String::new(),
+                    data_type: String::new(),
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    on_update_current_timestamp: false,
+                    default_value: String::new(),
+                    comment: String::new(),
+                    is_new: true,
+                    is_dropped: false,
+                    needs_focus: true,
+                });
+            }
+        });
+        ui.add_space(4.0);
 
         render_editable_structure_grid(ui, tab);
     } else {
@@ -29727,13 +29730,6 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                             for (visible_idx, &col_idx) in visible.iter().enumerate() {
                                 let col = &tab.edited_columns[col_idx];
                                 let is_selected = tab.selected_structure_row == Some(col_idx);
-                                let fill = if col.is_new {
-                                    palette.new_row_bg
-                                } else if is_selected {
-                                    palette.selection_bg
-                                } else {
-                                    palette.card_bg
-                                };
                                 let name = col.name.clone();
                                 let data_type = col.data_type.clone();
                                 let default_value = col.default_value.clone();
@@ -29742,16 +29738,19 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                 let pk = col.primary_key;
 
                                 body.row(28.0, |mut row| {
+                                    // 选中行用斑马纹色高亮（行号列铺斑马纹色；表单组件内部用 card_bg 盖住）
+                                    let index_fill = if is_selected { palette.table_alt_bg } else { Color32::TRANSPARENT };
                                     // 序号（可点击选中行）
                                     row.col(|ui| {
-                                        let resp = table_text_cell(ui, &palette, fill, &format!("{}", visible_idx + 1), false);
+                                        let resp = table_index_cell(ui, &palette, index_fill, &format!("{}", visible_idx + 1));
+                                        // 点击交替选中/取消
                                         if resp.clicked() {
-                                            tab.selected_structure_row = Some(col_idx);
+                                            tab.selected_structure_row = if is_selected { None } else { Some(col_idx) };
                                         }
                                     });
                                     // 字段名
                                     row.col(|ui| {
-                                        apply_cell_input_style(ui);
+                                        apply_cell_input_style(ui, is_selected);
                                         let col = &mut tab.edited_columns[col_idx];
                                         let rect = ui.max_rect().shrink(4.0);
                                         let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
@@ -29767,7 +29766,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                     });
                                     // 类型
                                     row.col(|ui| {
-                                        apply_cell_input_style(ui);
+                                        apply_cell_input_style(ui, is_selected);
                                         let rect = ui.max_rect().shrink(4.0);
                                         let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
                                         let type_id = egui::Id::new("edit_table_type").with(col_idx);
@@ -29776,6 +29775,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                     });
                                     // 非空
                                     row.col(|ui| {
+                                        apply_cell_input_style(ui, is_selected);
                                         let col = &mut tab.edited_columns[col_idx];
                                         let mut not_null = !col.nullable;
                                         let rect = ui.max_rect();
@@ -29788,7 +29788,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                     });
                                     // 默认值
                                     row.col(|ui| {
-                                        apply_cell_input_style(ui);
+                                        apply_cell_input_style(ui, is_selected);
                                         let col = &mut tab.edited_columns[col_idx];
                                         let rect = ui.max_rect().shrink(4.0);
                                         let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
@@ -29800,7 +29800,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                     });
                                     // 注释
                                     row.col(|ui| {
-                                        apply_cell_input_style(ui);
+                                        apply_cell_input_style(ui, is_selected);
                                         let col = &mut tab.edited_columns[col_idx];
                                         let rect = ui.max_rect().shrink(4.0);
                                         let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
@@ -29811,6 +29811,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                     });
                                     // 主键
                                     row.col(|ui| {
+                                        apply_cell_input_style(ui, is_selected);
                                         let col = &mut tab.edited_columns[col_idx];
                                         let rect = ui.max_rect();
                                         let center = rect.center();
@@ -29820,6 +29821,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                     // 自增
                                     if show_auto_increment {
                                         row.col(|ui| {
+                                            apply_cell_input_style(ui, is_selected);
                                             let col = &mut tab.edited_columns[col_idx];
                                             let rect = ui.max_rect();
                                             let center = rect.center();
@@ -29830,6 +29832,7 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                     // 更新时刷新
                                     if show_on_update {
                                         row.col(|ui| {
+                                            apply_cell_input_style(ui, is_selected);
                                             let col = &mut tab.edited_columns[col_idx];
                                             let is_time_type = {
                                                 let dt = col.data_type.to_lowercase();
@@ -30178,6 +30181,29 @@ fn table_body_cell(
     */
 }
 
+/// 行号单元格：`base_fill` 传 TRANSPARENT 时不画背景（让整行选中高亮透出），传不透明色则打底遮罩；
+/// 无分割线，仅居中显示序号，点击可选中行
+fn table_index_cell(
+    ui: &mut egui::Ui,
+    palette: &MacUiPalette,
+    base_fill: Color32,
+    text: &str,
+) -> egui::Response {
+    let rect = ui.max_rect();
+    let response = ui.allocate_rect(rect, egui::Sense::click());
+    if base_fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 0.0, base_fill);
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        text,
+        FontId::new(palette.fonts.mono, FontFamily::Monospace),
+        palette.weak_text,
+    );
+    response
+}
+
 fn table_text_cell(
     ui: &mut egui::Ui,
     palette: &MacUiPalette,
@@ -30227,7 +30253,7 @@ fn table_text_cell(
     response
 }
 
-fn table_status_badge_cell(
+fn table_status_text_cell(
     ui: &mut egui::Ui,
     palette: &MacUiPalette,
     fill: Color32,
@@ -30245,45 +30271,15 @@ fn table_status_badge_cell(
     );
 
     if !text.is_empty() {
-        let badge_fill = if active {
-            Color32::from_rgba_premultiplied(
-                palette.selection_bg.r(),
-                palette.selection_bg.g(),
-                palette.selection_bg.b(),
-                180,
-            )
-        } else {
-            Color32::from_rgba_premultiplied(
-                palette.search_bg.r(),
-                palette.search_bg.g(),
-                palette.search_bg.b(),
-                220,
-            )
-        };
-        let badge_stroke = if active {
-            palette.selection_stroke
-        } else {
-            palette.soft_border
-        };
         let font_id = FontId::new(palette.fonts.sm, FontFamily::Monospace);
-        let galley = ui.fonts_mut(|f| f.layout(text.to_string(), font_id.clone(), Color32::WHITE, f32::INFINITY));
-        let text_width = galley.rect.width();
-        let badge_w = (text_width + 16.0).max(42.0);
-        let badge_rect = egui::Rect::from_center_size(rect.center(), Vec2::new(badge_w, 18.0));
-        ui.painter().rect(
-            badge_rect,
-            9.0,
-            badge_fill,
-            Stroke::new(1.0, badge_stroke),
-            egui::StrokeKind::Outside,
-        );
+        let clipped_rect = table_cell_content_rect(rect);
         ui.painter().text(
-            badge_rect.center(),
-            Align2::CENTER_CENTER,
+            clipped_rect.left_center(),
+            Align2::LEFT_CENTER,
             text,
             font_id,
             if active {
-                palette.selection_text
+                palette.text
             } else {
                 palette.weak_text
             },
@@ -34362,16 +34358,23 @@ fn segment_button_color(ui: &mut egui::Ui, label: &str, selected: bool, _accent:
     response
 }
 
-/// 单元格文本框样式：深色模式透明底，浅色模式白底 + 边框
-fn apply_cell_input_style(ui: &mut egui::Ui) {
+/// 单元格输入样式：选中行整格铺斑马纹色背景（与交替行一致），表单组件内部用 card_bg 盖住保持干净，未选中行透明底
+fn apply_cell_input_style(ui: &mut egui::Ui, selected: bool) {
     let palette = mac_ui_palette_from_ui(ui);
+    if selected {
+        ui.painter().rect_filled(ui.max_rect(), 0.0, palette.table_alt_bg);
+    }
     let v = ui.visuals_mut();
-    v.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+    // TextEdit 背景取自 `text_edit_bg_color()`（默认 extreme_bg_color），选中行用不透明 card_bg 盖住斑马纹底色
+    v.text_edit_bg_color = if selected { Some(palette.card_bg) } else { None };
+    let bg_fill = if selected { palette.card_bg } else { Color32::TRANSPARENT };
+    v.widgets.inactive.bg_fill = bg_fill;
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.soft_border);
-    v.widgets.hovered.bg_fill = Color32::TRANSPARENT;
+    v.widgets.hovered.bg_fill = bg_fill;
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.border);
-    v.widgets.active.bg_fill = Color32::TRANSPARENT;
+    v.widgets.active.bg_fill = bg_fill;
     v.widgets.active.bg_stroke = Stroke::new(1.0, palette.selection_stroke);
+    v.widgets.noninteractive.bg_fill = bg_fill;
 }
 
 /// MySQL 类型建议列表 (类型名, 中文描述)
