@@ -687,6 +687,7 @@ fn recent_tab_matches(a: &RecentTabEntry, b: &RecentTabEntry) -> bool {
 enum CreateTableView {
     Columns,
     Indexes,
+    Preview,
 }
 
 #[derive(Clone)]
@@ -714,7 +715,6 @@ struct CreateTableState {
     error: Option<String>,
     needs_focus: bool,
     loading: bool,
-    show_sql_preview: bool,
     index_col_widths: Vec<f32>,
     index_resize_drag: Option<(usize, f32)>,
 }
@@ -5153,7 +5153,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     error: None,
                     needs_focus: true,
                     loading: false,
-                    show_sql_preview: false,
                     selected_column_index: None,
                     index_col_widths: Vec::new(),
                     index_resize_drag: None,
@@ -6818,7 +6817,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         error: None,
                         needs_focus: true,
                         loading: false,
-                        show_sql_preview: false,
                         selected_column_index: None,
                         index_col_widths: Vec::new(),
                         index_resize_drag: None,
@@ -8229,7 +8227,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     error: None,
                                     needs_focus: true,
                                     loading: false,
-                                    show_sql_preview: false,
                                     selected_column_index: None,
                                     index_col_widths: Vec::new(),
                                     index_resize_drag: None,
