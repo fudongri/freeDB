@@ -713,6 +713,8 @@ struct CreateTableState {
     needs_focus: bool,
     loading: bool,
     show_sql_preview: bool,
+    index_col_widths: Vec<f32>,
+    index_resize_drag: Option<(usize, f32)>,
 }
 
 /// Alt+drag column block selection: a rectangular region spanning
@@ -5142,6 +5144,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     loading: false,
                     show_sql_preview: false,
                     selected_column_index: None,
+                    index_col_widths: Vec::new(),
+                    index_resize_drag: None,
                 };
                 self.tabs.push(WorkspaceTab::CreateTable(state));
                 self.active_tab = self.tabs.len().saturating_sub(1);
@@ -6803,6 +6807,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         loading: false,
                         show_sql_preview: false,
                         selected_column_index: None,
+                        index_col_widths: Vec::new(),
+                        index_resize_drag: None,
                     };
                     self.tabs.push(WorkspaceTab::CreateTable(state));
                     self.active_tab = self.tabs.len().saturating_sub(1);
@@ -8210,6 +8216,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     loading: false,
                                     show_sql_preview: false,
                                     selected_column_index: None,
+                                    index_col_widths: Vec::new(),
+                                    index_resize_drag: None,
                                 };
                                 self.tabs.push(WorkspaceTab::CreateTable(state));
                                 self.active_tab = self.tabs.len().saturating_sub(1);
@@ -12423,94 +12431,180 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         ui.add_space(6.0);
 
         // 索引列表
-        let idx_grid_v = subtle_grid_color(palette.table_grid, 26);
-        let idx_grid_h = subtle_grid_color(palette.table_grid, 30);
-
         egui::Frame::new()
             .fill(palette.card_bg)
             .stroke(Stroke::NONE)
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
+                egui::ScrollArea::both()
                     .id_salt("create-table-indexes-grid")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                        TableBuilder::new(ui)
+                        let ctx = ui.ctx().clone();
+                        let header_y_start = ui.cursor().top();
+                        let header_painter = ui.painter().clone();
+                        let mut hovered_header_col_idx: Option<usize> = None;
+
+                        let mut index_col_widths = if tab.index_col_widths.len() == 7 {
+                            tab.index_col_widths.clone()
+                        } else {
+                            tab.index_resize_drag = None;
+                            vec![42.0, 200.0, 80.0, 80.0, 150.0, 120.0, 80.0]
+                        };
+
+                        let mut col_idx = 0usize;
+                        let mut table = TableBuilder::new(ui)
                             .vscroll(false)
-                            .striped(true)
+                            .striped(false)
                             .resizable(false)
-                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_align(egui::Align::Center))
-                            .column(egui_extras::Column::initial(160.0).at_least(100.0))
-                            .column(egui_extras::Column::initial(80.0).at_least(50.0))
-                            .column(egui_extras::Column::initial(200.0).at_least(100.0))
-                            .column(egui_extras::Column::initial(40.0).at_least(40.0))
+                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                            .column(egui_extras::Column::initial(index_col_widths[0]).at_least(42.0))
+                            .column(egui_extras::Column::initial(index_col_widths[1]).at_least(120.0))
+                            .column(egui_extras::Column::initial(index_col_widths[2]).at_least(60.0))
+                            .column(egui_extras::Column::initial(index_col_widths[3]).at_least(60.0))
+                            .column(egui_extras::Column::remainder().at_least(150.0))
+                            .column(egui_extras::Column::initial(index_col_widths[5]).at_least(80.0))
+                            .column(egui_extras::Column::initial(index_col_widths[6]).at_least(60.0))
                             .header(30.0, |mut header| {
-                                for title in [tr!("索引名"), tr!("唯一"), tr!("包含列"), ""] {
+                                for title in ["#", tr!("索引名"), tr!("唯一性"), tr!("类型"), tr!("包含列"), tr!("来源"), tr!("删除")] {
                                     header.col(|ui| {
-                                        table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
-                                    });
-                                }
-                            })
-                            .body(|mut body| {
-                                let mut delete_idx: Option<usize> = None;
-
-                                for (i, idx) in tab.pending_indexes.iter().enumerate() {
-                                    body.row(28.0, |mut row| {
-                                        // 索引名
-                                        row.col(|ui| {
-                                            let rect = ui.max_rect();
-                                            paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                            let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
-                                            child.add_space(4.0);
-                                            child.label(RichText::new(&idx.name).size(palette.fonts.base));
-                                            index_cell_double_click_copy(ui, rect, &idx.name);
-                                        });
-                                        // 唯一
-                                        row.col(|ui| {
-                                            let rect = ui.max_rect();
-                                            paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                            let center = rect.center();
-                                            let r = egui::Rect::from_center_size(center, egui::vec2(40.0, 20.0));
-                                            let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
-                                            let unique_text = if idx.unique { "✓" } else { "—" };
-                                            if idx.unique {
-                                                child.label(RichText::new(unique_text).size(palette.fonts.base).strong());
-                                            } else {
-                                                child.label(RichText::new(unique_text).size(palette.fonts.base).color(palette.weak_text));
+                                        let (_, _, _, _) = table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
+                                        let cell_rect = ui.max_rect();
+                                        let resize_handle_x = cell_rect.right() - 3.0;
+                                        let resize_handle_rect = egui::Rect::from_min_max(egui::pos2(resize_handle_x, cell_rect.top()), cell_rect.right_bottom());
+                                        let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                                        let on_resize_handle = pointer_pos.map_or(false, |p| resize_handle_rect.contains(p));
+                                        let pointer_down = ui.input(|i| i.pointer.primary_down());
+                                        let just_pressed = ui.input(|i| i.pointer.primary_pressed());
+                                        let is_resizing_this = tab.index_resize_drag.as_ref().map_or(false, |(rc, _)| *rc == col_idx);
+                                        if on_resize_handle || is_resizing_this {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                        }
+                                        if on_resize_handle && just_pressed {
+                                            tab.index_resize_drag = Some((col_idx, pointer_pos.unwrap().x));
+                                        }
+                                        if let Some((resize_col, start_x)) = tab.index_resize_drag {
+                                            if resize_col == col_idx && pointer_down {
+                                                if let Some(pos) = pointer_pos {
+                                                    let delta = pos.x - start_x;
+                                                    index_col_widths[col_idx] = (index_col_widths[col_idx] + delta).max(40.0);
+                                                    tab.index_resize_drag = Some((col_idx, pos.x));
+                                                    ctx.request_repaint();
+                                                }
                                             }
-                                            index_cell_double_click_copy(ui, rect, unique_text);
-                                        });
-                                        // 包含列
-                                        row.col(|ui| {
-                                            let rect = ui.max_rect();
-                                            paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                            let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
-                                            child.add_space(4.0);
-                                            let cols_text = idx.columns.join(", ");
-                                            child.label(
-                                                RichText::new(&cols_text)
-                                                    .size(palette.fonts.base)
-                                                    .color(palette.weak_text),
-                                            );
-                                            index_cell_double_click_copy(ui, rect, &cols_text);
-                                        });
-                                        // 删除
-                                        row.col(|ui| {
-                                            let rect = ui.max_rect();
-                                            paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                            let center = rect.center();
-                                            let btn_rect = egui::Rect::from_center_size(center, egui::vec2(24.0, 24.0));
-                                            if ui.put(btn_rect, egui::Button::new("🗑").small().fill(Color32::TRANSPARENT)).clicked() {
-                                                delete_idx = Some(i);
-                                            }
-                                        });
+                                        }
+                                        if ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| cell_rect.contains(p)) {
+                                            hovered_header_col_idx = Some(col_idx);
+                                        }
+                                        if col_idx == hovered_header_col_idx.unwrap_or(usize::MAX) {
+                                            let y_range = egui::Rangef::new(header_y_start, header_y_start + 30.0);
+                                            header_painter.vline(cell_rect.right(), y_range, Stroke::new(1.0, palette.accent_button_stroke));
+                                        }
+                                        col_idx += 1;
                                     });
-                                }
-
-                                if let Some(idx) = delete_idx {
-                                    tab.pending_indexes.remove(idx);
                                 }
                             });
+                        if tab.index_resize_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+                            tab.index_resize_drag = None;
+                        }
+                        tab.index_col_widths = index_col_widths;
+                        table.body(|mut body| {
+                            let idx_grid_v = Color32::TRANSPARENT;
+                            let idx_grid_h = subtle_grid_color(palette.table_grid, 30);
+                            let mut delete_pending: Option<usize> = None;
+
+                            for (i, idx) in tab.pending_indexes.iter_mut().enumerate() {
+                                body.row(28.0, |mut row| {
+                                    // 序号
+                                    row.col(|ui| {
+                                        let rect = ui.max_rect();
+                                        paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                        let center = rect.center();
+                                        let r = egui::Rect::from_center_size(center, egui::vec2(30.0, 20.0));
+                                        let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
+                                        child.label(RichText::new(format!("{}", i + 1)).size(palette.fonts.xs).color(palette.index_badge));
+                                    });
+                                    // 索引名
+                                    row.col(|ui| {
+                                        let rect = ui.max_rect();
+                                        paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                        let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                        child.add_space(4.0);
+                                        child.label(RichText::new(&idx.name).size(palette.fonts.base).color(palette.index_badge));
+                                        index_cell_double_click_copy(ui, rect, &idx.name);
+                                    });
+                                    // 唯一性
+                                    row.col(|ui| {
+                                        let rect = ui.max_rect();
+                                        paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                        let cb_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+                                        ui.put(cb_rect, egui::Checkbox::new(&mut idx.unique, ""));
+                                    });
+                                    // 类型（新增索引默认 BTREE）
+                                    row.col(|ui| {
+                                        let rect = ui.max_rect();
+                                        paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                        let center = rect.center();
+                                        let r = egui::Rect::from_center_size(center, egui::vec2(60.0, 20.0));
+                                        let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
+                                        child.label(RichText::new("BTREE").size(palette.fonts.xs).color(palette.index_badge));
+                                        index_cell_double_click_copy(ui, rect, "BTREE");
+                                    });
+                                    // 包含列
+                                    row.col(|ui| {
+                                        let rect = ui.max_rect();
+                                        paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                        let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                        child.add_space(4.0);
+                                        let cols_text = idx.columns.join(", ");
+                                        child.label(RichText::new(&cols_text).size(palette.fonts.base).color(palette.index_badge));
+                                        index_cell_double_click_copy(ui, rect, &cols_text);
+                                    });
+                                    // 来源
+                                    row.col(|ui| {
+                                        let rect = ui.max_rect();
+                                        paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                        let content_rect = rect.shrink2(egui::vec2(4.0, 0.0));
+                                        let mut child = ui.child_ui(content_rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                        child.label(RichText::new(tr!("新增")).size(palette.fonts.xs).color(palette.index_badge));
+                                        index_cell_double_click_copy(ui, rect, tr!("新增"));
+                                    });
+                                    // 删除
+                                    row.col(|ui| {
+                                        let rect = ui.max_rect();
+                                        paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                        let center = rect.center();
+                                        let btn_rect = egui::Rect::from_center_size(center, egui::vec2(28.0, 24.0));
+                                        if ui.put(btn_rect, egui::Button::new(RichText::new("🗑").size(palette.fonts.lg)).fill(Color32::TRANSPARENT).stroke(Stroke::NONE))
+                                            .on_hover_text(tr!("删除索引"))
+                                            .clicked()
+                                        {
+                                            delete_pending = Some(i);
+                                        }
+                                    });
+                                });
+                            }
+
+                            // 空状态
+                            if tab.pending_indexes.is_empty() {
+                                body.row(28.0, |mut row| {
+                                    row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                                    row.col(|ui| {
+                                        paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h);
+                                        ui.label(RichText::new(tr!("暂无索引")).size(palette.fonts.base).color(palette.weak_text));
+                                    });
+                                    row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                                    row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                                    row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                                    row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                                    row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                                });
+                            }
+
+                            if let Some(i) = delete_pending {
+                                tab.pending_indexes.remove(i);
+                            }
+                        });
                     });
             });
 
