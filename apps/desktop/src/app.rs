@@ -12431,6 +12431,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 tab.new_index_name.clear();
                 tab.new_index_columns.clear();
                 tab.new_index_unique = false;
+                tab.new_index_kind = default_index_kind(tab.database_kind);
+                tab.new_index_method = default_index_method(tab.database_kind);
             }
             ui.add_space(8.0);
             let can_execute = !tab.loading && !tab.table_name.trim().is_empty() && tab.columns.iter().any(|c| !c.is_dropped && !c.name.trim().is_empty());
@@ -12639,7 +12641,39 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         if tab.add_index_needs_focus { r.request_focus(); tab.add_index_needs_focus = false; }
                     });
                     ui.add_space(4.0);
-                    ui.checkbox(&mut tab.new_index_unique, "UNIQUE");
+                    if tab.database_kind == DatabaseKind::MongoDb {
+                        ui.checkbox(&mut tab.new_index_unique, "UNIQUE");
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(tr!("类型："));
+                            let kind_items: Vec<(&str, bool)> = index_kind_options(tab.database_kind)
+                                .iter()
+                                .map(|k| (*k, tab.new_index_kind == *k))
+                                .collect();
+                            if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("new-index-kind").with(&tab.id), &tab.new_index_kind, 110.0, &kind_items) {
+                                tab.new_index_kind = index_kind_options(tab.database_kind)[sel].to_string();
+                                if tab.database_kind == DatabaseKind::MySql
+                                    && (tab.new_index_kind == "FULLTEXT" || tab.new_index_kind == "SPATIAL")
+                                {
+                                    tab.new_index_method.clear();
+                                }
+                            }
+                        });
+                        let method_opts = index_method_options(tab.database_kind);
+                        if !method_opts.is_empty() {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(tr!("方法："));
+                                let method_items: Vec<(&str, bool)> = method_opts
+                                    .iter()
+                                    .map(|m| (*m, tab.new_index_method == *m))
+                                    .collect();
+                                if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("new-index-method").with(&tab.id), &tab.new_index_method, 110.0, &method_items) {
+                                    tab.new_index_method = method_opts[sel].to_string();
+                                }
+                            });
+                        }
+                    }
                     ui.add_space(4.0);
                     ui.label(tr!("选择列："));
                     for (i, name) in column_names.iter().enumerate() {
@@ -12690,6 +12724,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 tab.new_index_name.clear();
                 tab.new_index_columns.clear();
                 tab.new_index_unique = false;
+                tab.new_index_kind = default_index_kind(tab.database_kind);
+                tab.new_index_method = default_index_method(tab.database_kind);
             }
         }
 
