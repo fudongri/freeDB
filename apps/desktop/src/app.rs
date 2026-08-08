@@ -28342,7 +28342,39 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                 }
             });
             ui.add_space(4.0);
-            ui.checkbox(&mut tab.new_index_unique, "UNIQUE");
+            if tab.database_kind == DatabaseKind::MongoDb {
+                ui.checkbox(&mut tab.new_index_unique, "UNIQUE");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(tr!("类型："));
+                    let kind_items: Vec<(&str, bool)> = index_kind_options(tab.database_kind)
+                        .iter()
+                        .map(|k| (*k, tab.new_index_kind == *k))
+                        .collect();
+                    if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("new-index-kind").with(&tab.id), &tab.new_index_kind, 110.0, &kind_items) {
+                        tab.new_index_kind = index_kind_options(tab.database_kind)[sel].to_string();
+                        if tab.database_kind == DatabaseKind::MySql
+                            && (tab.new_index_kind == "FULLTEXT" || tab.new_index_kind == "SPATIAL")
+                        {
+                            tab.new_index_method.clear();
+                        }
+                    }
+                });
+                let method_opts = index_method_options(tab.database_kind);
+                if !method_opts.is_empty() {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(tr!("方法："));
+                        let method_items: Vec<(&str, bool)> = method_opts
+                            .iter()
+                            .map(|m| (*m, tab.new_index_method == *m))
+                            .collect();
+                        if let Some(sel) = toolbar_dropdown(ui, egui::Id::new("new-index-method").with(&tab.id), &tab.new_index_method, 110.0, &method_items) {
+                            tab.new_index_method = method_opts[sel].to_string();
+                        }
+                    });
+                }
+            }
             ui.add_space(4.0);
             ui.label(tr!("选择列："));
             let col_names: Vec<String> = if !tab.edited_columns.is_empty() {
@@ -29178,6 +29210,8 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui_t
             tab.new_index_name.clear();
             tab.new_index_columns.clear();
             tab.new_index_unique = false;
+            tab.new_index_kind = default_index_kind(tab.database_kind);
+            tab.new_index_method = default_index_method(tab.database_kind);
         }
 
         let has_changes = !tab.deleted_indexes.is_empty() || !tab.pending_indexes.is_empty();
