@@ -28426,12 +28426,22 @@ fn parse_indexes_from_create_sql(create_sql: &str) -> Vec<ExistingIndex> {
             continue;
         }
 
-        let (kind, rest) = if upper.starts_with("UNIQUE KEY") || upper.starts_with("UNIQUE INDEX") {
-            let r = trimmed[("UNIQUE KEY".len())..].trim();
-            ("UNIQUE", r)
-        } else if upper.starts_with("KEY") || upper.starts_with("INDEX") {
-            let r = trimmed[("KEY".len())..].trim();
-            ("NORMAL", r)
+        let (kind, rest) = if upper.starts_with("UNIQUE KEY") {
+            ("UNIQUE", trimmed["UNIQUE KEY".len()..].trim())
+        } else if upper.starts_with("UNIQUE INDEX") {
+            ("UNIQUE", trimmed["UNIQUE INDEX".len()..].trim())
+        } else if upper.starts_with("FULLTEXT KEY") {
+            ("FULLTEXT", trimmed["FULLTEXT KEY".len()..].trim())
+        } else if upper.starts_with("FULLTEXT INDEX") {
+            ("FULLTEXT", trimmed["FULLTEXT INDEX".len()..].trim())
+        } else if upper.starts_with("SPATIAL KEY") {
+            ("SPATIAL", trimmed["SPATIAL KEY".len()..].trim())
+        } else if upper.starts_with("SPATIAL INDEX") {
+            ("SPATIAL", trimmed["SPATIAL INDEX".len()..].trim())
+        } else if upper.starts_with("KEY") {
+            ("NORMAL", trimmed["KEY".len()..].trim())
+        } else if upper.starts_with("INDEX") {
+            ("NORMAL", trimmed["INDEX".len()..].trim())
         } else {
             continue;
         };
@@ -37527,5 +37537,28 @@ mod tests {
         };
         let sql = generate_mongo_index_cmd("articles", &[], &BTreeSet::new(), &[idx]);
         assert_eq!(sql, "db.articles.createIndex({\"content\": \"text\"}, {unique: true, name: \"idx_content\"});\n");
+    }
+
+    #[test]
+    fn parse_mysql_fulltext_spatial() {
+        let create_sql = "CREATE TABLE `articles` (\n  `id` int NOT NULL,\n  FULLTEXT KEY `ft` (`content`),\n  SPATIAL KEY `sp` (`geo`)\n) ENGINE=InnoDB;";
+        let indexes = parse_indexes_from_create_sql(create_sql);
+        assert_eq!(indexes.len(), 2);
+        let ft = indexes.iter().find(|i| i.name == "ft").unwrap();
+        assert_eq!(ft.kind, "FULLTEXT");
+        assert!(!ft.unique);
+        assert_eq!(ft.columns, vec!["content"]);
+        let sp = indexes.iter().find(|i| i.name == "sp").unwrap();
+        assert_eq!(sp.kind, "SPATIAL");
+    }
+
+    #[test]
+    fn parse_mysql_unique_using() {
+        let create_sql = "CREATE TABLE `users` (\n  `id` int,\n  UNIQUE KEY `uk_email` (`email`) USING BTREE\n) ENGINE=InnoDB;";
+        let indexes = parse_indexes_from_create_sql(create_sql);
+        let uk = indexes.iter().find(|i| i.name == "uk_email").unwrap();
+        assert_eq!(uk.kind, "UNIQUE");
+        assert!(uk.unique);
+        assert_eq!(uk.method, "BTREE");
     }
 }
