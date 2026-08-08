@@ -31626,7 +31626,7 @@ fn quote_identifier(database_kind: DatabaseKind, identifier: &str) -> String {
         DatabaseKind::MySql => format!("`{}`", identifier.replace('`', "``")),
         DatabaseKind::Postgres => format!("\"{}\"", identifier.replace('"', "\"\"")),
         DatabaseKind::MongoDb => identifier.to_string(),
-        DatabaseKind::Sqlite => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        DatabaseKind::Sqlite => identifier.to_string(),
     }
 }
 
