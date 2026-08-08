@@ -12466,7 +12466,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             tab.index_col_widths.clone()
                         } else {
                             tab.index_resize_drag = None;
-                            vec![42.0, 200.0, 80.0, 80.0, 150.0, 120.0, 80.0]
+                            vec![42.0, 200.0, 100.0, 80.0, 150.0, 120.0, 80.0]
                         };
 
                         let mut col_idx = 0usize;
@@ -12483,7 +12483,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             .column(egui_extras::Column::initial(index_col_widths[5]).at_least(80.0))
                             .column(egui_extras::Column::initial(index_col_widths[6]).at_least(60.0))
                             .header(30.0, |mut header| {
-                                for title in ["#", tr!("索引名"), tr!("唯一性"), tr!("类型"), tr!("包含列"), tr!("来源"), tr!("删除")] {
+                                for title in ["#", tr!("索引名"), tr!("类型"), tr!("方法"), tr!("包含列"), tr!("来源"), tr!("删除")] {
                                     header.col(|ui| {
                                         let (_, _, _, _) = table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
                                         let cell_rect = ui.max_rect();
@@ -12550,22 +12550,24 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         child.label(RichText::new(&idx.name).size(palette.fonts.base).color(palette.index_badge));
                                         index_cell_double_click_copy(ui, rect, &idx.name);
                                     });
-                                    // 唯一性
+                                    // 类型
                                     row.col(|ui| {
                                         let rect = ui.max_rect();
                                         paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                        let cb_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
-                                        ui.put(cb_rect, egui::Checkbox::new(&mut idx.unique, ""));
+                                        let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                        child.add_space(4.0);
+                                        child.label(RichText::new(&idx.kind).size(palette.fonts.base).color(palette.index_badge));
+                                        index_cell_double_click_copy(ui, rect, &idx.kind);
                                     });
-                                    // 类型（新增索引默认 BTREE）
+                                    // 方法
                                     row.col(|ui| {
                                         let rect = ui.max_rect();
                                         paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                        let center = rect.center();
-                                        let r = egui::Rect::from_center_size(center, egui::vec2(60.0, 20.0));
-                                        let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
-                                        child.label(RichText::new("BTREE").size(palette.fonts.xs).color(palette.index_badge));
-                                        index_cell_double_click_copy(ui, rect, "BTREE");
+                                        let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                        child.add_space(4.0);
+                                        let method_text = if idx.method.is_empty() { "—" } else { idx.method.as_str() };
+                                        child.label(RichText::new(method_text).size(palette.fonts.base).color(palette.index_badge));
+                                        index_cell_double_click_copy(ui, rect, method_text);
                                     });
                                     // 包含列
                                     row.col(|ui| {
