@@ -12428,11 +12428,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if toolbar_button(ui, tr!("＋ 添加索引"), subtle_button_style(colors, fonts.md)).clicked() {
                 tab.add_index_dialog_open = true;
                 tab.add_index_needs_focus = true;
-                tab.new_index_name.clear();
-                tab.new_index_columns.clear();
-                tab.new_index_unique = false;
-                tab.new_index_kind = default_index_kind(tab.database_kind);
-                tab.new_index_method = default_index_method(tab.database_kind);
             }
             ui.add_space(8.0);
             let can_execute = !tab.loading && !tab.table_name.trim().is_empty() && tab.columns.iter().any(|c| !c.is_dropped && !c.name.trim().is_empty());
@@ -12711,6 +12706,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.add_space(4.0);
                     ui.label(tr!("选择列："));
                     egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
                         .max_height(160.0)
                         .show(ui, |ui| {
                             for (i, name) in column_names.iter().enumerate() {
@@ -12729,17 +12725,22 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     ui.add(egui::TextEdit::multiline(&mut preview_ref).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).interactive(false));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let dialog_pal = mac_dialog_palette_from_ui(ui);
-                        let (p_fill, p_stroke, p_text) = (dialog_pal.primary_button_bg, Stroke::new(1.0, dialog_pal.primary_button_stroke), dialog_pal.primary_button_text);
-                        let (s_fill, s_stroke, s_text) = (dialog_pal.secondary_button_bg, Stroke::new(1.0, dialog_pal.secondary_button_stroke), dialog_pal.secondary_button_text);
-                        if ui.add(egui::Button::new(RichText::new(tr!("确定")).size(palette.fonts.base).color(p_text)).fill(p_fill).stroke(p_stroke).corner_radius(palette.radius_lg)).clicked()
-                            && !tab.new_index_name.trim().is_empty() && !tab.new_index_columns.is_empty()
-                        {
-                            commit_index = true;
-                        }
-                        if ui.add(egui::Button::new(RichText::new(tr!("取消")).size(palette.fonts.base).color(s_text)).fill(s_fill).stroke(s_stroke).corner_radius(palette.radius_lg)).clicked() {
-                            close_dialog = true;
-                        }
+                        ui.set_width(ui.available_width());
+                        ui.add_space(ui.available_width());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                            let dialog_pal = mac_dialog_palette_from_ui(ui);
+                            let (p_fill, p_stroke, p_text) = (dialog_pal.primary_button_bg, Stroke::new(1.0, dialog_pal.primary_button_stroke), dialog_pal.primary_button_text);
+                            let (s_fill, s_stroke, s_text) = (dialog_pal.secondary_button_bg, Stroke::new(1.0, dialog_pal.secondary_button_stroke), dialog_pal.secondary_button_text);
+                            if ui.add(egui::Button::new(RichText::new(tr!("确定")).size(palette.fonts.base).color(p_text)).fill(p_fill).stroke(p_stroke).corner_radius(palette.radius_lg)).clicked()
+                                && !tab.new_index_name.trim().is_empty() && !tab.new_index_columns.is_empty()
+                            {
+                                commit_index = true;
+                            }
+                            if ui.add(egui::Button::new(RichText::new(tr!("取消")).size(palette.fonts.base).color(s_text)).fill(s_fill).stroke(s_stroke).corner_radius(palette.radius_lg)).clicked() {
+                                close_dialog = true;
+                            }
+                        });
                     });
                 });
 
@@ -12759,11 +12760,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             if close_dialog {
                 tab.add_index_dialog_open = false;
-                tab.new_index_name.clear();
-                tab.new_index_columns.clear();
-                tab.new_index_unique = false;
-                tab.new_index_kind = default_index_kind(tab.database_kind);
-                tab.new_index_method = default_index_method(tab.database_kind);
+                if commit_index {
+                    tab.new_index_name.clear();
+                    tab.new_index_columns.clear();
+                    tab.new_index_unique = false;
+                    tab.new_index_kind = default_index_kind(tab.database_kind);
+                    tab.new_index_method = default_index_method(tab.database_kind);
+                }
             }
         }
 
@@ -28427,6 +28430,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                 Vec::new()
             };
             egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
                 .max_height(160.0)
                 .show(ui, |ui| {
                     for (i, name) in col_names.iter().enumerate() {
@@ -28457,55 +28461,69 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                     .interactive(false),
             );
             ui.add_space(8.0);
+            let mut committed = false;
             ui.horizontal(|ui| {
-                let palette = mac_dialog_palette_from_ui(ui);
-                let (p_fill, p_stroke, p_text) = (
-                    palette.primary_button_bg,
-                    Stroke::new(1.0, palette.primary_button_stroke),
-                    palette.primary_button_text,
-                );
-                let (s_fill, s_stroke, s_text) = (
-                    palette.secondary_button_bg,
-                    Stroke::new(1.0, palette.secondary_button_stroke),
-                    palette.secondary_button_text,
-                );
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(tr!("确定")).size(fonts.base).color(p_text))
-                            .fill(p_fill)
-                            .stroke(p_stroke)
-                            .corner_radius(corner_radius_lg),
-                    )
-                    .clicked()
-                    && !tab.new_index_name.is_empty()
-                    && !tab.new_index_columns.is_empty()
-                {
-                    let columns = tab
-                        .new_index_columns
-                        .iter()
-                        .filter_map(|&i| col_names.get(i).cloned())
-                        .collect();
-                    tab.pending_indexes.push(PendingIndex {
-                        name: tab.new_index_name.clone(),
-                        columns,
-                        unique: if tab.database_kind == DatabaseKind::MongoDb { tab.new_index_unique } else { tab.new_index_kind == "UNIQUE" },
-                        kind: tab.new_index_kind.clone(),
-                        method: tab.new_index_method.clone(),
-                    });
-                    tab.add_index_dialog_open = false;
-                }
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(tr!("取消")).size(fonts.base).color(s_text))
-                            .fill(s_fill)
-                            .stroke(s_stroke)
-                            .corner_radius(corner_radius_lg),
-                    )
-                    .clicked()
-                {
-                    tab.add_index_dialog_open = false;
-                }
+                ui.set_width(ui.available_width());
+                ui.add_space(ui.available_width());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                    let palette = mac_dialog_palette_from_ui(ui);
+                    let (p_fill, p_stroke, p_text) = (
+                        palette.primary_button_bg,
+                        Stroke::new(1.0, palette.primary_button_stroke),
+                        palette.primary_button_text,
+                    );
+                    let (s_fill, s_stroke, s_text) = (
+                        palette.secondary_button_bg,
+                        Stroke::new(1.0, palette.secondary_button_stroke),
+                        palette.secondary_button_text,
+                    );
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(tr!("确定")).size(fonts.base).color(p_text))
+                                .fill(p_fill)
+                                .stroke(p_stroke)
+                                .corner_radius(corner_radius_lg),
+                        )
+                        .clicked()
+                        && !tab.new_index_name.is_empty()
+                        && !tab.new_index_columns.is_empty()
+                    {
+                        let columns = tab
+                            .new_index_columns
+                            .iter()
+                            .filter_map(|&i| col_names.get(i).cloned())
+                            .collect();
+                        tab.pending_indexes.push(PendingIndex {
+                            name: tab.new_index_name.clone(),
+                            columns,
+                            unique: if tab.database_kind == DatabaseKind::MongoDb { tab.new_index_unique } else { tab.new_index_kind == "UNIQUE" },
+                            kind: tab.new_index_kind.clone(),
+                            method: tab.new_index_method.clone(),
+                        });
+                        tab.add_index_dialog_open = false;
+                        committed = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(tr!("取消")).size(fonts.base).color(s_text))
+                                .fill(s_fill)
+                                .stroke(s_stroke)
+                                .corner_radius(corner_radius_lg),
+                        )
+                        .clicked()
+                    {
+                        tab.add_index_dialog_open = false;
+                    }
+                });
             });
+            if committed {
+                tab.new_index_name.clear();
+                tab.new_index_columns.clear();
+                tab.new_index_unique = false;
+                tab.new_index_kind = default_index_kind(tab.database_kind);
+                tab.new_index_method = default_index_method(tab.database_kind);
+            }
         });
 }
 
@@ -29276,11 +29294,6 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui_t
         if toolbar_button(ui, tr!("＋ 增加索引"), subtle_button_style(colors, fonts.md)).clicked() {
             tab.add_index_dialog_open = true;
             tab.add_index_needs_focus = true;
-            tab.new_index_name.clear();
-            tab.new_index_columns.clear();
-            tab.new_index_unique = false;
-            tab.new_index_kind = default_index_kind(tab.database_kind);
-            tab.new_index_method = default_index_method(tab.database_kind);
         }
 
         let has_changes = !tab.deleted_indexes.is_empty() || !tab.pending_indexes.is_empty();
