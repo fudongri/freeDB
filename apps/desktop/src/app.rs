@@ -12154,11 +12154,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     needs_focus: true,
                 });
             }
-            ui.add_space(8.0);
             let can_execute = !tab.loading && !tab.table_name.trim().is_empty() && tab.columns.iter().any(|c| !c.is_dropped && !c.name.trim().is_empty());
-            if toolbar_button(ui, tr!("◉ 语句预览"), accent_muted_button_style(colors, fonts.md)).clicked() {
-                tab.show_sql_preview = !tab.show_sql_preview;
-            }
             if can_execute {
                 ui.add_space(8.0);
                 if toolbar_button(ui, tr!("💾 保存"), accent_button_style(colors, fonts.md)).clicked() {
@@ -12176,36 +12172,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         let show_auto_increment = tab.database_kind == DatabaseKind::MySql;
         let show_on_update = tab.database_kind == DatabaseKind::MySql;
-
-        // SQL 预览
-        if tab.show_sql_preview {
-            let sql = generate_create_table_sql(tab);
-            if !sql.is_empty() {
-                let available_width = ui.available_width();
-                egui::Frame::new()
-                    .fill(palette.card_bg)
-                    .stroke(Stroke::NONE)
-                    .inner_margin(egui::Margin::symmetric(8, 6))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(tr!("语句预览"))
-                                .size(palette.fonts.xs)
-                                .strong()
-                                .color(palette.weak_text),
-                        );
-                        ui.add_space(4.0);
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .max_height(200.0)
-                            .show(ui, |ui| {
-                                ui.set_width(available_width - 24.0);
-                                let job = sql_highlight_job_with_word_wrap_from_ui(ui, &sql, available_width - 28.0);
-                                ui.add(egui::Label::new(job));
-                            });
-                    });
-                ui.add_space(6.0);
-            }
-        }
 
         // 表名、引擎、字符集、注释
         ui.horizontal(|ui| {
