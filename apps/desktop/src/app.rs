@@ -12710,13 +12710,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                     ui.add_space(4.0);
                     ui.label(tr!("选择列："));
-                    for (i, name) in column_names.iter().enumerate() {
-                        let mut selected = tab.new_index_columns.contains(&i);
-                        if ui.checkbox(&mut selected, name.as_str()).changed() {
-                            if selected { tab.new_index_columns.push(i); }
-                            else { tab.new_index_columns.retain(|&x| x != i); }
-                        }
-                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(160.0)
+                        .show(ui, |ui| {
+                            for (i, name) in column_names.iter().enumerate() {
+                                let mut selected = tab.new_index_columns.contains(&i);
+                                if ui.checkbox(&mut selected, name.as_str()).changed() {
+                                    if selected { tab.new_index_columns.push(i); }
+                                    else { tab.new_index_columns.retain(|&x| x != i); }
+                                }
+                            }
+                        });
                     // 列预览
                     ui.add_space(4.0);
                     let cols: String = tab.new_index_columns.iter().filter_map(|&i| column_names.get(i).cloned()).collect::<Vec<_>>().join(",");
@@ -28422,16 +28426,20 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
             } else {
                 Vec::new()
             };
-            for (i, name) in col_names.iter().enumerate() {
-                let mut selected = tab.new_index_columns.contains(&i);
-                if ui.checkbox(&mut selected, name).changed() {
-                    if selected {
-                        tab.new_index_columns.push(i);
-                    } else {
-                        tab.new_index_columns.retain(|&x| x != i);
+            egui::ScrollArea::vertical()
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for (i, name) in col_names.iter().enumerate() {
+                        let mut selected = tab.new_index_columns.contains(&i);
+                        if ui.checkbox(&mut selected, name).changed() {
+                            if selected {
+                                tab.new_index_columns.push(i);
+                            } else {
+                                tab.new_index_columns.retain(|&x| x != i);
+                            }
+                        }
                     }
-                }
-            }
+                });
             // 列预览
             ui.add_space(4.0);
             let cols: String = tab
