@@ -12867,46 +12867,28 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             }
 
                             // 右侧 DDL 面板（展开时）
-                            if tab.ddl_panel_visible {
+                            let ddl_resize_info: Option<(f32, egui::Rect, egui::Id)> = if tab.ddl_panel_visible {
                                 let (dv, lv) = read_theme_variants(ui);
                                 let colors = ui_theme::Theme::from_visuals(ui.visuals(), dv, lv).colors;
-                                // 拖拽线参照已保存查询面板方案：默认弱化、悬停/拖拽高亮、满面板高度（上下各留 4px）
-                                // 用内容区完整高度确定 y 范围；绘制到 Foreground 层，避免被左侧表格内容盖住
+                                // 用内容区完整高度确定 y 范围；分隔线绘制与拖拽把手在表格渲染后统一处理
                                 let full_rect = ui.available_rect_before_wrap();
                                 let panel_id = egui::Id::new(format!("ddl_panel_{}", tab.id));
-                                let (resize_hover, is_resizing) = ui
-                                    .ctx()
-                                    .read_response(panel_id.with("__resize"))
-                                    .map(|r| (r.hovered(), r.dragged()))
-                                    .unwrap_or((false, false));
+                                let handle_id = egui::Id::new(format!("ddl_panel_handle_{}", tab.id));
+                                // 宽度由 tab.ddl_panel_width 驱动；关闭 SidePanel 自带 resize，
+                                // 避免其热区与表格垂直滚动条重叠时被滚动条抢走鼠标（把手在表格渲染后注册，盖过滚动条）
                                 let ddl_panel_resp = egui::SidePanel::right(panel_id)
-                                    .resizable(true)
-                                    .default_width(tab.ddl_panel_width)
-                                    .min_width(150.0)
-                                    .max_width(1000.0)
+                                    .resizable(false)
+                                    .exact_width(tab.ddl_panel_width)
                                     .show_separator_line(false)
                                     .show_inside(ui, |ui| {
                                         ui.set_min_height(ui.available_height());
                                         render_summary_ddl_panel(ui, tab, &colors, fonts);
                                     });
                                 let line_x = ddl_panel_resp.response.rect.left();
-                                let interacted = resize_hover || is_resizing;
-                                let line_color = if interacted {
-                                    palette.accent_button_stroke
-                                } else {
-                                    palette.accent_button_stroke.linear_multiply(0.35)
-                                };
-                                let painter = ui.ctx().layer_painter(
-                                    egui::LayerId::new(egui::Order::Foreground, egui::Id::new("ddl_panel_resize_line")),
-                                );
-                                painter.line_segment(
-                                    [
-                                        egui::pos2(line_x, full_rect.top() + 4.0),
-                                        egui::pos2(line_x, full_rect.bottom() - 4.0),
-                                    ],
-                                    Stroke::new(1.0, line_color),
-                                );
-                            }
+                                Some((line_x, full_rect, handle_id))
+                            } else {
+                                None
+                            };
 
                             // 外层水平 ScrollArea（与数据表格一致），TableBuilder 负责垂直滚动
                             egui::ScrollArea::horizontal()
@@ -13491,6 +13473,65 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }
                                 }
                                 }); // ScrollArea::horizontal
+
+                                // DDL 面板分隔线拖拽把手：在表格（含滚动条）渲染后注册，
+                                // Foreground 层 + 更晚注册确保能选中；把手极窄（6px），
+                                // 与线重合于 line_x+2，拖滑块时鼠标不可能误入把手抢 hover
+                                if let Some((line_x, full_rect, handle_id)) = ddl_resize_info {
+                                    let handle_x0 = line_x + 2.0;
+                                    let handle_w = 6.0;
+                                    let handle_rect = egui::Rect::from_min_max(
+                                        egui::pos2(handle_x0, full_rect.top()),
+                                        egui::pos2(handle_x0 + handle_w, full_rect.bottom() - 14.0),
+                                    );
+                                    let resp = egui::Area::new(handle_id)
+                                        .order(egui::Order::Foreground)
+                                        .fixed_pos(handle_rect.min)
+                                        .default_size(handle_rect.size())
+                                        .constrain(false)
+                                        .movable(false)
+                                        .interactable(false)
+                                        .show(ui.ctx(), |ui| {
+                                            ui.allocate_rect(
+                                                ui.max_rect(),
+                                                egui::Sense::drag(),
+                                            )
+                                        })
+                                        .inner;
+                                    let hovered = resp.hovered();
+                                    let dragged = resp.dragged();
+                                    if dragged {
+                                        let delta = resp.drag_delta().x;
+                                        // 右侧面板：向右拖（delta>0）左边界右移 → 面板变窄，故用减法
+                                        let new_width = (tab.ddl_panel_width - delta)
+                                            .clamp(150.0, 1000.0);
+                                        if new_width != tab.ddl_panel_width {
+                                            tab.ddl_panel_width = new_width;
+                                            ui.ctx().request_repaint();
+                                        }
+                                    }
+                                    let interacted = hovered || dragged;
+                                    if interacted {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                                    }
+                                    // 拖拽/悬停时线加宽并高亮
+                                    let line_width = if interacted { 2.5 } else { 1.0 };
+                                    let line_color = if interacted {
+                                        palette.accent_button_stroke
+                                    } else {
+                                        palette.accent_button_stroke.linear_multiply(0.35)
+                                    };
+                                    let painter = ui.ctx().layer_painter(
+                                        egui::LayerId::new(egui::Order::Foreground, egui::Id::new("ddl_panel_resize_line")),
+                                    );
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(handle_x0, full_rect.top() + 4.0),
+                                            egui::pos2(handle_x0, full_rect.bottom() - 4.0),
+                                        ],
+                                        Stroke::new(line_width, line_color),
+                                    );
+                                }
                         });
                 });
 
@@ -26416,16 +26457,6 @@ fn render_summary_ddl_panel(
             Some(DdlTarget::Table(node)) | Some(DdlTarget::Routine(node)) => node.name.clone(),
             None => String::new(),
         };
-        // 对象名头部：render_definition_sql_view 不展示 title 文本，仅用于 ScrollArea id
-        if !title.is_empty() {
-            ui.add_space(4.0);
-            // 标题左缩进 12px，与下方代码区左内边距对齐
-            ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                ui.label(RichText::new(&title).strong().color(palette.text));
-            });
-            ui.add_space(8.0);
-        }
         render_definition_sql_view(ui, &title, ddl_text, colors, fonts);
     } else if tab.ddl_loading {
         ui.vertical_centered(|ui| {
@@ -26450,7 +26481,7 @@ fn render_summary_ddl_panel(
 fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) {
     let palette = mac_ui_palette_from_ui(ui);
     let editor = editor_palette_from_ui(ui);
-    let code_font_size = 11.0;
+    let code_font_size = 12.0;
     let formatted_sql = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| format_definition_sql(create_sql))) {
         Ok(sql) => sql,
         Err(_) => {
@@ -26483,7 +26514,9 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
 
             ui.add_space(2.0);
 
-            let row_height = 18.0;
+            let code_font_id = FontId::new(code_font_size, FontFamily::Monospace);
+            let row_height =
+                ui.fonts_mut(|fonts| fonts.row_height(&code_font_id)) + QUERY_EDITOR_LINE_SPACING;
             egui::Frame::new()
                 .fill(editor.panel_bg)
                 .stroke(Stroke::NONE)
@@ -26503,12 +26536,17 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
                                     );
                                     {
                                         let (dv, lv) = read_theme_variants(ui);
-                                        ui.add(egui::Label::new(sql_highlight_job_with_font_size(
+                                        let mut job = sql_highlight_job_with_font_size(
                                             &formatted_sql,
                                             ui.visuals(),
                                             code_font_size,
                                             dv, lv,
-                                        ))
+                                        );
+                                        for section in &mut job.sections {
+                                            section.format.line_height = Some(row_height);
+                                            section.format.valign = egui::Align::Center;
+                                        }
+                                        ui.add(egui::Label::new(job)
                                         .wrap_mode(egui::TextWrapMode::Extend));
                                     }
                                 });
