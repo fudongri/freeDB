@@ -12033,10 +12033,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             ui.spacing_mut().item_spacing.x = 6.0;
             let seg_cols = tab.active_view == CreateTableView::Columns;
             let seg_idxs = tab.active_view == CreateTableView::Indexes;
+            let seg_preview = tab.active_view == CreateTableView::Preview;
             // 字段
             if segment_button_color(ui, tr!("字段"), seg_cols, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Columns; }
             // 索引
             if segment_button_color(ui, tr!("索引"), seg_idxs, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Indexes; }
+            // 语句预览
+            if segment_button_color(ui, tr!("语句预览"), seg_preview, Some(palette.selection_bg)).clicked() { tab.active_view = CreateTableView::Preview; }
         });
         ui.add_space(4.0);
 
@@ -12054,6 +12057,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             CreateTableView::Indexes => {
                 let act = Self::render_create_table_indexes_view(ui, tab, colors, fonts);
+                if !matches!(act, TabUiAction::None) { action = act; }
+            }
+            CreateTableView::Preview => {
+                let act = Self::render_create_table_preview_view(ui, tab, colors, fonts);
                 if !matches!(act, TabUiAction::None) { action = act; }
             }
         }
