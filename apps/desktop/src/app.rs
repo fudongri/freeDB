@@ -34391,7 +34391,6 @@ fn mysql_type_suggestions() -> Vec<(&'static str, &'static str)> {
         ("char(1)", tr!("定长字符串, 0-255 字节")),
         ("blob", tr!("二进制, 二进制大对象")),
         ("json", tr!("JSON, JSON 数据")),
-        ("boolean", tr!("布尔, TRUE/FALSE")),
         ("date", tr!("日期, YYYY-MM-DD")),
         ("time", tr!("时间, HH:MM:SS")),
         ("timestamp", tr!("时间戳, 时间戳")),
@@ -34407,6 +34406,8 @@ fn mysql_type_suggestions() -> Vec<(&'static str, &'static str)> {
         ("tinyblob", tr!("小二进制, 最大 255 字节")),
         ("mediumblob", tr!("中二进制, 最大 16777215 字节")),
         ("longblob", tr!("超长二进制, 最大 4294967295 字节")),
+        ("tinytext", tr!("小文本, 最大 255 字节")),
+        ("bit(8)", tr!("位类型, 位字段")),
         ("year", tr!("年份, 1901-2155")),
     ]
 }
@@ -34432,6 +34433,7 @@ fn pg_type_suggestions() -> Vec<(&'static str, &'static str)> {
         ("smallint", tr!("小整数, -32768 ~ 32767")),
         ("serial", tr!("自增整数, 自动递增")),
         ("bigserial", tr!("自增大整数, 自动递增")),
+        ("smallserial", tr!("自增小整数, 自动递增")),
         ("uuid", tr!("UUID, 通用唯一标识符")),
         ("inet", tr!("IP地址, IPv4/IPv6")),
         ("cidr", tr!("网络地址, IP网络")),
@@ -34441,6 +34443,13 @@ fn pg_type_suggestions() -> Vec<(&'static str, &'static str)> {
         ("xml", tr!("XML, XML数据")),
         ("integer[]", tr!("数组, 整数数组")),
         ("text[]", tr!("数组, 文本数组")),
+        ("timestamptz", tr!("带时区时间戳, 日期时间+时区")),
+        ("timetz", tr!("带时区时间, 时间+时区")),
+        ("bit(8)", tr!("位串, 定长位字段")),
+        ("varbit(8)", tr!("变长位串, 位字段")),
+        ("tsvector", tr!("全文检索向量, 已分词文本")),
+        ("tsquery", tr!("全文检索查询, 查询表达式")),
+        ("point", tr!("几何点, 二维坐标")),
     ]
 }
 
@@ -34465,7 +34474,7 @@ fn mongo_type_suggestions() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// SQLite 类型建议列表 (类型名, 中文描述)
+/// SQLite 类型建议列表 (类型名, 中文描述) —— 仅保留原生亲和性类型
 fn sqlite_type_suggestions() -> Vec<(&'static str, &'static str)> {
     vec![
         ("INTEGER", tr!("整数, 有符号 64 位")),
@@ -34473,11 +34482,6 @@ fn sqlite_type_suggestions() -> Vec<(&'static str, &'static str)> {
         ("REAL", tr!("浮点数, 8 字节 IEEE")),
         ("BLOB", tr!("二进制, 原样存储")),
         ("NUMERIC", tr!("数值, 亲和性类型")),
-        ("BOOLEAN", tr!("布尔, TRUE/FALSE")),
-        ("DATE", tr!("日期, YYYY-MM-DD")),
-        ("DATETIME", tr!("日期时间, YYYY-MM-DD HH:MM:SS")),
-        ("VARCHAR(255)", tr!("变长字符串, TEXT 亲和性")),
-        ("CHAR(1)", tr!("定长字符串, TEXT 亲和性")),
     ]
 }
 
@@ -34529,23 +34533,29 @@ fn render_type_input_with_dropdown(
 
     egui::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
         ui.set_min_width(260.0);
-        for (name, desc) in &suggestions {
-            let label = format!("{name} ({desc})");
-            if !filter.is_empty() && !name.to_ascii_uppercase().contains(&filter) && !label.contains(&filter) {
-                continue;
-            }
-            if ui.selectable_label(false, &label).clicked() {
-                *data_type = (*name).to_string();
-                // 光标放在右括号前面（括号内文字后面）
-                cursor_target = if let Some(close_pos) = name.rfind(')') {
-                    Some(close_pos) // 右括号前面
-                } else {
-                    Some(name.len())
-                };
-                changed = true;
-                ui.memory_mut(|m| m.close_popup(popup_id));
-            }
-        }
+        egui::ScrollArea::vertical()
+            .id_salt(id_source.with("type_popup_scroll"))
+            .auto_shrink([false, false])
+            .max_height(300.0)
+            .show(ui, |ui| {
+                for (name, desc) in &suggestions {
+                    let label = format!("{name} ({desc})");
+                    if !filter.is_empty() && !name.to_ascii_uppercase().contains(&filter) && !label.contains(&filter) {
+                        continue;
+                    }
+                    if ui.selectable_label(false, &label).clicked() {
+                        *data_type = (*name).to_string();
+                        // 光标放在右括号前面（括号内文字后面）
+                        cursor_target = if let Some(close_pos) = name.rfind(')') {
+                            Some(close_pos) // 右括号前面
+                        } else {
+                            Some(name.len())
+                        };
+                        changed = true;
+                        ui.memory_mut(|m| m.close_popup(popup_id));
+                    }
+                }
+            });
     });
 
     // 设置光标位置
