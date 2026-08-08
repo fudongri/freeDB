@@ -27842,12 +27842,7 @@ fn generate_alter_table_sql(
 
     // 新增索引
     for idx in new_indexes {
-        let unique = if idx.unique { "UNIQUE " } else { "" };
-        let cols = idx.columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
-        stmts.push(format!(
-            "CREATE {unique}INDEX {} ON {full_table} ({cols})",
-            q(&idx.name)
-        ));
+        stmts.push(build_index_ddl(db_kind, idx, &full_table, &q));
     }
 
     // 删除索引
@@ -28012,11 +28007,9 @@ fn generate_create_table_sql(state: &CreateTableState) -> String {
 
     // 索引
     for idx in &state.pending_indexes {
-        let unique = if idx.unique { "UNIQUE " } else { "" };
-        let cols = idx.columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
         sql.push_str(&format!(
-            "\nCREATE {unique}INDEX {} ON {full_name} ({cols});",
-            q(&idx.name)
+            "\n{};",
+            build_index_ddl(db_kind, idx, &full_name, &q)
         ));
     }
 
@@ -28640,6 +28633,54 @@ fn default_index_method(db_kind: DatabaseKind) -> String {
     }
 }
 
+/// 生成单条 CREATE INDEX 语句（不含分号）。按数据库拼装 kind 前缀与 USING 子句。
+/// MySQL：USING 在列后；FULLTEXT/SPATIAL 不输出 USING。PG：USING 在列前。SQLite/Mongo 无 USING。
+fn build_index_ddl(
+    db_kind: DatabaseKind,
+    idx: &PendingIndex,
+    full_table: &str,
+    q: &impl Fn(&str) -> String,
+) -> String {
+    let cols = idx.columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
+    let name = q(&idx.name);
+    let (kind_kw, using) = match db_kind {
+        DatabaseKind::MySql => {
+            let kw = match idx.kind.as_str() {
+                "UNIQUE" => "UNIQUE ",
+                "FULLTEXT" => "FULLTEXT ",
+                "SPATIAL" => "SPATIAL ",
+                _ => "",
+            };
+            let u = if !idx.method.is_empty() && idx.kind != "FULLTEXT" && idx.kind != "SPATIAL" {
+                format!(" USING {}", idx.method)
+            } else {
+                String::new()
+            };
+            (kw, u)
+        }
+        DatabaseKind::Postgres => {
+            let kw = if idx.kind == "UNIQUE" { "UNIQUE " } else { "" };
+            let u = if !idx.method.is_empty() {
+                format!(" USING {}", idx.method)
+            } else {
+                String::new()
+            };
+            (kw, u)
+        }
+        DatabaseKind::MongoDb | DatabaseKind::Sqlite => {
+            let kw = if idx.kind == "UNIQUE" { "UNIQUE " } else { "" };
+            (kw, String::new())
+        }
+    };
+    // MySQL：USING 在列后；PG 等：USING 在列前（无 USING 时两者等价）
+    let tail = if db_kind == DatabaseKind::MySql && !using.is_empty() {
+        format!(" ({cols}){using}")
+    } else {
+        format!("{using} ({cols})")
+    };
+    format!("CREATE {kind_kw}INDEX {name} ON {full_table}{tail}")
+}
+
 /// 生成索引变更 SQL（CREATE / DROP INDEX）
 fn generate_index_sql(
     table: &TableRef,
@@ -28651,32 +28692,24 @@ fn generate_index_sql(
     if db_kind == DatabaseKind::MongoDb {
         return generate_mongo_index_cmd(&table.table, existing, deleted, new_indexes);
     }
+    let q = |id: &str| quote_identifier(db_kind, id);
     let schema_prefix = match &table.schema {
-        Some(s) => format!("{}.", quote_identifier(db_kind, s)),
+        Some(s) => format!("{}.", q(s)),
         None => String::new(),
     };
-    let full_table = format!("{}{}", schema_prefix, quote_identifier(db_kind, &table.table));
+    let full_table = format!("{}{}", schema_prefix, q(&table.table));
     let mut stmts: Vec<String> = Vec::new();
 
     for &idx in deleted {
         if let Some(idx_def) = existing.get(idx) {
             stmts.push(format!(
                 "DROP INDEX {} ON {full_table}",
-                quote_identifier(db_kind, &idx_def.name)
+                q(&idx_def.name)
             ));
         }
     }
     for idx in new_indexes {
-        let unique = if idx.unique { "UNIQUE " } else { "" };
-        let cols = idx.columns
-            .iter()
-            .map(|c| quote_identifier(db_kind, c))
-            .collect::<Vec<_>>()
-            .join(", ");
-        stmts.push(format!(
-            "CREATE {unique}INDEX {} ON {full_table} ({cols})",
-            quote_identifier(db_kind, &idx.name)
-        ));
+        stmts.push(build_index_ddl(db_kind, idx, &full_table, &q));
     }
     if stmts.is_empty() {
         String::new()
@@ -28699,9 +28732,14 @@ fn generate_mongo_index_cmd(
         }
     }
     for idx in new_indexes {
+        let key_val = match idx.kind.as_str() {
+            "1" | "-1" => idx.kind.clone(),
+            "" => "1".to_string(),
+            _ => format!("\"{}\"", idx.kind),
+        };
         let keys: String = idx.columns
             .iter()
-            .map(|c| format!("\"{c}\": 1"))
+            .map(|c| format!("\"{c}\": {key_val}"))
             .collect::<Vec<_>>()
             .join(", ");
         let opts = if idx.unique {
@@ -37424,5 +37462,70 @@ mod tests {
         assert_eq!(sql, "abXYcdefgXYhij");
         assert_eq!(primary, Some(4));
         assert_eq!(extras, vec![11]);
+    }
+
+    #[test]
+    fn build_index_ddl_mysql_fulltext() {
+        let idx = PendingIndex {
+            name: "ft".into(),
+            columns: vec!["content".into()],
+            unique: false,
+            kind: "FULLTEXT".into(),
+            method: String::new(),
+        };
+        let sql = build_index_ddl(DatabaseKind::MySql, &idx, "`articles`", &|c| format!("`{c}`"));
+        assert_eq!(sql, "CREATE FULLTEXT INDEX `ft` ON `articles` (`content`)");
+    }
+
+    #[test]
+    fn build_index_ddl_mysql_unique_hash() {
+        let idx = PendingIndex {
+            name: "u1".into(),
+            columns: vec!["email".into()],
+            unique: true,
+            kind: "UNIQUE".into(),
+            method: "HASH".into(),
+        };
+        let sql = build_index_ddl(DatabaseKind::MySql, &idx, "`users`", &|c| format!("`{c}`"));
+        assert_eq!(sql, "CREATE UNIQUE INDEX `u1` ON `users` (`email`) USING HASH");
+    }
+
+    #[test]
+    fn build_index_ddl_pg_unique_gin() {
+        let idx = PendingIndex {
+            name: "g".into(),
+            columns: vec!["doc".into()],
+            unique: true,
+            kind: "UNIQUE".into(),
+            method: "gin".into(),
+        };
+        let sql = build_index_ddl(DatabaseKind::Postgres, &idx, "\"public\".\"t\"", &|c| format!("\"{c}\""));
+        assert_eq!(sql, "CREATE UNIQUE INDEX \"g\" ON \"public\".\"t\" USING gin (\"doc\")");
+    }
+
+    #[test]
+    fn build_index_ddl_sqlite_unique() {
+        let idx = PendingIndex {
+            name: "u".into(),
+            columns: vec!["a".into()],
+            unique: true,
+            kind: "UNIQUE".into(),
+            method: String::new(),
+        };
+        let sql = build_index_ddl(DatabaseKind::Sqlite, &idx, "\"t\"", &|c| format!("\"{c}\""));
+        assert_eq!(sql, "CREATE UNIQUE INDEX \"u\" ON \"t\" (\"a\")");
+    }
+
+    #[test]
+    fn mongo_index_cmd_text_unique() {
+        let idx = PendingIndex {
+            name: "idx_content".into(),
+            columns: vec!["content".into()],
+            unique: true,
+            kind: "text".into(),
+            method: String::new(),
+        };
+        let sql = generate_mongo_index_cmd("articles", &[], &BTreeSet::new(), &[idx]);
+        assert_eq!(sql, "db.articles.createIndex({\"content\": \"text\"}, {unique: true, name: \"idx_content\"});\n");
     }
 }
