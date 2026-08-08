@@ -12068,6 +12068,52 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         action
     }
 
+    fn render_create_table_preview_view(ui: &mut egui::Ui, tab: &mut CreateTableState, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> TabUiAction {
+        let mut action = TabUiAction::None;
+        let palette = mac_ui_palette_from_ui(ui);
+        let sql = generate_create_table_sql(tab);
+
+        if sql.is_empty() {
+            ui.add_space(24.0);
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new(tr!("暂无预览数据")).size(palette.fonts.md).color(palette.weak_text));
+            });
+            return action;
+        }
+
+        // 工具栏：复制按钮（右对齐）
+        ui.horizontal(|ui| {
+            ui.add_space(ui.available_width() - 60.0);
+            let copy_btn = mini_button(ui, tr!("📋 复制"), mini_borderless_style(colors, fonts.sm, colors.subtle_button_text));
+            if copy_btn.clicked() {
+                show_copied_tooltip(ui, copy_btn.rect.center());
+                action = TabUiAction::CopyTextToClipboard {
+                    text: sql.clone(),
+                    status_message: tr!("已复制预览语句").into(),
+                };
+            }
+        });
+        ui.add_space(6.0);
+
+        // SQL 高亮展示区（撑满剩余高度）
+        egui::Frame::new()
+            .fill(palette.card_bg)
+            .stroke(Stroke::NONE)
+            .show(ui, |ui| {
+                egui::ScrollArea::both()
+                    .id_salt("create-table-preview-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let available = ui.available_width();
+                        let job = sql_highlight_job_with_word_wrap_from_ui(ui, &sql, available - 4.0);
+                        ui.add(egui::Label::new(job));
+                    });
+            });
+
+        action
+    }
+
     fn render_create_table_columns_view(ui: &mut egui::Ui, tab: &mut CreateTableState, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) -> TabUiAction {
         let mut action = TabUiAction::None;
         let palette = mac_ui_palette_from_ui(ui);
