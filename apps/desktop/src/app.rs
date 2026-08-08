@@ -12702,9 +12702,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.label(RichText::new(tr!("创建索引")).size(palette.fonts.heading).color(dialog_pal.title).strong());
                             });
                             ui.add_space(4.0);
+                            let label_w = dialog_label_width(ui, &[tr!("索引名："), tr!("类型："), tr!("方法："), tr!("选择列：")]);
                             ui.horizontal(|ui| {
-                                dialog_form_label(ui, tr!("索引名："), 60.0);
-                                let r = ui.add(egui::TextEdit::singleline(&mut tab.new_index_name).desired_width(280.0));
+                                dialog_form_label(ui, tr!("索引名："), label_w);
+                                let r = ui.add(egui::TextEdit::singleline(&mut tab.new_index_name).desired_width(f32::INFINITY));
                                 if tab.add_index_needs_focus { r.request_focus(); tab.add_index_needs_focus = false; }
                             });
                             ui.add_space(4.0);
@@ -12712,7 +12713,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.checkbox(&mut tab.new_index_unique, "UNIQUE");
                             } else {
                                 ui.horizontal(|ui| {
-                        dialog_form_label(ui, tr!("类型："), 60.0);
+                        dialog_form_label(ui, tr!("类型："), label_w);
                                     let kind_items: Vec<(&str, bool)> = index_kind_options(tab.database_kind)
                                         .iter()
                                         .map(|k| (*k, tab.new_index_kind == *k))
@@ -12730,7 +12731,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 if !method_opts.is_empty() {
                                     ui.add_space(4.0);
                                     ui.horizontal(|ui| {
-                                dialog_form_label(ui, tr!("方法："), 60.0);
+                                dialog_form_label(ui, tr!("方法："), label_w);
                                         let method_items: Vec<(&str, bool)> = method_opts
                                             .iter()
                                             .map(|m| (*m, tab.new_index_method == *m))
@@ -12742,7 +12743,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                             }
                             ui.add_space(4.0);
-                            dialog_form_label(ui, tr!("选择列："), 60.0);
+                            dialog_form_label(ui, tr!("选择列："), label_w);
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
                                 .max_height(160.0)
@@ -28436,9 +28437,10 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, fonts: &u
                         ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
                         ui.label(RichText::new(tr!("增加索引")).size(fonts.heading).color(dialog_palette.title).strong());
                     });
+                    let label_w = dialog_label_width(ui, &[tr!("索引名："), tr!("类型："), tr!("方法："), tr!("选择列：")]);
                     ui.horizontal(|ui| {
-                        dialog_form_label(ui, tr!("索引名："), 60.0);
-                        let resp = ui.add(egui::TextEdit::singleline(&mut tab.new_index_name));
+                        dialog_form_label(ui, tr!("索引名："), label_w);
+                        let resp = ui.add(egui::TextEdit::singleline(&mut tab.new_index_name).desired_width(f32::INFINITY));
                         if tab.add_index_needs_focus {
                             resp.request_focus();
                             tab.add_index_needs_focus = false;
@@ -28449,7 +28451,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, fonts: &u
                         ui.checkbox(&mut tab.new_index_unique, "UNIQUE");
                     } else {
                         ui.horizontal(|ui| {
-                            dialog_form_label(ui, tr!("类型："), 60.0);
+                            dialog_form_label(ui, tr!("类型："), label_w);
                             let kind_items: Vec<(&str, bool)> = index_kind_options(tab.database_kind)
                                 .iter()
                                 .map(|k| (*k, tab.new_index_kind == *k))
@@ -28467,7 +28469,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, fonts: &u
                         if !method_opts.is_empty() {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                dialog_form_label(ui, tr!("方法："), 60.0);
+                                dialog_form_label(ui, tr!("方法："), label_w);
                                 let method_items: Vec<(&str, bool)> = method_opts
                                     .iter()
                                     .map(|m| (*m, tab.new_index_method == *m))
@@ -28479,7 +28481,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, fonts: &u
                         }
                     }
                     ui.add_space(4.0);
-                    dialog_form_label(ui, tr!("选择列："), 60.0);
+                    dialog_form_label(ui, tr!("选择列："), label_w);
                     let col_names: Vec<String> = if !tab.edited_columns.is_empty() {
                         tab.edited_columns
                             .iter()
@@ -34039,7 +34041,16 @@ fn mini_button(ui: &mut egui::Ui, label: &str, style: ButtonStyle) -> egui::Resp
     )
 }
 
-/// 弹窗表单的标签：固定宽度右对齐，让「索引名：」「类型：」「方法：」的冒号对齐
+/// 测量一组弹窗表单标签中最宽者的像素宽度，作为统一的标签列宽（冒号对齐）
+fn dialog_label_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
+    let font = FontId::proportional(ui.text_style_height(&egui::TextStyle::Body));
+    labels.iter().fold(0.0, |w, label| {
+        let galley = ui.fonts_mut(|f| f.layout(label.to_string(), font.clone(), Color32::WHITE, f32::INFINITY));
+        w.max(galley.rect.width())
+    })
+}
+
+/// 弹窗表单的标签：按给定宽度右对齐，让「索引名：」「类型：」「方法：」的冒号对齐
 fn dialog_form_label(ui: &mut egui::Ui, text: &str, width: f32) {
     ui.add_sized(
         [width, 0.0],
