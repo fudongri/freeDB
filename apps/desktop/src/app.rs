@@ -12462,28 +12462,56 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         let header_painter = ui.painter().clone();
                         let mut hovered_header_col_idx: Option<usize> = None;
 
-                        let mut index_col_widths = if tab.index_col_widths.len() == 7 {
-                            tab.index_col_widths.clone()
+                        let has_method = tab.database_kind != DatabaseKind::MongoDb
+                            && tab.database_kind != DatabaseKind::Sqlite;
+                        // 列宽：has_method 时 7 列，否则 6 列（去掉「方法」）。旧保存的 7 列宽度在 has_method=false 时不再使用。
+                        let mut index_col_widths = if has_method {
+                            if tab.index_col_widths.len() == 7 {
+                                tab.index_col_widths.clone()
+                            } else {
+                                tab.index_resize_drag = None;
+                                vec![42.0, 200.0, 100.0, 80.0, 150.0, 120.0, 80.0]
+                            }
                         } else {
-                            tab.index_resize_drag = None;
-                            vec![42.0, 200.0, 100.0, 80.0, 150.0, 120.0, 80.0]
+                            if tab.index_col_widths.len() == 6 {
+                                tab.index_col_widths.clone()
+                            } else {
+                                tab.index_resize_drag = None;
+                                vec![42.0, 200.0, 100.0, 150.0, 120.0, 80.0]
+                            }
                         };
 
                         let mut col_idx = 0usize;
-                        let mut table = TableBuilder::new(ui)
+                        let mut builder = TableBuilder::new(ui)
                             .vscroll(false)
                             .striped(false)
                             .resizable(false)
-                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                            .column(egui_extras::Column::initial(index_col_widths[0]).at_least(42.0))
-                            .column(egui_extras::Column::initial(index_col_widths[1]).at_least(120.0))
-                            .column(egui_extras::Column::initial(index_col_widths[2]).at_least(60.0))
-                            .column(egui_extras::Column::initial(index_col_widths[3]).at_least(60.0))
-                            .column(egui_extras::Column::remainder().at_least(150.0))
-                            .column(egui_extras::Column::initial(index_col_widths[5]).at_least(80.0))
-                            .column(egui_extras::Column::initial(index_col_widths[6]).at_least(60.0))
-                            .header(30.0, |mut header| {
-                                for title in ["#", tr!("索引名"), tr!("类型"), tr!("方法"), tr!("包含列"), tr!("来源"), tr!("删除")] {
+                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+                        if has_method {
+                            builder = builder
+                                .column(egui_extras::Column::initial(index_col_widths[0]).at_least(42.0))
+                                .column(egui_extras::Column::initial(index_col_widths[1]).at_least(120.0))
+                                .column(egui_extras::Column::initial(index_col_widths[2]).at_least(60.0))
+                                .column(egui_extras::Column::initial(index_col_widths[3]).at_least(60.0))
+                                .column(egui_extras::Column::remainder().at_least(150.0))
+                                .column(egui_extras::Column::initial(index_col_widths[5]).at_least(80.0))
+                                .column(egui_extras::Column::initial(index_col_widths[6]).at_least(60.0));
+                        } else {
+                            builder = builder
+                                .column(egui_extras::Column::initial(index_col_widths[0]).at_least(42.0))
+                                .column(egui_extras::Column::initial(index_col_widths[1]).at_least(120.0))
+                                .column(egui_extras::Column::initial(index_col_widths[2]).at_least(60.0))
+                                .column(egui_extras::Column::remainder().at_least(150.0))
+                                .column(egui_extras::Column::initial(index_col_widths[4]).at_least(80.0))
+                                .column(egui_extras::Column::initial(index_col_widths[5]).at_least(60.0));
+                        }
+                        let titles: &[&str] = if has_method {
+                            &["#", tr!("索引名"), tr!("类型"), tr!("方法"), tr!("包含列"), tr!("来源"), tr!("删除")]
+                        } else {
+                            &["#", tr!("索引名"), tr!("类型"), tr!("包含列"), tr!("来源"), tr!("删除")]
+                        };
+                        let mut table = builder.header(30.0, |mut header| {
+                            for title in titles {
                                     header.col(|ui| {
                                         let (_, _, _, _) = table_header_cell(ui, &palette, title, false, None, false, false, None, false, false);
                                         let cell_rect = ui.max_rect();
@@ -12560,15 +12588,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         index_cell_double_click_copy(ui, rect, &idx.kind);
                                     });
                                     // 方法
-                                    row.col(|ui| {
-                                        let rect = ui.max_rect();
-                                        paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                        let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
-                                        child.add_space(4.0);
-                                        let method_text = if idx.method.is_empty() { "—" } else { idx.method.as_str() };
-                                        child.label(RichText::new(method_text).size(palette.fonts.base).color(palette.index_badge));
-                                        index_cell_double_click_copy(ui, rect, method_text);
-                                    });
+                                    if has_method {
+                                        row.col(|ui| {
+                                            let rect = ui.max_rect();
+                                            paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                            let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                            child.add_space(4.0);
+                                            let method_text = if idx.method.is_empty() { "—" } else { idx.method.as_str() };
+                                            child.label(RichText::new(method_text).size(palette.fonts.base).color(palette.index_badge));
+                                            index_cell_double_click_copy(ui, rect, method_text);
+                                        });
+                                    }
                                     // 包含列
                                     row.col(|ui| {
                                         let rect = ui.max_rect();
@@ -12613,7 +12643,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         ui.label(RichText::new(tr!("暂无索引")).size(palette.fonts.base).color(palette.weak_text));
                                     });
                                     row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
-                                    row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                                    if has_method {
+                                        row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                                    }
                                     row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
                                     row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
                                     row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
@@ -28861,27 +28893,54 @@ fn render_index_table(
             let mut column_right_edges: Vec<f32> = vec![];
             let mut hovered_header_col_idx: Option<usize> = None;
 
-            let mut index_col_widths = if tab.index_col_widths.len() == 7 {
-                tab.index_col_widths.clone()
+            let has_method = tab.database_kind != DatabaseKind::MongoDb
+                && tab.database_kind != DatabaseKind::Sqlite;
+            let mut index_col_widths = if has_method {
+                if tab.index_col_widths.len() == 7 {
+                    tab.index_col_widths.clone()
+                } else {
+                    tab.index_resize_drag = None;
+                    vec![42.0, 200.0, 100.0, 80.0, 150.0, 120.0, 80.0]
+                }
             } else {
-                tab.index_resize_drag = None;
-                vec![42.0, 200.0, 100.0, 80.0, 150.0, 120.0, 80.0]
+                if tab.index_col_widths.len() == 6 {
+                    tab.index_col_widths.clone()
+                } else {
+                    tab.index_resize_drag = None;
+                    vec![42.0, 200.0, 100.0, 150.0, 120.0, 80.0]
+                }
             };
 
             let mut col_idx = 0usize;
-            let mut table = TableBuilder::new(ui)
+            let mut builder = TableBuilder::new(ui)
                 .vscroll(false)
                 .striped(false)
                 .resizable(false)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(egui_extras::Column::initial(index_col_widths[0]).at_least(42.0))
-                .column(egui_extras::Column::initial(index_col_widths[1]).at_least(120.0))
-                .column(egui_extras::Column::initial(index_col_widths[2]).at_least(60.0))
-                .column(egui_extras::Column::initial(index_col_widths[3]).at_least(60.0))
-                .column(egui_extras::Column::remainder().at_least(150.0))
-                .column(egui_extras::Column::initial(index_col_widths[5]).at_least(80.0))
-                .column(egui_extras::Column::initial(index_col_widths[6]).at_least(60.0))
-                .header(30.0, |mut header| {
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+            if has_method {
+                builder = builder
+                    .column(egui_extras::Column::initial(index_col_widths[0]).at_least(42.0))
+                    .column(egui_extras::Column::initial(index_col_widths[1]).at_least(120.0))
+                    .column(egui_extras::Column::initial(index_col_widths[2]).at_least(60.0))
+                    .column(egui_extras::Column::initial(index_col_widths[3]).at_least(60.0))
+                    .column(egui_extras::Column::remainder().at_least(150.0))
+                    .column(egui_extras::Column::initial(index_col_widths[5]).at_least(80.0))
+                    .column(egui_extras::Column::initial(index_col_widths[6]).at_least(60.0));
+            } else {
+                builder = builder
+                    .column(egui_extras::Column::initial(index_col_widths[0]).at_least(42.0))
+                    .column(egui_extras::Column::initial(index_col_widths[1]).at_least(120.0))
+                    .column(egui_extras::Column::initial(index_col_widths[2]).at_least(60.0))
+                    .column(egui_extras::Column::remainder().at_least(150.0))
+                    .column(egui_extras::Column::initial(index_col_widths[4]).at_least(80.0))
+                    .column(egui_extras::Column::initial(index_col_widths[5]).at_least(60.0));
+            }
+            let titles: &[&str] = if has_method {
+                &[tr!("索引名"), tr!("类型"), tr!("方法"), tr!("包含列"), tr!("来源"), tr!("删除")]
+            } else {
+                &[tr!("索引名"), tr!("类型"), tr!("包含列"), tr!("来源"), tr!("删除")]
+            };
+            let mut table = builder.header(30.0, |mut header| {
                     header.col(|ui| {
                         let (_, _, _, _) = table_header_cell(ui, palette, "#", false, None, false, false, None, false, false);
                         let cell_rect = ui.max_rect();
@@ -28918,7 +28977,7 @@ fn render_index_table(
                         }
                         col_idx += 1;
                     });
-                    for title in [tr!("索引名"), tr!("类型"), tr!("方法"), tr!("包含列"), tr!("来源"), tr!("删除")] {
+                    for &title in titles {
                         header.col(|ui| {
                             let (_, _, _, _) = table_header_cell(ui, palette, title, false, None, false, false, None, false, false);
                             let cell_rect = ui.max_rect();
@@ -28998,15 +29057,17 @@ fn render_index_table(
                                 index_cell_double_click_copy(ui, rect, &idx.kind);
                             });
                             // 方法
-                            row.col(|ui| {
-                                let rect = ui.max_rect();
-                                paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
-                                child.add_space(4.0);
-                                let method_text = if idx.method.is_empty() { "—" } else { idx.method.as_str() };
-                                child.label(RichText::new(method_text).size(palette.fonts.base));
-                                index_cell_double_click_copy(ui, rect, method_text);
-                            });
+                            if has_method {
+                                row.col(|ui| {
+                                    let rect = ui.max_rect();
+                                    paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                    let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                    child.add_space(4.0);
+                                    let method_text = if idx.method.is_empty() { "—" } else { idx.method.as_str() };
+                                    child.label(RichText::new(method_text).size(palette.fonts.base));
+                                    index_cell_double_click_copy(ui, rect, method_text);
+                                });
+                            }
                             // 包含列
                             row.col(|ui| {
                                 let rect = ui.max_rect();
@@ -29084,15 +29145,17 @@ fn render_index_table(
                                 index_cell_double_click_copy(ui, rect, &idx.kind);
                             });
                             // 方法
-                            row.col(|ui| {
-                                let rect = ui.max_rect();
-                                paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
-                                let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
-                                child.add_space(4.0);
-                                let method_text = if idx.method.is_empty() { "—" } else { idx.method.as_str() };
-                                child.label(RichText::new(method_text).size(palette.fonts.base).color(palette.index_badge));
-                                index_cell_double_click_copy(ui, rect, method_text);
-                            });
+                            if has_method {
+                                row.col(|ui| {
+                                    let rect = ui.max_rect();
+                                    paint_table_grid_lines(ui, rect, idx_grid_v, idx_grid_h);
+                                    let mut child = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                                    child.add_space(4.0);
+                                    let method_text = if idx.method.is_empty() { "—" } else { idx.method.as_str() };
+                                    child.label(RichText::new(method_text).size(palette.fonts.base).color(palette.index_badge));
+                                    index_cell_double_click_copy(ui, rect, method_text);
+                                });
+                            }
                             // 包含列
                             row.col(|ui| {
                                 let rect = ui.max_rect();
@@ -29155,7 +29218,9 @@ fn render_index_table(
                                 );
                             });
                             row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
-                            row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                            if has_method {
+                                row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
+                            }
                             row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
                             row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
                             row.col(|ui| { paint_table_grid_lines(ui, ui.max_rect(), idx_grid_v, idx_grid_h); });
