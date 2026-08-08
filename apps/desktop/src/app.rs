@@ -34532,7 +34532,7 @@ fn render_type_input_with_dropdown(
     }
 
     egui::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-        ui.set_min_width(260.0);
+        ui.set_min_width(360.0);
         egui::ScrollArea::vertical()
             .id_salt(id_source.with("type_popup_scroll"))
             .auto_shrink([false, false])
@@ -34543,7 +34543,7 @@ fn render_type_input_with_dropdown(
                     if !filter.is_empty() && !name.to_ascii_uppercase().contains(&filter) && !label.contains(&filter) {
                         continue;
                     }
-                    if ui.selectable_label(false, &label).clicked() {
+                    if ui.add(egui::Button::selectable(false, &label).wrap_mode(egui::TextWrapMode::Extend)).clicked() {
                         *data_type = (*name).to_string();
                         // 光标放在右括号前面（括号内文字后面）
                         cursor_target = if let Some(close_pos) = name.rfind(')') {
