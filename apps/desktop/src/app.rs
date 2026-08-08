@@ -708,6 +708,8 @@ struct CreateTableState {
     new_index_name: String,
     new_index_columns: Vec<usize>,
     new_index_unique: bool,
+    new_index_kind: String,
+    new_index_method: String,
     active_view: CreateTableView,
     error: Option<String>,
     needs_focus: bool,
@@ -1124,6 +1126,8 @@ struct TableTabState {
     new_index_name: String,
     new_index_columns: Vec<usize>,
     new_index_unique: bool,
+    new_index_kind: String,
+    new_index_method: String,
     // 列筛选/排序状态
     hidden_columns: BTreeSet<String>,
     column_order: Vec<String>,
@@ -1466,6 +1470,8 @@ struct PendingIndex {
     name: String,
     columns: Vec<String>,
     unique: bool,
+    kind: String,
+    method: String,
 }
 
 #[derive(Clone)]
@@ -1473,7 +1479,8 @@ struct ExistingIndex {
     name: String,
     columns: Vec<String>,
     unique: bool,
-    index_type: String,
+    kind: String,
+    method: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4128,6 +4135,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             new_index_name: String::new(),
             new_index_columns: Vec::new(),
             new_index_unique: false,
+            new_index_kind: default_index_kind(database_kind),
+            new_index_method: default_index_method(database_kind),
             hidden_columns: BTreeSet::new(),
             column_order: Vec::new(),
             column_drag: None,
@@ -5138,6 +5147,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     new_index_name: String::new(),
                     new_index_columns: Vec::new(),
                     new_index_unique: false,
+                    new_index_kind: default_index_kind(kind),
+                    new_index_method: default_index_method(kind),
                     active_view: CreateTableView::Columns,
                     error: None,
                     needs_focus: true,
@@ -6801,6 +6812,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         new_index_name: String::new(),
                         new_index_columns: Vec::new(),
                         new_index_unique: false,
+                        new_index_kind: default_index_kind(kind),
+                        new_index_method: default_index_method(kind),
                         active_view: CreateTableView::Columns,
                         error: None,
                         needs_focus: true,
@@ -8210,6 +8223,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     new_index_name: String::new(),
                                     new_index_columns: Vec::new(),
                                     new_index_unique: false,
+                                    new_index_kind: default_index_kind(kind),
+                                    new_index_method: default_index_method(kind),
                                     active_view: CreateTableView::Columns,
                                     error: None,
                                     needs_focus: true,
@@ -12659,7 +12674,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             if commit_index {
                 let idx_name = tab.new_index_name.trim().to_string();
                 if tab.pending_indexes.iter().all(|i| i.name != idx_name) {
-                    tab.pending_indexes.push(PendingIndex { name: idx_name, columns: tab.new_index_columns.iter().filter_map(|i| column_names.get(*i).cloned()).collect(), unique: tab.new_index_unique });
+                    let unique = if tab.database_kind == DatabaseKind::MongoDb { tab.new_index_unique } else { tab.new_index_kind == "UNIQUE" };
+                    tab.pending_indexes.push(PendingIndex {
+                        name: idx_name,
+                        columns: tab.new_index_columns.iter().filter_map(|i| column_names.get(*i).cloned()).collect(),
+                        unique,
+                        kind: tab.new_index_kind.clone(),
+                        method: tab.new_index_method.clone(),
+                    });
                 }
                 close_dialog = true;
             }
@@ -28363,7 +28385,9 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                     tab.pending_indexes.push(PendingIndex {
                         name: tab.new_index_name.clone(),
                         columns,
-                        unique: tab.new_index_unique,
+                        unique: if tab.database_kind == DatabaseKind::MongoDb { tab.new_index_unique } else { tab.new_index_kind == "UNIQUE" },
+                        kind: tab.new_index_kind.clone(),
+                        method: tab.new_index_method.clone(),
                     });
                     tab.add_index_dialog_open = false;
                 }
@@ -28409,12 +28433,12 @@ fn parse_indexes_from_create_sql(create_sql: &str) -> Vec<ExistingIndex> {
             continue;
         }
 
-        let (unique, rest) = if upper.starts_with("UNIQUE KEY") || upper.starts_with("UNIQUE INDEX") {
+        let (kind, rest) = if upper.starts_with("UNIQUE KEY") || upper.starts_with("UNIQUE INDEX") {
             let r = trimmed[("UNIQUE KEY".len())..].trim();
-            (true, r)
+            ("UNIQUE", r)
         } else if upper.starts_with("KEY") || upper.starts_with("INDEX") {
             let r = trimmed[("KEY".len())..].trim();
-            (false, r)
+            ("NORMAL", r)
         } else {
             continue;
         };
@@ -28443,8 +28467,9 @@ fn parse_indexes_from_create_sql(create_sql: &str) -> Vec<ExistingIndex> {
             indexes.push(ExistingIndex {
                 name: name.to_string(),
                 columns,
-                unique,
-                index_type,
+                unique: kind == "UNIQUE",
+                kind: kind.to_string(),
+                method: index_type,
             });
         }
     }
@@ -28487,7 +28512,7 @@ fn parse_mongo_create_index(line: &str) -> Option<ExistingIndex> {
     // 解析 keys: {"col1": 1, "col2": -1} 或 {"field": "text"}
     let keys_inner = keys_doc.strip_prefix('{')?.strip_suffix('}')?;
     let mut columns = Vec::new();
-    let mut index_type = String::from("REGULAR");
+    let mut kind = String::from("REGULAR");
     for entry in keys_inner.split(',') {
         let Some((k, v)) = entry.split_once(':') else { continue };
         let k = k.trim().trim_matches('"').trim_matches('\'');
@@ -28495,7 +28520,7 @@ fn parse_mongo_create_index(line: &str) -> Option<ExistingIndex> {
         columns.push(k.to_string());
         let v = v.trim().trim_matches('"').trim_matches('\'');
         if v != "1" && v != "-1" && !v.is_empty() {
-            index_type = v.to_uppercase();
+            kind = v.to_uppercase();
         }
     }
 
@@ -28529,7 +28554,8 @@ fn parse_mongo_create_index(line: &str) -> Option<ExistingIndex> {
         name,
         columns,
         unique,
-        index_type,
+        kind,
+        method: String::new(),
     })
 }
 
@@ -28557,7 +28583,7 @@ fn parse_pg_create_index(line: &str) -> Option<ExistingIndex> {
         .filter(|c| !c.is_empty())
         .collect();
     let before_cols = &after_on[..cols_start];
-    let index_type = if let Some(pos) = before_cols.to_ascii_uppercase().find("USING ") {
+    let method = if let Some(pos) = before_cols.to_ascii_uppercase().find("USING ") {
         before_cols[pos + 6..]
             .trim()
             .split_whitespace()
@@ -28574,8 +28600,44 @@ fn parse_pg_create_index(line: &str) -> Option<ExistingIndex> {
         name: name.to_string(),
         columns,
         unique,
-        index_type,
+        kind: if unique { "UNIQUE".to_string() } else { "NORMAL".to_string() },
+        method,
     })
+}
+
+/// 各数据库可选索引类型（kind）
+fn index_kind_options(db_kind: DatabaseKind) -> &'static [&'static str] {
+    match db_kind {
+        DatabaseKind::MySql => &["NORMAL", "UNIQUE", "FULLTEXT", "SPATIAL"],
+        DatabaseKind::Postgres | DatabaseKind::Sqlite => &["NORMAL", "UNIQUE"],
+        DatabaseKind::MongoDb => &["1", "-1", "text", "hashed", "2dsphere"],
+    }
+}
+
+/// 各数据库可选索引方法（method）
+fn index_method_options(db_kind: DatabaseKind) -> &'static [&'static str] {
+    match db_kind {
+        DatabaseKind::MySql => &["BTREE", "HASH", "RTREE"],
+        DatabaseKind::Postgres => &["btree", "hash", "gist", "gin", "brin"],
+        DatabaseKind::MongoDb | DatabaseKind::Sqlite => &[],
+    }
+}
+
+/// 新建索引的默认类型
+fn default_index_kind(db_kind: DatabaseKind) -> String {
+    match db_kind {
+        DatabaseKind::MongoDb => "1".to_string(),
+        _ => "NORMAL".to_string(),
+    }
+}
+
+/// 新建索引的默认方法
+fn default_index_method(db_kind: DatabaseKind) -> String {
+    match db_kind {
+        DatabaseKind::MySql => "BTREE".to_string(),
+        DatabaseKind::Postgres => "btree".to_string(),
+        _ => String::new(),
+    }
 }
 
 /// 生成索引变更 SQL（CREATE / DROP INDEX）
@@ -28830,9 +28892,9 @@ fn render_index_table(
                                 let r = egui::Rect::from_center_size(center, egui::vec2(60.0, 20.0));
                                 let mut child = ui.child_ui(r, egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), None);
                                 child.label(
-                                    RichText::new(&idx.index_type).size(palette.fonts.xs),
+                                    RichText::new(&idx.method).size(palette.fonts.xs),
                                 );
-                                index_cell_double_click_copy(ui, rect, &idx.index_type);
+                                index_cell_double_click_copy(ui, rect, &idx.method);
                             });
                             // 包含列
                             row.col(|ui| {
