@@ -12699,11 +12699,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                ui.label(RichText::new(tr!("创建索引")).size(palette.fonts.xl).color(dialog_pal.title).strong());
+                                ui.label(RichText::new(tr!("创建索引")).size(palette.fonts.heading).color(dialog_pal.title).strong());
                             });
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                ui.label(tr!("索引名："));
+                                dialog_form_label(ui, tr!("索引名："), 60.0);
                                 let r = ui.add(egui::TextEdit::singleline(&mut tab.new_index_name).desired_width(280.0));
                                 if tab.add_index_needs_focus { r.request_focus(); tab.add_index_needs_focus = false; }
                             });
@@ -12712,7 +12712,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.checkbox(&mut tab.new_index_unique, "UNIQUE");
                             } else {
                                 ui.horizontal(|ui| {
-                                    ui.label(tr!("类型："));
+                        dialog_form_label(ui, tr!("类型："), 60.0);
                                     let kind_items: Vec<(&str, bool)> = index_kind_options(tab.database_kind)
                                         .iter()
                                         .map(|k| (*k, tab.new_index_kind == *k))
@@ -12730,7 +12730,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 if !method_opts.is_empty() {
                                     ui.add_space(4.0);
                                     ui.horizontal(|ui| {
-                                        ui.label(tr!("方法："));
+                                dialog_form_label(ui, tr!("方法："), 60.0);
                                         let method_items: Vec<(&str, bool)> = method_opts
                                             .iter()
                                             .map(|m| (*m, tab.new_index_method == *m))
@@ -12742,18 +12742,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 }
                             }
                             ui.add_space(4.0);
-                            ui.label(tr!("选择列："));
+                            dialog_form_label(ui, tr!("选择列："), 60.0);
                             egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
                                 .max_height(160.0)
                                 .show(ui, |ui| {
-                                    for (i, name) in column_names.iter().enumerate() {
-                                        let mut selected = tab.new_index_columns.contains(&i);
-                                        if ui.checkbox(&mut selected, name.as_str()).changed() {
-                                            if selected { tab.new_index_columns.push(i); }
-                                            else { tab.new_index_columns.retain(|&x| x != i); }
-                                        }
-                                    }
+                                    dialog_column_picker(ui, &column_names, &mut tab.new_index_columns);
                                 });
                             // 列预览
                             ui.add_space(4.0);
@@ -12767,14 +12761,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 ui.add_space(ui.available_width());
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                    let (p_fill, p_stroke, p_text) = (dialog_pal.primary_button_bg, Stroke::new(1.0, dialog_pal.primary_button_stroke), dialog_pal.primary_button_text);
-                                    let (s_fill, s_stroke, s_text) = (dialog_pal.secondary_button_bg, Stroke::new(1.0, dialog_pal.secondary_button_stroke), dialog_pal.secondary_button_text);
-                                    if ui.add(egui::Button::new(RichText::new(tr!("确定")).size(palette.fonts.base).color(p_text)).fill(p_fill).stroke(p_stroke).corner_radius(palette.radius_lg)).clicked()
+                                    let ok_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_primary_style(colors, palette.fonts.sm) };
+                                    let cancel_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_subtle_style(colors, palette.fonts.sm) };
+                                    if mini_button(ui, tr!("确定"), ok_style).clicked()
                                         && !tab.new_index_name.trim().is_empty() && !tab.new_index_columns.is_empty()
                                     {
                                         commit_index = true;
                                     }
-                                    if ui.add(egui::Button::new(RichText::new(tr!("取消")).size(palette.fonts.base).color(s_text)).fill(s_fill).stroke(s_stroke).corner_radius(palette.radius_lg)).clicked() {
+                                    if mini_button(ui, tr!("取消"), cancel_style).clicked() {
                                         close_dialog = true;
                                     }
                                 });
@@ -28404,7 +28398,7 @@ fn render_structure_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui
 }
 
 /// 增加索引弹窗
-fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_radius_lg: f32, fonts: &ui_theme::FontSizes, colors: &ui_theme::ThemeColors) {
+fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, fonts: &ui_theme::FontSizes, colors: &ui_theme::ThemeColors) {
     let ctx = ui.ctx().clone();
     let dialog_palette = mac_dialog_palette_from_ui(ui);
     // 半透明遮罩
@@ -28440,10 +28434,10 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
 
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                        ui.label(RichText::new(tr!("增加索引")).size(fonts.xl).color(dialog_palette.title).strong());
+                        ui.label(RichText::new(tr!("增加索引")).size(fonts.heading).color(dialog_palette.title).strong());
                     });
                     ui.horizontal(|ui| {
-                        ui.label(tr!("索引名："));
+                        dialog_form_label(ui, tr!("索引名："), 60.0);
                         let resp = ui.add(egui::TextEdit::singleline(&mut tab.new_index_name));
                         if tab.add_index_needs_focus {
                             resp.request_focus();
@@ -28455,7 +28449,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                         ui.checkbox(&mut tab.new_index_unique, "UNIQUE");
                     } else {
                         ui.horizontal(|ui| {
-                            ui.label(tr!("类型："));
+                            dialog_form_label(ui, tr!("类型："), 60.0);
                             let kind_items: Vec<(&str, bool)> = index_kind_options(tab.database_kind)
                                 .iter()
                                 .map(|k| (*k, tab.new_index_kind == *k))
@@ -28473,7 +28467,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                         if !method_opts.is_empty() {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                ui.label(tr!("方法："));
+                                dialog_form_label(ui, tr!("方法："), 60.0);
                                 let method_items: Vec<(&str, bool)> = method_opts
                                     .iter()
                                     .map(|m| (*m, tab.new_index_method == *m))
@@ -28485,7 +28479,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                         }
                     }
                     ui.add_space(4.0);
-                    ui.label(tr!("选择列："));
+                    dialog_form_label(ui, tr!("选择列："), 60.0);
                     let col_names: Vec<String> = if !tab.edited_columns.is_empty() {
                         tab.edited_columns
                             .iter()
@@ -28501,16 +28495,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                         .auto_shrink([false, false])
                         .max_height(160.0)
                         .show(ui, |ui| {
-                            for (i, name) in col_names.iter().enumerate() {
-                                let mut selected = tab.new_index_columns.contains(&i);
-                                if ui.checkbox(&mut selected, name).changed() {
-                                    if selected {
-                                        tab.new_index_columns.push(i);
-                                    } else {
-                                        tab.new_index_columns.retain(|&x| x != i);
-                                    }
-                                }
-                            }
+                            dialog_column_picker(ui, &col_names, &mut tab.new_index_columns);
                         });
                     // 列预览
                     ui.add_space(4.0);
@@ -28535,24 +28520,9 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                         ui.add_space(ui.available_width());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                            let (p_fill, p_stroke, p_text) = (
-                                dialog_palette.primary_button_bg,
-                                Stroke::new(1.0, dialog_palette.primary_button_stroke),
-                                dialog_palette.primary_button_text,
-                            );
-                            let (s_fill, s_stroke, s_text) = (
-                                dialog_palette.secondary_button_bg,
-                                Stroke::new(1.0, dialog_palette.secondary_button_stroke),
-                                dialog_palette.secondary_button_text,
-                            );
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new(tr!("确定")).size(fonts.base).color(p_text))
-                                        .fill(p_fill)
-                                        .stroke(p_stroke)
-                                        .corner_radius(corner_radius_lg),
-                                )
-                                .clicked()
+                            let ok_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_primary_style(colors, fonts.sm) };
+                            let cancel_style = ButtonStyle { min_width: 44.0, min_height: 26.0, ..mini_subtle_style(colors, fonts.sm) };
+                            if mini_button(ui, tr!("确定"), ok_style).clicked()
                                 && !tab.new_index_name.is_empty()
                                 && !tab.new_index_columns.is_empty()
                             {
@@ -28570,15 +28540,7 @@ fn render_add_index_dialog(ui: &mut egui::Ui, tab: &mut TableTabState, corner_ra
                                 });
                                 close_dialog = true;
                             }
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new(tr!("取消")).size(fonts.base).color(s_text))
-                                        .fill(s_fill)
-                                        .stroke(s_stroke)
-                                        .corner_radius(corner_radius_lg),
-                                )
-                                .clicked()
-                            {
+                            if mini_button(ui, tr!("取消"), cancel_style).clicked() {
                                 close_dialog = true;
                             }
                         });
@@ -29455,7 +29417,7 @@ fn render_indexes_view(ui: &mut egui::Ui, tab: &mut TableTabState, colors: &ui_t
 
     // 增加索引弹窗
     if tab.add_index_dialog_open {
-        render_add_index_dialog(ui, tab, palette.radius_lg, &palette.fonts, colors);
+        render_add_index_dialog(ui, tab, &palette.fonts, colors);
     }
 
     action
@@ -34076,6 +34038,74 @@ fn mini_button(ui: &mut egui::Ui, label: &str, style: ButtonStyle) -> egui::Resp
             .min_size(Vec2::new(style.min_width, style.min_height)),
     )
 }
+
+/// 弹窗表单的标签：固定宽度右对齐，让「索引名：」「类型：」「方法：」的冒号对齐
+fn dialog_form_label(ui: &mut egui::Ui, text: &str, width: f32) {
+    ui.add_sized(
+        [width, 0.0],
+        egui::Label::new(RichText::new(text).color(ui.visuals().weak_text_color()))
+            .halign(egui::Align::RIGHT),
+    );
+}
+
+/// 弹窗「选择列」整行点击列表：整行可点击、hover 显示背景，选中项左侧勾选标记
+fn dialog_column_picker(ui: &mut egui::Ui, names: &[String], selected: &mut Vec<usize>) {
+    let palette = mac_ui_palette_from_ui(ui);
+    let row_h = 24.0;
+    let mut to_remove: Option<usize> = None;
+    let mut to_add: Option<usize> = None;
+    for (i, name) in names.iter().enumerate() {
+        let is_sel = selected.contains(&i);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 4.0, palette.selection_bg.gamma_multiply(0.3));
+        }
+        // 勾选标记
+        if is_sel {
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(rect.left_top() + egui::vec2(2.0, 7.0), egui::vec2(11.0, 11.0)),
+                2.0,
+                palette.selection_bg,
+            );
+            ui.painter().text(
+                rect.left_center() + egui::vec2(2.0, 0.0),
+                Align2::LEFT_CENTER,
+                "✓",
+                FontId::new(palette.fonts.sm, FontFamily::Proportional),
+                palette.selection_text,
+            );
+        } else {
+            ui.painter().rect_stroke(
+                egui::Rect::from_min_size(rect.left_top() + egui::vec2(2.0, 7.0), egui::vec2(11.0, 11.0)),
+                2.0,
+                Stroke::new(1.0, palette.border),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // 列名文字
+        ui.painter().text(
+            rect.left_top() + egui::vec2(20.0, row_h / 2.0),
+            Align2::LEFT_CENTER,
+            name,
+            FontId::new(palette.fonts.base, FontFamily::Proportional),
+            palette.text,
+        );
+        if resp.clicked() {
+            if is_sel {
+                to_remove = Some(i);
+            } else {
+                to_add = Some(i);
+            }
+        }
+    }
+    if let Some(i) = to_remove {
+        selected.retain(|&x| x != i);
+    }
+    if let Some(i) = to_add {
+        selected.push(i);
+    }
+}
+
 
 struct TabButtonOutput {
     tab_response: egui::Response,
