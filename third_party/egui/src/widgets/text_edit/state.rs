@@ -7,7 +7,9 @@ use crate::{
     text_selection::{CCursorRange, TextCursorState},
 };
 
-pub type TextEditUndoer = crate::util::undoer::Undoer<(CCursorRange, String)>;
+// 撤销栈只记录文本，不记录光标/选区：光标是瞬态视图状态，
+// 撤销不应动它，纯选中/移动光标也不应产生撤销点。
+pub type TextEditUndoer = crate::util::undoer::Undoer<String>;
 
 /// The text edit state stored between frames.
 ///

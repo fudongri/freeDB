@@ -923,7 +923,7 @@ fn events(
     // so that the undoer creates automatic saves even when there are no events for a while.
     state.undoer.lock().feed_state(
         ui.input(|i| i.time),
-        &(cursor_range, text.as_str().to_owned()),
+        &text.as_str().to_owned(),
     );
 
     let copy_if_not_password = |ui: &Ui, text: String| {
@@ -1032,13 +1032,13 @@ fn events(
                 || (modifiers.matches_logically(Modifiers::SHIFT | Modifiers::COMMAND)
                     && *key == Key::Z) =>
             {
-                if let Some((redo_ccursor_range, redo_txt)) = state
+                if let Some(redo_txt) = state
                     .undoer
                     .lock()
-                    .redo(&(cursor_range, text.as_str().to_owned()))
+                    .redo(&text.as_str().to_owned())
                 {
                     text.replace_with(redo_txt);
-                    Some(*redo_ccursor_range)
+                    Some(CCursorRange::one(galley.clamp_cursor(&cursor_range.primary)))
                 } else {
                     None
                 }
@@ -1050,13 +1050,13 @@ fn events(
                 modifiers,
                 ..
             } if modifiers.matches_logically(Modifiers::COMMAND) => {
-                if let Some((undo_ccursor_range, undo_txt)) = state
+                if let Some(undo_txt) = state
                     .undoer
                     .lock()
-                    .undo(&(cursor_range, text.as_str().to_owned()))
+                    .undo(&text.as_str().to_owned())
                 {
                     text.replace_with(undo_txt);
-                    Some(*undo_ccursor_range)
+                    Some(CCursorRange::one(galley.clamp_cursor(&cursor_range.primary)))
                 } else {
                     None
                 }
@@ -1133,7 +1133,7 @@ fn events(
 
     state.undoer.lock().feed_state(
         ui.input(|i| i.time),
-        &(cursor_range, text.as_str().to_owned()),
+        &text.as_str().to_owned(),
     );
 
     (any_change, cursor_range)
