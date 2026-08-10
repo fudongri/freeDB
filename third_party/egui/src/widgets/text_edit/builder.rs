@@ -1131,6 +1131,15 @@ fn events(
 
     state.cursor.set_char_range(Some(cursor_range));
 
+    // A text mutation (delete/insert) ends the drag-to-select gesture: the stale
+    // `dragged` state must not re-extend the selection on a later frame while the
+    // pointer is still held (eg. mouse held down + press Delete). Without this, the
+    // folded caret re-selection from the pointer position, which now maps to text
+    // AFTER the deleted range, covering it.
+    if any_change && ui.ctx().is_being_dragged(id) {
+        ui.ctx().stop_dragging();
+    }
+
     state.undoer.lock().feed_state(
         ui.input(|i| i.time),
         &text.as_str().to_owned(),
