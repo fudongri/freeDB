@@ -163,7 +163,6 @@ pub struct DesktopApp {
     pending_routine_summary: Option<(String, Receiver<TableSummaryLoadResult>)>,
     pending_routine_definition: HashMap<String, Receiver<RoutineDefinitionLoadResult>>,
     pending_ddl_load: HashMap<String, Receiver<DdlLoadResult>>,
-    pending_processlist: Option<Receiver<ProcesslistLoadResult>>,
     pending_file_load: Option<Receiver<FileLoadResult>>,
     /// 异步查询历史刷新结果接收器（未选连接时加载全部历史）
     pending_query_history: Option<(String, Receiver<QueryHistoryLoadResult>)>,
@@ -501,18 +500,26 @@ struct SlowQueryTabState {
     aggregated_stats: Vec<slowlog_parser::FingerprintStats>,
     /// 原始日志条目
     raw_entries: Option<Vec<slowlog_parser::SlowQueryEntry>>,
-    /// SHOW PROCESSLIST 结果
-    process_list: Vec<core_domain::ProcessInfo>,
     /// 当前排序方式
     sort_by: slowlog_parser::SortBy,
+    /// 当前是否升序（表头点击排序时切换）
+    sort_ascending: bool,
+    /// 原始日志当前排序字段
+    raw_sort_key: Option<RawEntrySortKey>,
+    /// 原始日志当前是否升序
+    raw_sort_ascending: bool,
+    /// 原始日志排序后的行索引缓存（避免每帧全量排序）
+    raw_sorted_indices: Vec<usize>,
     /// 底部活动子面板
     active_bottom_tab: SlowQueryBottomTab,
     /// 当前选中的聚合行索引
     selected_agg_index: Option<usize>,
+    /// 执行语句预览浮层当前悬停的行索引
+    preview_agg_index: Option<usize>,
+    /// 执行语句预览浮层锚定单元格的屏幕矩形
+    preview_agg_cell_rect: Option<egui::Rect>,
     /// 错误消息
     error_message: Option<String>,
-    /// 是否正在加载 processlist
-    loading_processlist: bool,
     /// 已解析文件路径（用于显示）
     loaded_file_path: Option<String>,
     /// 是否正在加载文件
@@ -524,12 +531,16 @@ impl Default for SlowQueryTabState {
         Self {
             aggregated_stats: Vec::new(),
             raw_entries: None,
-            process_list: Vec::new(),
             sort_by: slowlog_parser::SortBy::TotalTime,
+            sort_ascending: false,
+            raw_sort_key: None,
+            raw_sort_ascending: false,
+            raw_sorted_indices: Vec::new(),
             active_bottom_tab: SlowQueryBottomTab::Aggregated,
             selected_agg_index: None,
+            preview_agg_index: None,
+            preview_agg_cell_rect: None,
             error_message: None,
-            loading_processlist: false,
             loaded_file_path: None,
             loading_file: false,
         }
@@ -540,21 +551,32 @@ impl Default for SlowQueryTabState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SlowQueryBottomTab {
     Aggregated,
-    ProcessList,
     RawEntries,
+}
+
+/// 原始日志条目排序字段
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RawEntrySortKey {
+    StatementType,
+    Timestamp,
+    QueryTime,
+    LockTime,
+    RowsSent,
+    RowsExamined,
+    Database,
+    User,
+    Host,
 }
 
 impl SlowQueryBottomTab {
     fn label(self) -> &'static str {
         match self {
             Self::Aggregated => tr!("聚合统计"),
-            Self::ProcessList => tr!("进程列表"),
             Self::RawEntries => tr!("原始日志条目"),
         }
     }
 }
 
-type ProcesslistLoadResult = Result<Vec<core_domain::ProcessInfo>, String>;
 type FileLoadResult = Result<(Vec<slowlog_parser::FingerprintStats>, Vec<slowlog_parser::SlowQueryEntry>, std::path::PathBuf), String>;
 /// 查询历史异步加载结果：connection_id + 历史列表
 type QueryHistoryLoadResult = (String, Vec<(String, String, chrono::DateTime<chrono::Utc>, u128, bool)>);
@@ -1929,7 +1951,6 @@ impl DesktopApp {
             pending_routine_summary: None,
             pending_routine_definition: HashMap::new(),
             pending_ddl_load: HashMap::new(),
-            pending_processlist: None,
             pending_file_load: None,
             pending_query_history: None,
             generate_data_receiver: None,
@@ -3268,20 +3289,6 @@ impl DesktopApp {
             self.pending_ddl_load.remove(&tab_id);
         }
 
-        // 轮询 SHOW PROCESSLIST 异步结果
-        if let Some(ref mut rx) = self.pending_processlist {
-            if let Ok(result) = rx.try_recv() {
-                self.pending_processlist = None;
-                if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get_mut(self.active_tab) {
-                    state.loading_processlist = false;
-                    match result {
-                        Ok(list) => state.process_list = list,
-                        Err(e) => state.error_message = Some(e),
-                    }
-                }
-            }
-        }
-
         // 轮询文件加载异步结果
         if let Some(ref mut rx) = self.pending_file_load {
             if let Ok(result) = rx.try_recv() {
@@ -3292,9 +3299,14 @@ impl DesktopApp {
                         Ok((stats, entries, path)) => {
                             state.aggregated_stats = stats;
                             state.raw_entries = Some(entries);
+                            state.raw_sort_key = None;
+                            state.raw_sort_ascending = false;
+                            state.raw_sorted_indices = Vec::new();
                             state.loaded_file_path = Some(path.display().to_string());
                             state.error_message = None;
                             state.selected_agg_index = None;
+                            state.preview_agg_index = None;
+                            state.preview_agg_cell_rect = None;
                         }
                         Err(e) => {
                             state.error_message = Some(e);
@@ -9288,26 +9300,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 if let Err(e) = self.services.update_tree_orders(&updates) {
                     self.status_message = tr!("保存排序失败: {}", e);
                 }
-            }
-            TabUiAction::RefreshProcesslist => {
-                let services = self.services.clone();
-                let handle = self.runtime.handle().clone();
-                let (sender, receiver) = mpsc::channel();
-                self.pending_processlist = Some(receiver);
-                if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get_mut(self.active_tab) {
-                    state.loading_processlist = true;
-                    state.active_bottom_tab = SlowQueryBottomTab::ProcessList;
-                    state.error_message = None;
-                }
-                let connection_id = self.selected_connection.clone();
-                handle.spawn(async move {
-                    let result = if let Some(cid) = connection_id {
-                        services.show_processlist(&cid).await.map_err(|e| e.to_string())
-                    } else {
-                        Err(tr!("未选择连接").to_string())
-                    };
-                    let _ = sender.send(result);
-                });
             }
             TabUiAction::LoadFile(path) => {
                 if let Some(WorkspaceTab::SlowQuery(state)) = self.tabs.get_mut(self.active_tab) {
@@ -19386,15 +19378,25 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn sort_by_label(sort: slowlog_parser::SortBy) -> &'static str {
-    match sort {
-        slowlog_parser::SortBy::Count => tr!("次数"),
-        slowlog_parser::SortBy::TotalTime => tr!("总耗时"),
-        slowlog_parser::SortBy::AvgTime => tr!("均耗时"),
-        slowlog_parser::SortBy::MaxTime => tr!("最大耗时"),
+/// 根据 SQL 首个关键字推断语句类型
+fn sql_statement_type(sql: &str) -> &'static str {
+    let first = sql.trim_start().chars().next().unwrap_or(' ');
+    if !first.is_ascii_alphabetic() {
+        return tr!("其他");
+    }
+    let upper = sql.trim_start().to_uppercase();
+    let kw = upper.split_whitespace().next().unwrap_or("");
+    match kw {
+        "SELECT" | "WITH" | "SHOW" | "EXPLAIN" | "DESCRIBE" | "DESC" | "PRAGMA" => tr!("查询"),
+        "INSERT" | "REPLACE" | "LOAD" => tr!("新增"),
+        "UPDATE" => tr!("更新"),
+        "DELETE" | "TRUNCATE" => tr!("删除"),
+        "CREATE" | "ALTER" | "DROP" | "RENAME" | "USE" | "SET" | "GRANT" | "REVOKE" | "LOCK" | "UNLOCK" | "ANALYZE" | "OPTIMIZE" | "FLUSH" | "COMMIT" | "ROLLBACK" | "BEGIN" | "START" => tr!("DDL/管理"),
+        _ => tr!("其他"),
     }
 }
 
+/// 测量文本按给定列宽换行后的行高（下限与普通行一致），让长 SQL 完整显示而不被截断
 fn render_slow_query_tab(
     ui: &mut egui::Ui,
     state: &mut SlowQueryTabState,
@@ -19415,51 +19417,16 @@ fn render_slow_query_tab(
                     ui.spinner();
                     ui.label(RichText::new(tr!("加载中...")).color(palette.weak_text));
                 } else if toolbar_button(ui, tr!("导入日志文件"), primary_button_style(&theme.colors, theme.fonts.md)).clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter(tr!("日志文件"), &["log", "txt", "slow"])
-                        .pick_file()
+                    if let Some(path) = rfd::FileDialog::new().pick_file()
                     {
                         action = TabUiAction::LoadFile(path);
                     }
                 }
 
-                // SHOW PROCESSLIST 按钮
-                if toolbar_button(ui, "SHOW PROCESSLIST", secondary_button_style(&theme.colors, theme.fonts.md)).clicked() {
-                    action = TabUiAction::RefreshProcesslist;
-                }
-
-                ui.separator();
-
-                // 排序下拉（与数据页筛选排序组件一致）
-                let sort_by_items: Vec<(&str, bool)> = vec![
-                    (tr!("次数"), state.sort_by == slowlog_parser::SortBy::Count),
-                    (tr!("总耗时"), state.sort_by == slowlog_parser::SortBy::TotalTime),
-                    (tr!("均耗时"), state.sort_by == slowlog_parser::SortBy::AvgTime),
-                    (tr!("最大耗时"), state.sort_by == slowlog_parser::SortBy::MaxTime),
-                ];
-                let old_sort = state.sort_by;
-                if let Some(sel) = toolbar_dropdown(
-                    ui,
-                    egui::Id::new("slow_query_sort_dropdown"),
-                    sort_by_label(state.sort_by),
-                    100.0,
-                    &sort_by_items,
-                ) {
-                    state.sort_by = match sel {
-                        0 => slowlog_parser::SortBy::Count,
-                        1 => slowlog_parser::SortBy::TotalTime,
-                        2 => slowlog_parser::SortBy::AvgTime,
-                        _ => slowlog_parser::SortBy::MaxTime,
-                    };
-                }
-                if state.sort_by != old_sort {
-                    slowlog_parser::sort_stats(&mut state.aggregated_stats, state.sort_by);
-                }
-
                 // 已加载文件路径显示
                 if let Some(ref path) = state.loaded_file_path {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(path.as_str()).small().color(palette.weak_text));
+                        ui.label(RichText::new(path.as_str()).size(palette.fonts.base).color(palette.weak_text));
                     });
                 }
             });
@@ -19480,7 +19447,7 @@ fn render_slow_query_tab(
         .corner_radius(palette.radius_sm)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                for tab in [SlowQueryBottomTab::Aggregated, SlowQueryBottomTab::RawEntries, SlowQueryBottomTab::ProcessList] {
+                for tab in [SlowQueryBottomTab::Aggregated, SlowQueryBottomTab::RawEntries] {
                     let selected = state.active_bottom_tab == tab;
                     if segment_button(ui, tab.label(), selected).clicked() {
                         state.active_bottom_tab = tab;
@@ -19497,9 +19464,6 @@ fn render_slow_query_tab(
         match state.active_bottom_tab {
             SlowQueryBottomTab::Aggregated => {
                 render_aggregated_tab(ui, state, &palette);
-            }
-            SlowQueryBottomTab::ProcessList => {
-                render_processlist_tab(ui, state, &palette);
             }
             SlowQueryBottomTab::RawEntries => {
                 render_raw_entries_tab(ui, state, &palette);
@@ -19518,53 +19482,180 @@ fn render_aggregated_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, palet
         return;
     }
 
-    let table = egui_extras::TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(egui_extras::Column::auto().at_least(60.0))
-        .column(egui_extras::Column::auto().at_least(80.0))
-        .column(egui_extras::Column::auto().at_least(70.0))
-        .column(egui_extras::Column::auto().at_least(70.0))
-        .column(egui_extras::Column::auto().at_least(80.0))
-        .column(egui_extras::Column::remainder().at_least(200.0));
+    let sortable_columns: &[(&str, Option<slowlog_parser::SortBy>)] = &[
+        (tr!("#"), None),
+        (tr!("执行语句"), None),
+        (tr!("语句类型"), None),
+        (tr!("sql执行次数"), Some(slowlog_parser::SortBy::Count)),
+        (tr!("平均执行时间(s)"), Some(slowlog_parser::SortBy::AvgTime)),
+        (tr!("平均等待锁的时间(s)"), Some(slowlog_parser::SortBy::AvgLockTime)),
+        (tr!("平均结果行统计数量"), Some(slowlog_parser::SortBy::AvgRowsSent)),
+        (tr!("平均扫描的行数量"), Some(slowlog_parser::SortBy::AvgRowsExamined)),
+        (tr!("所属数据库"), None),
+    ];
+    egui::ScrollArea::horizontal()
+        .id_salt("agg_hscroll")
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            let table = egui_extras::TableBuilder::new(ui)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .column(egui_extras::Column::auto().at_least(40.0))
+                .column(egui_extras::Column::remainder().at_least(240.0))
+                .column(egui_extras::Column::auto().at_least(70.0))
+                .column(egui_extras::Column::auto().at_least(80.0))
+                .column(egui_extras::Column::auto().at_least(90.0))
+                .column(egui_extras::Column::auto().at_least(110.0))
+                .column(egui_extras::Column::auto().at_least(100.0))
+                .column(egui_extras::Column::auto().at_least(100.0))
+                .column(egui_extras::Column::auto().at_least(120.0));
 
-    let header_labels = [tr!("次数"), tr!("总耗时(s)"), tr!("均耗时(s)"), tr!("最大耗时(s)"), tr!("扫描行数"), tr!("SQL 指纹")];
-    table.header(30.0, |mut header| {
-        for label in &header_labels {
-            header.col(|ui| {
-                let rect = ui.max_rect();
-                ui.painter().rect_filled(rect, 0.0, palette.card_bg);
-                ui.label(RichText::new(*label).size(palette.fonts.md).color(palette.text).strong());
+            table.header(30.0, |mut header| {
+                for &(label, sort_field) in sortable_columns {
+                    header.col(|ui| {
+                        let sort_state = sort_field.and_then(|f| {
+                            if state.sort_by == f {
+                                Some(!state.sort_ascending)
+                            } else {
+                                None
+                            }
+                        });
+                        let (choice, _, _, _) = table_header_cell(
+                            ui, palette, label, sort_field.is_some(), sort_state, false, false, None, false, false,
+                        );
+                        match choice {
+                            Some(TableHeaderSortChoice::Ascending) => {
+                                state.sort_by = sort_field.unwrap();
+                                state.sort_ascending = true;
+                                slowlog_parser::sort_stats_with_direction(&mut state.aggregated_stats, state.sort_by, true);
+                            }
+                            Some(TableHeaderSortChoice::Descending) => {
+                                state.sort_by = sort_field.unwrap();
+                                state.sort_ascending = false;
+                                slowlog_parser::sort_stats_with_direction(&mut state.aggregated_stats, state.sort_by, false);
+                            }
+                            Some(TableHeaderSortChoice::Clear) => {}
+                            None => {}
+                        }
+                    });
+                }
+            }).body(|body| {
+                let stats = &state.aggregated_stats;
+                // 与数据页一致：固定行高 + 虚拟化渲染，滚动条拖动时只布局可视区行
+                body.rows(28.0, stats.len(), |mut row| {
+                    let idx = row.index();
+                    let s = &stats[idx];
+                    let selected = state.selected_agg_index == Some(idx);
+                    row.set_selected(selected);
+
+                    row.col(|ui| { ui.label(RichText::new((idx + 1).to_string()).color(palette.weak_text)); });
+                    // 执行语句：SQL 指纹截断为单行，hover 弹出完整 SQL 预览浮层；
+                    // 浮层打开时关闭该行的 elided tooltip，避免与浮层重复
+                    let sql_oneline = s.fingerprint.replace('\n', " ");
+                    let (sql_cell_rect, sql_cell_resp) = row.col(|ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&sql_oneline).color(palette.text))
+                                .selectable(false)
+                                .show_tooltip_when_elided(state.preview_agg_index != Some(idx))
+                                .truncate(),
+                        );
+                    });
+                    if sql_cell_resp.hovered() {
+                        state.preview_agg_index = Some(idx);
+                        state.preview_agg_cell_rect = Some(sql_cell_rect);
+                    }
+                    row.col(|ui| { ui.label(RichText::new(sql_statement_type(&s.fingerprint)).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(s.count.to_string()).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(format!("{:.6}", s.avg_time)).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(format!("{:.6}", s.avg_lock_time)).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(format!("{:.1}", s.avg_rows_sent)).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(format!("{:.1}", s.avg_rows_examined)).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(s.database.as_deref().unwrap_or("-")).color(palette.text)); });
+
+                    if row.response().clicked() {
+                        state.selected_agg_index = if selected { None } else { Some(idx) };
+                    }
+                });
             });
-        }
-    }).body(|body| {
-        let stats = &state.aggregated_stats;
-        body.rows(28.0, stats.len(), |mut row| {
-            let idx = row.index();
-            let s = &stats[idx];
-            let selected = state.selected_agg_index == Some(idx);
-            row.set_selected(selected);
-
-            row.col(|ui| { ui.label(RichText::new(s.count.to_string()).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(format!("{:.3}", s.total_time)).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(format!("{:.3}", s.avg_time)).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(format!("{:.3}", s.max_time)).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(s.total_rows_examined.to_string()).color(palette.text)); });
-            row.col(|ui| {
-                let text = if s.fingerprint.len() > 120 {
-                    format!("{}…", &s.fingerprint[..120])
-                } else {
-                    s.fingerprint.clone()
-                };
-                ui.label(RichText::new(text).color(palette.text));
-            });
-
-            if row.response().clicked() {
-                state.selected_agg_index = if selected { None } else { Some(idx) };
-            }
         });
-    });
+
+    // 执行语句完整 SQL 预览浮层（样式参考数据页多行编辑弹窗，确认按钮改为复制）。
+    // hover 触发：鼠标停留在执行语句单元格或浮层本身上时保持显示，两者都移开后关闭。
+    if let (Some(idx), Some(cell_rect)) = (state.preview_agg_index, state.preview_agg_cell_rect) {
+        if let Some(s) = state.aggregated_stats.get(idx) {
+            let width = 460.0;
+            // 浮层锚定在单元格左下方
+            let pos = egui::pos2(
+                cell_rect.left(),
+                cell_rect.bottom(),
+            );
+            let area_resp = egui::Area::new(egui::Id::new("slowquery_sql_preview"))
+                .fixed_pos(pos)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    ui.set_min_width(width);
+                    egui::Frame::new()
+                        .fill(palette.workspace_bg)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .inner_margin(egui::Margin { left: 6, right: 0, top: 4, bottom: 4 })
+                        .rounding(4.0)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(200.0)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(&s.example_sql)
+                                            .size(palette.fonts.base)
+                                            .color(palette.text),
+                                    );
+                                });
+                            ui.horizontal(|ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // 右侧留出间距，避免按钮贴右边框
+                                    ui.add_space(8.0);
+                                    let copy_style = ButtonStyle {
+                                        fill: palette.primary_button_bg,
+                                        text: palette.primary_button_text,
+                                        stroke: Stroke::NONE,
+                                        font_size: palette.fonts.sm,
+                                        min_width: 0.0,
+                                        min_height: 22.0,
+                                        corner_radius: palette.radius_sm,
+                                    };
+                                    let cancel_style = ButtonStyle {
+                                        fill: Color32::TRANSPARENT,
+                                        text: palette.weak_text,
+                                        stroke: Stroke::NONE,
+                                        font_size: palette.fonts.sm,
+                                        min_width: 0.0,
+                                        min_height: 22.0,
+                                        corner_radius: palette.radius_sm,
+                                    };
+                                    if mini_button(ui, tr!("复制"), copy_style).clicked() {
+                                        ui.ctx().copy_text(s.example_sql.clone());
+                                        state.preview_agg_index = None;
+                                        state.preview_agg_cell_rect = None;
+                                    }
+                                    if mini_button(ui, tr!("取消"), cancel_style).clicked() {
+                                        state.preview_agg_index = None;
+                                        state.preview_agg_cell_rect = None;
+                                    }
+                                });
+                            });
+                        });
+                });
+            // hover 保持：鼠标仍停留在单元格或浮层上时保持显示，否则关闭
+            let editor_rect = area_resp.response.rect;
+            let pointer_pos = ui.ctx().pointer_latest_pos().unwrap_or(egui::Pos2::ZERO);
+            let pointer_inside = cell_rect.contains(pointer_pos) || editor_rect.contains(pointer_pos);
+            if !pointer_inside {
+                state.preview_agg_index = None;
+                state.preview_agg_cell_rect = None;
+            }
+        }
+    }
 
     // 展开详情
     if let Some(idx) = state.selected_agg_index {
@@ -19584,127 +19675,139 @@ fn render_aggregated_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, palet
     }
 }
 
-fn render_processlist_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, palette: &MacUiPalette) {
-    if state.loading_processlist {
+fn render_raw_entries_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, palette: &MacUiPalette) {
+    if state.raw_entries.as_ref().is_none_or(|e| e.is_empty()) {
         ui.centered_and_justified(|ui| {
-            ui.spinner();
-            ui.label(RichText::new(tr!("加载中...")).color(palette.weak_text));
+            ui.label(RichText::new(tr!("无日志数据，请先导入文件")).color(palette.weak_text));
         });
         return;
     }
 
-    if state.process_list.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.label(RichText::new(tr!("点击「SHOW PROCESSLIST」查看当前进程")).color(palette.weak_text));
+    ui.label(RichText::new(format!("{}: {}", tr!("共"), state.raw_entries.as_ref().unwrap().len())).color(palette.weak_text));
+
+    let sortable_columns: &[(&str, Option<RawEntrySortKey>)] = &[
+        (tr!("#"), None),
+        (tr!("执行语句"), None),
+        (tr!("语句类型"), Some(RawEntrySortKey::StatementType)),
+        (tr!("发生时间"), Some(RawEntrySortKey::Timestamp)),
+        (tr!("执行时间(s)"), Some(RawEntrySortKey::QueryTime)),
+        (tr!("等待锁时间"), Some(RawEntrySortKey::LockTime)),
+        (tr!("结果行数"), Some(RawEntrySortKey::RowsSent)),
+        (tr!("扫描行数"), Some(RawEntrySortKey::RowsExamined)),
+        (tr!("所属数据库"), Some(RawEntrySortKey::Database)),
+        (tr!("账号"), Some(RawEntrySortKey::User)),
+        (tr!("IP地址"), Some(RawEntrySortKey::Host)),
+    ];
+
+    egui::ScrollArea::horizontal()
+        .id_salt("raw_entries_hscroll")
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            let table = egui_extras::TableBuilder::new(ui)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .column(egui_extras::Column::auto().at_least(40.0))
+                .column(egui_extras::Column::remainder().at_least(240.0))
+                .column(egui_extras::Column::auto().at_least(64.0))
+                .column(egui_extras::Column::auto().at_least(150.0))
+                .column(egui_extras::Column::auto().at_least(70.0))
+                .column(egui_extras::Column::auto().at_least(70.0))
+                .column(egui_extras::Column::auto().at_least(64.0))
+                .column(egui_extras::Column::auto().at_least(64.0))
+                .column(egui_extras::Column::auto().at_least(100.0))
+                .column(egui_extras::Column::auto().at_least(80.0))
+                .column(egui_extras::Column::auto().at_least(120.0));
+
+            table.header(30.0, |mut header| {
+                for &(label, key) in sortable_columns {
+                    header.col(|ui| {
+                        let sort_state = key.and_then(|k| {
+                            if state.raw_sort_key == Some(k) {
+                                Some(!state.raw_sort_ascending)
+                            } else {
+                                None
+                            }
+                        });
+                        let (choice, _, _, _) = table_header_cell(
+                            ui, palette, label, key.is_some(), sort_state, false, false, None, false, false,
+                        );
+                        match choice {
+                            Some(TableHeaderSortChoice::Ascending) => {
+                                state.raw_sort_key = Some(key.unwrap());
+                                state.raw_sort_ascending = true;
+                                apply_raw_sort(state, key.unwrap(), true);
+                            }
+                            Some(TableHeaderSortChoice::Descending) => {
+                                state.raw_sort_key = Some(key.unwrap());
+                                state.raw_sort_ascending = false;
+                                apply_raw_sort(state, key.unwrap(), false);
+                            }
+                            _ => {}
+                        }
+                    });
+                }
+            }).body(|body| {
+                // 与数据页一致：固定行高 + 虚拟化渲染，滚动条拖动时只布局可视区行。
+                // SQL 截断为单行，Label::truncate 内置 tooltip 会在截断时显示完整文本。
+                let entries = state.raw_entries.as_ref().unwrap();
+                let sorted = &state.raw_sorted_indices;
+                body.rows(28.0, entries.len(), |mut row| {
+                    let row_idx = row.index();
+                    // 有排序时按排序后的行序取条目，未排序时退回自然顺序
+                    let idx = sorted.get(row_idx).copied().unwrap_or(row_idx);
+                    let e = &entries[idx];
+                    row.col(|ui| { ui.label(RichText::new((row_idx + 1).to_string()).color(palette.weak_text)); });
+                    let sql_oneline = e.sql.replace('\n', " ");
+                    row.col(|ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&sql_oneline).color(palette.text))
+                                .truncate(),
+                        );
+                    });
+                    row.col(|ui| { ui.label(RichText::new(sql_statement_type(&e.sql)).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(e.timestamp.as_deref().unwrap_or("-")).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(format!("{:.6}", e.query_time_secs)).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(format!("{:.6}", e.lock_time_secs)).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(e.rows_sent.to_string()).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(e.rows_examined.to_string()).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(e.database.as_deref().unwrap_or("-")).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(e.user.as_deref().unwrap_or("-")).color(palette.text)); });
+                    row.col(|ui| { ui.label(RichText::new(e.host.as_deref().unwrap_or("-")).color(palette.text)); });
+                });
+            });
         });
-        return;
-    }
-
-    let table = egui_extras::TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(egui_extras::Column::auto().at_least(50.0))
-        .column(egui_extras::Column::auto().at_least(70.0))
-        .column(egui_extras::Column::auto().at_least(100.0))
-        .column(egui_extras::Column::auto().at_least(80.0))
-        .column(egui_extras::Column::auto().at_least(70.0))
-        .column(egui_extras::Column::auto().at_least(50.0))
-        .column(egui_extras::Column::auto().at_least(80.0))
-        .column(egui_extras::Column::remainder().at_least(200.0));
-
-    let header_labels = ["ID", tr!("用户"), tr!("主机"), tr!("数据库"), tr!("命令"), tr!("时间(s)"), tr!("状态"), tr!("SQL")];
-    table.header(30.0, |mut header| {
-        for label in &header_labels {
-            header.col(|ui| {
-                let rect = ui.max_rect();
-                ui.painter().rect_filled(rect, 0.0, palette.card_bg);
-                ui.label(RichText::new(*label).size(palette.fonts.md).color(palette.text).strong());
-            });
-        }
-    }).body(|body| {
-        let processes = &state.process_list;
-        body.rows(28.0, processes.len(), |mut row| {
-            let idx = row.index();
-            let p = &processes[idx];
-            let is_slow = p.command != "Sleep" && p.time_secs > 10;
-
-            row.col(|ui| { ui.label(RichText::new(p.id.to_string()).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(&p.user).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(&p.host).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(p.db.as_deref().unwrap_or("-")).color(palette.text)); });
-            row.col(|ui| {
-                let color = if p.command == "Sleep" {
-                    palette.weak_text
-                } else if is_slow {
-                    palette.danger
-                } else {
-                    palette.success
-                };
-                ui.label(RichText::new(p.command.as_str()).color(color));
-            });
-            row.col(|ui| {
-                let color = if is_slow { palette.danger } else { palette.text };
-                ui.label(RichText::new(p.time_secs.to_string()).color(color));
-            });
-            row.col(|ui| { ui.label(RichText::new(p.state.as_deref().unwrap_or("-")).color(palette.text)); });
-            row.col(|ui| {
-                let sql = p.info.as_deref().unwrap_or("-");
-                let display = if sql.len() > 120 { format!("{}…", &sql[..120]) } else { sql.to_string() };
-                ui.label(RichText::new(display).color(palette.text));
-            });
-        });
-    });
 }
 
-fn render_raw_entries_tab(ui: &mut egui::Ui, state: &mut SlowQueryTabState, palette: &MacUiPalette) {
-    let entries = match &state.raw_entries {
-        Some(e) if !e.is_empty() => e,
-        _ => {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(tr!("无日志数据，请先导入文件")).color(palette.weak_text));
-            });
-            return;
-        }
-    };
-
-    ui.label(RichText::new(format!("{}: {}", tr!("共"), entries.len())).color(palette.weak_text));
-
-    let table = egui_extras::TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(egui_extras::Column::auto().at_least(140.0))
-        .column(egui_extras::Column::auto().at_least(60.0))
-        .column(egui_extras::Column::auto().at_least(70.0))
-        .column(egui_extras::Column::auto().at_least(60.0))
-        .column(egui_extras::Column::auto().at_least(70.0))
-        .column(egui_extras::Column::remainder().at_least(200.0));
-
-    let header_labels = [tr!("时间"), tr!("用户"), tr!("查询耗时(s)"), tr!("发送行"), tr!("扫描行"), tr!("SQL")];
-    table.header(30.0, |mut header| {
-        for label in &header_labels {
-            header.col(|ui| {
-                let rect = ui.max_rect();
-                ui.painter().rect_filled(rect, 0.0, palette.card_bg);
-                ui.label(RichText::new(*label).size(palette.fonts.md).color(palette.text).strong());
-            });
-        }
-    }).body(|body| {
-        body.rows(28.0, entries.len(), |mut row| {
-            let idx = row.index();
-            let e = &entries[idx];
-            row.col(|ui| { ui.label(RichText::new(e.timestamp.as_deref().unwrap_or("-")).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(e.user.as_deref().unwrap_or("-")).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(format!("{:.6}", e.query_time_secs)).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(e.rows_sent.to_string()).color(palette.text)); });
-            row.col(|ui| { ui.label(RichText::new(e.rows_examined.to_string()).color(palette.text)); });
-            row.col(|ui| {
-                let display = if e.sql.len() > 120 { format!("{}…", &e.sql[..120]) } else { e.sql.clone() };
-                ui.label(RichText::new(display).color(palette.text));
-            });
-        });
+/// 对原始日志条目按指定字段排序，结果写入 state.raw_sorted_indices（行索引数组）
+fn apply_raw_sort(state: &mut SlowQueryTabState, key: RawEntrySortKey, ascending: bool) {
+    let Some(entries) = &state.raw_entries else { return; };
+    let mut idxs: Vec<usize> = (0..entries.len()).collect();
+    idxs.sort_by(|&a, &b| {
+        let ord = cmp_raw_entry(&entries[a], &entries[b], key);
+        if ascending { ord } else { ord.reverse() }
     });
+    state.raw_sorted_indices = idxs;
+}
+
+/// 原始日志条目两两比较
+fn cmp_raw_entry(
+    a: &slowlog_parser::SlowQueryEntry,
+    b: &slowlog_parser::SlowQueryEntry,
+    key: RawEntrySortKey,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match key {
+        RawEntrySortKey::StatementType => sql_statement_type(&a.sql).cmp(&sql_statement_type(&b.sql)),
+        RawEntrySortKey::Timestamp => a.timestamp.cmp(&b.timestamp),
+        RawEntrySortKey::QueryTime => a.query_time_secs.partial_cmp(&b.query_time_secs).unwrap_or(Ordering::Equal),
+        RawEntrySortKey::LockTime => a.lock_time_secs.partial_cmp(&b.lock_time_secs).unwrap_or(Ordering::Equal),
+        RawEntrySortKey::RowsSent => a.rows_sent.cmp(&b.rows_sent),
+        RawEntrySortKey::RowsExamined => a.rows_examined.cmp(&b.rows_examined),
+        RawEntrySortKey::Database => a.database.cmp(&b.database),
+        RawEntrySortKey::User => a.user.cmp(&b.user),
+        RawEntrySortKey::Host => a.host.cmp(&b.host),
+    }
 }
 
 impl eframe::App for DesktopApp {
@@ -21236,7 +21339,6 @@ enum TabUiAction {
     MoveSavedQuery { id: String, target_connection_id: String, target_database: Option<String> },
     SaveSavedQueryTreeState(Vec<String>),
     SaveTreeOrder(Vec<(String, i32)>),
-    RefreshProcesslist,
     LoadFile(std::path::PathBuf),
     AiOptimize,
     AiExplain,
@@ -21297,18 +21399,6 @@ fn primary_button_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyl
         fill: c.primary_button_bg,
         text: c.primary_button_text,
         stroke: Stroke::new(1.0, c.primary_button_stroke),
-        font_size,
-        min_width: 0.0,
-        min_height: 26.0,
-        corner_radius: c.radius_md,
-    }
-}
-
-fn secondary_button_style(c: &ui_theme::ThemeColors, font_size: f32) -> ButtonStyle {
-    ButtonStyle {
-        fill: c.secondary_button_bg,
-        text: c.secondary_button_text,
-        stroke: Stroke::new(1.0, c.secondary_button_stroke),
         font_size,
         min_width: 0.0,
         min_height: 26.0,
