@@ -26369,8 +26369,21 @@ fn toggle_summary_selection(tab: &mut TableSummaryTabState, row_index: usize) {
 fn extend_summary_selection(tab: &mut TableSummaryTabState, row_index: usize) {
     let anchor = tab.selected_indices.iter().copied().max().unwrap_or(row_index);
     tab.selected_indices.clear();
-    for index in anchor.min(row_index)..=anchor.max(row_index) {
-        tab.selected_indices.insert(index);
+    // 范围选择只在当前筛选/排序后的可见行之间进行，
+    // 避免把中间被筛掉/隐藏的原始索引也纳入选区
+    let visible = &tab.cached_sorted_indices;
+    match (
+        visible.iter().position(|&i| i == anchor),
+        visible.iter().position(|&i| i == row_index),
+    ) {
+        (Some(a), Some(c)) => {
+            for &i in &visible[a.min(c)..=a.max(c)] {
+                tab.selected_indices.insert(i);
+            }
+        }
+        _ => {
+            tab.selected_indices.insert(row_index);
+        }
     }
 }
 
