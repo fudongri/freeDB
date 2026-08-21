@@ -27906,6 +27906,10 @@ fn generate_alter_table_sql(
         if col.on_update_current_timestamp {
             clause.push_str(" ON UPDATE CURRENT_TIMESTAMP");
         }
+        // MySQL: 列注释需随 ADD COLUMN 声明（放在 AFTER 之前）
+        if db_kind == DatabaseKind::MySql && !col.comment.is_empty() {
+            clause.push_str(&format!(" COMMENT '{}'", col.comment.replace('\'', "''")));
+        }
         // MySQL: 添加 AFTER 子句指定位置
         if db_kind == DatabaseKind::MySql {
             // 找到该列前面的第一个非删除列
@@ -27915,6 +27919,14 @@ fn generate_alter_table_sql(
             }
         }
         stmts.push(clause);
+        // Postgres: 新增列注释用独立的 COMMENT ON COLUMN
+        if db_kind == DatabaseKind::Postgres && !col.comment.is_empty() {
+            stmts.push(format!(
+                "COMMENT ON COLUMN {full_table}.{} IS '{}'",
+                q(&col.name),
+                col.comment.replace('\'', "''")
+            ));
+        }
     }
 
     // 删除字段
