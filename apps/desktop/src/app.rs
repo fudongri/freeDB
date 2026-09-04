@@ -15195,28 +15195,31 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             let prev_inactive_stroke = ui.style().visuals.widgets.inactive.bg_stroke;
                                                             ui.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
                                                             if clause.operator == TableFilterOperator::Custom {
-                                                                ui.add_sized(
+                                                                let value_resp = ui.add_sized(
                                                                     [360.0, 22.0],
                                                                     TextEdit::singleline(&mut clause.value)
                                                                         .hint_text(RichText::new(tr!("输入原始条件")).color(ui.visuals().weak_text_color())),
                                                                 );
+                                                                release_filter_input_focus(ui, &value_resp);
                                                             } else if clause.operator.uses_secondary_value() {
-                                                                ui.add_sized(
+                                                                let start_resp = ui.add_sized(
                                                                     [150.0, 22.0],
                                                                     TextEdit::singleline(&mut clause.value)
                                                                         .hint_text(RichText::new(tr!("起始值")).color(ui.visuals().weak_text_color())),
                                                                 );
+                                                                release_filter_input_focus(ui, &start_resp);
                                                                 ui.small(
                                                                     RichText::new(tr!("到"))
                                                                         .color(palette.weak_text),
                                                                 );
-                                                                ui.add_sized(
+                                                                let end_resp = ui.add_sized(
                                                                     [150.0, 22.0],
                                                                     TextEdit::singleline(
                                                                         &mut clause.second_value,
                                                                     )
                                                                     .hint_text(RichText::new(tr!("结束值")).color(ui.visuals().weak_text_color())),
                                                                 );
+                                                                release_filter_input_focus(ui, &end_resp);
                                                             } else if clause.operator.uses_primary_value() {
                                                                 let has_suggestions = clause.column.as_ref()
                                                                     .and_then(|col| tab.filter_value_suggestions.get(col))
@@ -15228,6 +15231,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     TextEdit::singleline(&mut clause.value)
                                                                         .hint_text(RichText::new(clause.operator.value_hint()).color(ui.visuals().weak_text_color())),
                                                                 );
+                                                                release_filter_input_focus(ui, &resp);
                                                                 if has_suggestions {
                                                                     // 点击输入框切换下拉
                                                                     if resp.clicked() {
@@ -19422,6 +19426,34 @@ fn sql_statement_type(sql: &str) -> &'static str {
         "DELETE" | "TRUNCATE" => tr!("删除"),
         "CREATE" | "ALTER" | "DROP" | "RENAME" | "USE" | "SET" | "GRANT" | "REVOKE" | "LOCK" | "UNLOCK" | "ANALYZE" | "OPTIMIZE" | "FLUSH" | "COMMIT" | "ROLLBACK" | "BEGIN" | "START" => tr!("DDL/管理"),
         _ => tr!("其他"),
+    }
+}
+
+/// 搜索/筛选输入框的原生失焦行为。
+///
+/// 应用全局把 `surrender_focus_on` 设为 `Never`（保护编辑器选区），
+/// 因此点击输入框外部不会自动交出键盘焦点，选中文字会一直蓝着。
+/// 本函数针对搜索/筛选类输入框补回原生语义：
+/// 1. 本帧有点击且落在输入框外 → 主动交出键盘焦点；
+/// 2. 失焦时清空残留的文本选区（egui 失焦后仍会继续绘制选中高亮）。
+/// 光标位置由再次点击/键入时重新建立。
+fn release_filter_input_focus(ui: &egui::Ui, response: &egui::Response) {
+    if response.has_focus() {
+        let clicked_elsewhere =
+            ui.input(|i| i.pointer.any_click()) && !response.hovered();
+        if clicked_elsewhere {
+            response.surrender_focus();
+        }
+    }
+    if response.lost_focus() {
+        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+            let has_selection = state.cursor.char_range().is_some_and(|r| !r.is_empty());
+            if has_selection {
+                state.cursor.set_char_range(None);
+                state.store(ui.ctx(), response.id);
+                ui.ctx().request_repaint();
+            }
+        }
     }
 }
 
@@ -38117,5 +38149,113 @@ mod tests {
         assert_eq!(uk.kind, "UNIQUE");
         assert!(uk.unique);
         assert_eq!(uk.method, "BTREE");
+    }
+
+    // ── 筛选输入框"点别处后文字仍蓝着"的复现与修复验证 ──
+    // 应用全局把 surrender_focus_on 设为 Never（只有明确请求才交焦点），
+    // 所以必须在此用与真实应用一致的策略模拟：第 1 帧点击输入框聚焦并注入
+    // 全选选区；第 2 帧点击远处空白，观察焦点与选区是否变化。
+
+    /// 返回 (点击外部后是否仍持有焦点, 是否仍残留非空选区)
+    fn simulate_filter_box_outside_click(apply_helper: bool) -> (bool, bool) {
+        let ctx = egui::Context::default();
+        ctx.memory_mut(|mem| {
+            mem.options.input_options.surrender_focus_on = egui::SurrenderFocusOn::Never;
+        });
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let id = egui::Id::new("filter-box-blur-test");
+        let mut text = "abc".to_owned();
+
+        let click = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let raw = |time: f64, events: Vec<egui::Event>| egui::RawInput {
+            time: Some(time),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let draw = |ctx: &egui::Context, text: &mut String| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let resp = ui.add_sized(
+                    [200.0, 22.0],
+                    egui::TextEdit::singleline(text).id(id).hint_text(""),
+                );
+                resp.request_focus();
+                resp
+            })
+        };
+
+        // 第 1 帧：点击输入框，请求聚焦
+        let field_center = egui::pos2(100.0, 19.0);
+        ctx.run(
+            raw(
+                1.0,
+                vec![
+                    egui::Event::PointerMoved(field_center),
+                    click(field_center, true),
+                    click(field_center, false),
+                ],
+            ),
+            |ctx| {
+                draw(ctx, &mut text);
+            },
+        );
+        // 注入"全选"选区（模拟用户选中框中全部文字）
+        {
+            let mut st = egui::TextEdit::load_state(&ctx, id).expect("聚焦后应有 TextEdit 状态");
+            st.cursor.set_char_range(Some(two(0, 3)));
+            st.store(&ctx, id);
+        }
+        // 第 2 帧：点击远处空白（Never 策略下默认不会交出焦点）
+        let away = egui::pos2(600.0, 400.0);
+        ctx.run(
+            raw(
+                2.0,
+                vec![
+                    egui::Event::PointerMoved(away),
+                    click(away, true),
+                    click(away, false),
+                ],
+            ),
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let resp = ui.add_sized(
+                        [200.0, 22.0],
+                        egui::TextEdit::singleline(&mut text).id(id).hint_text(""),
+                    );
+                    if apply_helper {
+                        release_filter_input_focus(ui, &resp);
+                    }
+                });
+            },
+        );
+        let still_focused = ctx.memory(|m| m.has_focus(id));
+        let selection_lingers = egui::TextEdit::load_state(&ctx, id)
+            .map(|s| s.cursor.char_range().is_some_and(|r| !r.is_empty()))
+            .unwrap_or(false);
+        (still_focused, selection_lingers)
+    }
+
+    #[test]
+    fn filter_box_keeps_focus_and_selection_on_outside_click_without_helper() {
+        // 对照组：复现 bug —— Never 策略下点外部既不交焦点也不丢选区
+        let (still_focused, lingers) = simulate_filter_box_outside_click(false);
+        assert!(still_focused, "对照组：点击外部后应仍持有焦点（复现现状）");
+        assert!(lingers, "对照组：点击外部后应仍残留选区（复现现状）");
+    }
+
+    #[test]
+    fn filter_box_releases_focus_and_selection_on_outside_click_with_helper() {
+        // 修复组：release_filter_input_focus 主动交出焦点并清空选区状态
+        let (still_focused, lingers) = simulate_filter_box_outside_click(true);
+        assert!(!still_focused, "点击外部后输入框应交出焦点");
+        assert!(!lingers, "点击外部后不再残留选区高亮");
     }
 }
