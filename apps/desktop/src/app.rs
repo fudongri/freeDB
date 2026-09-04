@@ -931,6 +931,8 @@ struct QueryTabState {
     >,
     /// AI 对话输入框内容
     ai_input: String,
+    /// 处于“文本选择”模式的 AI 消息行号（该条正文改为可框选/⌘A 的纯文本视图）
+    ai_text_select_rows: BTreeSet<usize>,
     /// Markdown 渲染缓存
     md_cache: CommonMarkCache,
 }
@@ -1004,6 +1006,7 @@ impl Clone for QueryTabState {
             history_loading: self.history_loading,
             ai_done_rx: None,
             ai_input: self.ai_input.clone(),
+            ai_text_select_rows: self.ai_text_select_rows.clone(),
             md_cache: CommonMarkCache::default(),
         }
     }
@@ -8752,6 +8755,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         if tab.ai_conversation.len() > MAX_AI_CONVERSATION_LEN {
             let drain_count = tab.ai_conversation.len() - MAX_AI_CONVERSATION_LEN;
             tab.ai_conversation.drain(..drain_count);
+            tab.ai_text_select_rows.clear();
         }
 
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -11746,6 +11750,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         );
                                                     });
                                                 }
+                                                // 收集本帧内点击“选择文本/返回渲染视图”的行号，
+                                                // 消息循环结束后统一应用，避免迭代期对 tab 的可变借用冲突
+                                                let mut ai_toggle_rows: Vec<usize> = Vec::new();
                                                 for (row_idx, msg) in tab.ai_conversation.iter().enumerate() {
                                                     let is_user = matches!(msg.role, AiRole::User);
                                                     let (prefix, prefix_color) = match msg.role {
@@ -11767,31 +11774,87 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     .color(prefix_color),
                                                             );
                                                             ui.add_space(2.0);
-                                                            // 禁用 noninteractive 边框，避免 egui_commonmark 表格渲染红框
-                                                            let prev_stroke = ui.style().visuals.widgets.noninteractive.bg_stroke;
-                                                            ui.style_mut().visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
-                                                            CommonMarkViewer::new().show(ui, &mut tab.md_cache, &msg.content);
-                                                            ui.style_mut().visuals.widgets.noninteractive.bg_stroke = prev_stroke;
-                                                            // AI 回复下方提供复制按钮，复制原始 Markdown 内容
+                                                            // 该条消息是否处于“文本选择”模式
+                                                            let raw_select = matches!(msg.role, AiRole::Assistant)
+                                                                && tab.ai_text_select_rows.contains(&row_idx);
+                                                            if raw_select {
+                                                                // 可框选/⌘A 的纯文本视图：绑定每帧重建的本地副本，
+                                                                // 实际内容不会被编辑（等效只读），支持拖选与 ⌘A 全选
+                                                                let mut raw_text = msg.content.clone();
+                                                                ui.add(
+                                                                    egui::TextEdit::multiline(&mut raw_text)
+                                                                        .desired_width(ui.available_width())
+                                                                        .frame(false)
+                                                                        .text_color(chrome.text),
+                                                                );
+                                                                ui.small(
+                                                                    RichText::new(tr!("拖选或 ⌘A 全选后复制"))
+                                                                        .color(chrome.weak_text),
+                                                                );
+                                                            } else {
+                                                                // 横向滚动容器：正文（含宽表格/代码块）只占面板宽，
+                                                                // 超宽内容在该消息内出现横向滚动条，不顶破面板
+                                                                egui::ScrollArea::horizontal()
+                                                                    .id_salt(("ai_md_hscroll", row_idx))
+                                                                    .auto_shrink([false, true])
+                                                                    .show(ui, |ui| {
+                                                                        // 每条消息的 markdown 套唯一命名空间：
+                                                                        // egui_commonmark 表格用 egui::Grid（auto id 含父 ui id），
+                                                                        // 不隔离时同帧其它表格/控件可能撞 ID（红色 “Second use of Grid ID” 警告）
+                                                                        ui.push_id(("ai_chat_md", row_idx), |ui| {
+                                                                            CommonMarkViewer::new().show(ui, &mut tab.md_cache, &msg.content);
+                                                                        });
+                                                                    });
+                                                            }
+                                                            // AI 回复下方提供“选择文本”切换与复制按钮
                                                             if matches!(msg.role, AiRole::Assistant) {
                                                                 ui.add_space(2.0);
                                                                 ui.horizontal(|ui| {
-                                                                    ui.add_space(ui.available_width() - 60.0);
-                                                                    let copy_btn = mini_button(
-                                                                        ui,
-                                                                        tr!("📋 复制"),
-                                                                        mini_borderless_style(colors, chrome.fonts.sm, chrome.weak_text),
+                                                                    ui.with_layout(
+                                                                        egui::Layout::right_to_left(egui::Align::Center),
+                                                                        |ui| {
+                                                                            let copy_btn = mini_button(
+                                                                                ui,
+                                                                                tr!("📋 复制"),
+                                                                                mini_borderless_style(colors, chrome.fonts.sm, chrome.weak_text),
+                                                                            );
+                                                                            if copy_btn.clicked() {
+                                                                                ui.ctx().copy_text(msg.content.clone());
+                                                                                show_copied_tooltip(ui, copy_btn.rect.center());
+                                                                            }
+                                                                            if copy_btn.hovered() {
+                                                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                                            }
+                                                                            let toggle_label = if raw_select {
+                                                                                tr!("返回渲染视图")
+                                                                            } else {
+                                                                                tr!("选择文本")
+                                                                            };
+                                                                            let toggle_btn = mini_button(
+                                                                                ui,
+                                                                                toggle_label,
+                                                                                mini_borderless_style(colors, chrome.fonts.sm, chrome.weak_text),
+                                                                            );
+                                                                            // 切换延迟到循环结束后统一应用（避免迭代期可变借用）
+                                                                            if toggle_btn.clicked() {
+                                                                                ai_toggle_rows.push(row_idx);
+                                                                            }
+                                                                            if toggle_btn.hovered() {
+                                                                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                                            }
+                                                                        },
                                                                     );
-                                                                    if copy_btn.clicked() {
-                                                                        ui.ctx().copy_text(msg.content.clone());
-                                                                        show_copied_tooltip(ui, copy_btn.rect.center());
-                                                                    }
-                                                                    if copy_btn.hovered() {
-                                                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                                                    }
                                                                 });
                                                             }
                                                         });
+                                                }
+                                                // 统一应用本帧的“文本选择/返回渲染”切换
+                                                for toggled in ai_toggle_rows.drain(..) {
+                                                    if tab.ai_text_select_rows.contains(&toggled) {
+                                                        tab.ai_text_select_rows.remove(&toggled);
+                                                    } else {
+                                                        tab.ai_text_select_rows.insert(toggled);
+                                                    }
                                                 }
                                                 if tab.ai_is_streaming {
                                                     ui.label(
@@ -11865,6 +11928,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     if user_input.trim() == "/clear" {
                                                         tab.ai_conversation.clear();
                                                         tab.ai_streaming_text.clear();
+                                                        tab.ai_text_select_rows.clear();
                                                     } else {
                                                         tab.ai_conversation.push(AiMessage {
                                                         role: AiRole::User,
@@ -11879,6 +11943,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     if tab.ai_conversation.len() > MAX_AI_CONVERSATION_LEN {
                                                         let drain_count = tab.ai_conversation.len() - MAX_AI_CONVERSATION_LEN;
                                                         tab.ai_conversation.drain(..drain_count);
+                                                        tab.ai_text_select_rows.clear();
                                                     }
                                                     tab.ai_streaming_text.clear();
 
@@ -21218,6 +21283,7 @@ impl QueryTabState {
             history_loading: false,
             ai_done_rx: None,
             ai_input: String::new(),
+            ai_text_select_rows: BTreeSet::new(),
             md_cache: CommonMarkCache::default(),
         }
     }
