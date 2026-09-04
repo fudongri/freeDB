@@ -31439,22 +31439,13 @@ fn ensure_table_filter_column(filter: &mut TableFilterState, columns: &[String])
     if filter.clauses.is_empty() {
         filter.clauses.push(TableFilterClause::default());
     }
-    if columns.is_empty() {
-        for clause in &mut filter.clauses {
-            clause.column = None;
-        }
-        return;
-    }
-
+    // 只给尚未选择列的子句填充默认列；用户已选的列名即使当前不在可用列中
+    // （如 MongoDB 集合被清空重建、字段已不存在），也原样保留，
+    // 避免筛选被静默改写成第一列 _id。
     for clause in &mut filter.clauses {
-        if clause
-            .column
-            .as_ref()
-            .is_some_and(|column| columns.iter().any(|item| item == column))
-        {
-            continue;
+        if clause.column.is_none() {
+            clause.column = columns.first().cloned();
         }
-        clause.column = columns.first().cloned();
     }
 }
 
