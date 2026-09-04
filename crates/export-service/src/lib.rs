@@ -51,10 +51,10 @@ impl ExportService {
                 match row.get(col_name) {
                     Some(val) => {
                         let text = val.display_text();
-                        // 尝试解析数字
+                        // 尝试解析数字；长整型无法无损写入 f64 时回退为文本，保留精度
                         if val.is_null() {
                             worksheet.write_string(r, col as u16, "")?;
-                        } else if let Ok(n) = text.parse::<f64>() {
+                        } else if let Some(n) = xlsx_lossless_number(text) {
                             worksheet.write_number(r, col as u16, n)?;
                         } else {
                             worksheet.write_string(r, col as u16, text)?;
@@ -146,5 +146,53 @@ fn mongo_export_literal(value: &QueryCellValue, mongo_type: Option<MongoValue>) 
                 }
             }
         }
+    }
+}
+
+/// 解析为可无损写入 Excel 数字单元格的 f64；无法无损表示时返回 None，
+/// 由调用方回退为文本原样写入以保留精度。
+///
+/// Excel 数字单元格本质是 f64（53 位尾数），超出 2^53 的长整型（如 BIGINT /
+/// MongoDB Int64 的 19 位值）直接解析为 f64 会丢失低位精度，
+/// 因此仅在整数经 f64 往返后可还原时才按数字写入。
+fn xlsx_lossless_number(text: &str) -> Option<f64> {
+    // 含小数点或指数的按数字写入（非长整型场景，如小数、科学计数法）
+    if text.contains(['.', 'e', 'E']) {
+        return text.parse().ok();
+    }
+    let number: f64 = text.parse().ok()?;
+    text.parse::<i128>()
+        .map(|integer| integer == number as i128)
+        .unwrap_or(false)
+        .then_some(number)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::xlsx_lossless_number;
+
+    #[test]
+    fn xlsx_long_integer_preserves_precision() {
+        // 2^53 + 1：超出 f64 可无损表示范围，必须回退为文本
+        assert_eq!(xlsx_lossless_number("9007199254740993"), None);
+        // i64::MAX 同理
+        assert_eq!(xlsx_lossless_number("9223372036854775807"), None);
+        // MongoDB 典型 ObjectId 时间戳/自增 long 也超出范围
+        assert_eq!(xlsx_lossless_number("92233720368547758070"), None);
+    }
+
+    #[test]
+    fn xlsx_small_integer_and_decimal_stay_numeric() {
+        assert_eq!(xlsx_lossless_number("42"), Some(42.0));
+        assert_eq!(xlsx_lossless_number("-123"), Some(-123.0));
+        assert_eq!(xlsx_lossless_number("0"), Some(0.0));
+        // 2^53 本身可精确表示
+        assert_eq!(xlsx_lossless_number("9007199254740992"), Some(9007199254740992.0));
+        // 小数 / 科学计数法维持数字写入
+        assert_eq!(xlsx_lossless_number("3.14"), Some(3.14));
+        assert_eq!(xlsx_lossless_number("1e10"), Some(1e10));
+        // 非数字
+        assert_eq!(xlsx_lossless_number("abc"), None);
+        assert_eq!(xlsx_lossless_number(""), None);
     }
 }
