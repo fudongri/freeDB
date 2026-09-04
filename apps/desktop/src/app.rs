@@ -8523,7 +8523,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
     }
 
-    fn execute_ai_action(&mut self, action: ai_service::prompt::AiAction) {
+    fn execute_ai_action(&mut self, action: ai_service::prompt::AiAction, sql_override: Option<String>) {
         // 阶段一：收集所需数据（读取 self，不保持借用）
         let config = match self.ai_model_store.active() {
             Some(c) => c.clone(),
@@ -8560,10 +8560,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             _ => String::new(),
         };
 
-        // 阶段二：构造提示词（不再持有 tab 引用）
+        // 阶段二：构造提示词（不再持有 tab 引用）。
+        // 优化/解释作用于 sql_override（右键"当前语句"）；未提供时退回整段 SQL
+        let ai_subject = sql_override.unwrap_or(sql);
         let user_prompt = match action {
-            ai_service::prompt::AiAction::Optimize => ai_service::prompt::optimize_prompt(&sql),
-            ai_service::prompt::AiAction::Explain => ai_service::prompt::explain_prompt(&sql),
+            ai_service::prompt::AiAction::Optimize => ai_service::prompt::optimize_prompt(&ai_subject),
+            ai_service::prompt::AiAction::Explain => ai_service::prompt::explain_prompt(&ai_subject),
             ai_service::prompt::AiAction::DataQuality | ai_service::prompt::AiAction::DataAnalysis => {
                 if data_sample.is_empty() {
                     if let Some(WorkspaceTab::Query(t)) = self.tabs.get_mut(self.active_tab) {
@@ -9332,10 +9334,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     let _ = sender.send(result);
                 });
             }
-            TabUiAction::AiOptimize => self.execute_ai_action(ai_service::prompt::AiAction::Optimize),
-            TabUiAction::AiExplain => self.execute_ai_action(ai_service::prompt::AiAction::Explain),
-            TabUiAction::AiDataQuality => self.execute_ai_action(ai_service::prompt::AiAction::DataQuality),
-            TabUiAction::AiDataAnalysis => self.execute_ai_action(ai_service::prompt::AiAction::DataAnalysis),
+            TabUiAction::AiOptimizeStatement(sql) => self.execute_ai_action(ai_service::prompt::AiAction::Optimize, Some(sql)),
+            TabUiAction::AiExplainStatement(sql) => self.execute_ai_action(ai_service::prompt::AiAction::Explain, Some(sql)),
+            TabUiAction::AiDataQuality => self.execute_ai_action(ai_service::prompt::AiAction::DataQuality, None),
+            TabUiAction::AiDataAnalysis => self.execute_ai_action(ai_service::prompt::AiAction::DataAnalysis, None),
             TabUiAction::SwitchAiModel(index) => {
                 self.ai_model_store.set_active(index);
                 let _ = self.services.save_ui_state("ai_model_store", &self.ai_model_store.to_json());
@@ -10904,8 +10906,6 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 // AI 助手下拉按钮
                                 let ai_items: Vec<&str> = vec![
                                     tr!("AI 助手面板"),
-                                    tr!("优化语句"),
-                                    tr!("解释语句"),
                                     tr!("数据质量检查"),
                                     tr!("数据分析"),
                                     tr!("AI 设置..."),
@@ -10985,10 +10985,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     if response.clicked() {
                                                         action = match i {
                                                             0 => TabUiAction::OpenAiChat,
-                                                            1 => TabUiAction::AiOptimize,
-                                                            2 => TabUiAction::AiExplain,
-                                                            3 => TabUiAction::AiDataQuality,
-                                                            4 => TabUiAction::AiDataAnalysis,
+                                                            1 => TabUiAction::AiDataQuality,
+                                                            2 => TabUiAction::AiDataAnalysis,
                                                             _ => TabUiAction::OpenAiSettings,
                                                         };
                                                         ui.data_mut(|d| d.insert_temp(ai_menu_id, false));
@@ -21466,8 +21464,8 @@ enum TabUiAction {
     SaveSavedQueryTreeState(Vec<String>),
     SaveTreeOrder(Vec<(String, i32)>),
     LoadFile(std::path::PathBuf),
-    AiOptimize,
-    AiExplain,
+    AiOptimizeStatement(String),
+    AiExplainStatement(String),
     AiDataQuality,
     AiDataAnalysis,
     SwitchAiModel(usize),
@@ -36676,9 +36674,22 @@ fn render_query_editor(
                                     ctx_menu_style(ui);
                                     let has_selection = tab.cursor_range
                                         .is_some_and(|r| !r.is_empty());
-                                    let can_execute = has_selection && !is_executing;
                                     let chrome = mac_ui_palette_from_ui(ui);
                                     let font_id = FontId::new(fonts.xl, FontFamily::Proportional);
+                                    // 光标所在语句（以分号为界）：“当前语句”系列共用同一判定
+                                    let stmt_at_cursor = find_statement_at_cursor(&tab.sql, tab.cursor_range);
+
+                                    // 1) 执行当前语句（置顶）
+                                    if let Some(stmt) = &stmt_at_cursor {
+                                        let mut stmt_job = egui::text::LayoutJob::default();
+                                        stmt_job.append(tr!("▶ 执行当前语句"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
+                                        if ui.add_enabled(!is_executing, egui::Button::new(stmt_job)).clicked() {
+                                            *action = TabUiAction::ExecuteQuery(ExecuteMode::Explicit(stmt.clone()));
+                                            ui.close();
+                                        }
+                                    }
+                                    // 2) 执行选中语句
+                                    let can_execute = has_selection && !is_executing;
                                     let mut job = egui::text::LayoutJob::default();
                                     job.append(tr!("▶ 执行选中语句"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
                                     job.append(&format!("    {}+R", MOD_KEY), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.weak_text, ..Default::default() });
@@ -36688,27 +36699,25 @@ fn render_query_editor(
                                         *action = TabUiAction::ExecuteQuery(ExecuteMode::Selection(selected));
                                         ui.close();
                                     }
-                                    // EXPLAIN 右键菜单项
-                                    let can_explain = !is_executing && (!tab.sql.trim().is_empty());
-                                    let mut explain_job = egui::text::LayoutJob::default();
-                                    explain_job.append(tr!("🔍 EXPLAIN 执行计划"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
-                                    explain_job.append(&format!("    {}+E", MOD_KEY), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.weak_text, ..Default::default() });
-                                    if ui.add_enabled(can_explain, egui::Button::new(explain_job)).clicked() {
-                                        let selected = tab.cursor_range
-                                            .and_then(|r| if !r.is_empty() { Some(r.slice_str(&tab.sql).to_string()) } else { None });
-                                        // 未选中 SQL 时执行全部
-                                        *action = TabUiAction::ExplainQuery(match selected {
-                                            Some(s) if !s.trim().is_empty() => ExecuteMode::Selection(Some(s)),
-                                            _ => ExecuteMode::Whole,
-                                        });
-                                        ui.close();
-                                    }
-                                    // 执行当前语句（光标所在语句，以分号为界）
-                                    if let Some(stmt) = find_statement_at_cursor(&tab.sql, tab.cursor_range) {
-                                        let mut stmt_job = egui::text::LayoutJob::default();
-                                        stmt_job.append(tr!("▶ 执行当前语句"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
-                                        if ui.add_enabled(!is_executing, egui::Button::new(stmt_job)).clicked() {
-                                            *action = TabUiAction::ExecuteQuery(ExecuteMode::Explicit(stmt));
+                                    // 3) 当前语句执行计划：EXPLAIN 光标所在语句（与执行当前语句取同一段）
+                                    if let Some(stmt) = &stmt_at_cursor {
+                                        let mut explain_job = egui::text::LayoutJob::default();
+                                        explain_job.append(tr!("🔍 当前语句执行计划"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
+                                        if ui.add_enabled(!is_executing, egui::Button::new(explain_job)).clicked() {
+                                            *action = TabUiAction::ExplainQuery(ExecuteMode::Selection(Some(stmt.clone())));
+                                            ui.close();
+                                        }
+                                        // 4) AI：优化/解释当前语句
+                                        let mut opt_job = egui::text::LayoutJob::default();
+                                        opt_job.append(tr!("✨ 优化当前语句（AI）"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
+                                        if ui.add_enabled(!is_executing, egui::Button::new(opt_job)).clicked() {
+                                            *action = TabUiAction::AiOptimizeStatement(stmt.clone());
+                                            ui.close();
+                                        }
+                                        let mut explain_ai_job = egui::text::LayoutJob::default();
+                                        explain_ai_job.append(tr!("💡 解释当前语句（AI）"), 0.0, TextFormat { font_id: font_id.clone(), color: chrome.text, ..Default::default() });
+                                        if ui.add_enabled(!is_executing, egui::Button::new(explain_ai_job)).clicked() {
+                                            *action = TabUiAction::AiExplainStatement(stmt.clone());
                                             ui.close();
                                         }
                                     }
