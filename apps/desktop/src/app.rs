@@ -22893,20 +22893,31 @@ fn render_result_table(
                                             if *cell_selection_current == Some((index, col_idx)) {
                                                 if let (Some((ar, ac)), Some((cr, cc))) = (*cell_selection_anchor, *cell_selection_current) {
                                                     if ar == cr && ac == cc {
-                                                        // 纯点击（未拖拽）：选中整行，行为与行号列一致
-                                                        let modifiers = ui.ctx().input(|input| input.modifiers);
-                                                        if modifiers.shift {
-                                                            extend_query_selection(selected_rows, selected_row, selection_anchor, index);
-                                                        } else if modifiers.ctrl || modifiers.command {
-                                                            toggle_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                                        if response.clicked() {
+                                                            // 真正的单击（按下后几乎未移动）：选中整行，行为与行号列一致
+                                                            let modifiers = ui.ctx().input(|input| input.modifiers);
+                                                            if modifiers.shift {
+                                                                extend_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                                            } else if modifiers.ctrl || modifiers.command {
+                                                                toggle_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                                            } else {
+                                                                set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                                            }
+                                                            selected_columns.clear();
+                                                            *column_selection_anchor = None;
+                                                            *cell_selection_anchor = None;
+                                                            *cell_selection_current = None;
+                                                            ui.ctx().request_repaint();
                                                         } else {
-                                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                                            // 按下后明显移动但未离开锚点格（同格拖拽 / 拖出又收回）：
+                                                            // 视为拖拽框选 → 保留 1×1 矩形选区，清除行/列选中
+                                                            *selected_row = None;
+                                                            selected_rows.clear();
+                                                            *selection_anchor = None;
+                                                            selected_columns.clear();
+                                                            *column_selection_anchor = None;
+                                                            ui.ctx().request_repaint();
                                                         }
-                                                        selected_columns.clear();
-                                                        *column_selection_anchor = None;
-                                                        *cell_selection_anchor = None;
-                                                        *cell_selection_current = None;
-                                                        ui.ctx().request_repaint();
                                                     }
                                                 }
                                             }
@@ -23744,12 +23755,23 @@ fn render_editable_result_table(
                                                 *cell_selection_drag_started = false;
                                                 if let (Some((ar, ac)), Some((cr, cc))) = (*cell_selection_anchor, *cell_selection_current) {
                                                     if ar == cr && ac == cc {
-                                                        // 仅点击了一个单元格 → 清除选区（后续由 click 逻辑处理选行/编辑）
-                                                        clear_query_cell_selection(
-                                                            cell_selection_anchor, cell_selection_current,
-                                                            cell_selection_typing, cell_selection_input, cell_selection_is_null,
-                                                            cell_selection_drag_started,
-                                                        );
+                                                        if response.clicked() {
+                                                            // 真正的单击（按下后几乎未移动）：清除选区，由 click 逻辑处理选行/编辑
+                                                            clear_query_cell_selection(
+                                                                cell_selection_anchor, cell_selection_current,
+                                                                cell_selection_typing, cell_selection_input, cell_selection_is_null,
+                                                                cell_selection_drag_started,
+                                                            );
+                                                        } else {
+                                                            // 按下后明显移动但未离开锚点格（同格拖拽 / 拖出又收回）：
+                                                            // 视为拖拽框选 → 保留 1×1 矩形选区，清除行/列选中
+                                                            *selected_row = None;
+                                                            selected_rows.clear();
+                                                            *selection_anchor = None;
+                                                            selected_columns.clear();
+                                                            *column_selection_anchor = None;
+                                                            ui.ctx().request_repaint();
+                                                        }
                                                     }
                                                 }
                                             }
@@ -24996,10 +25018,21 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     tab.cell_selection_drag_started = false;
                                                     if let (Some((ar, ac)), Some((cr, cc))) = (tab.cell_selection_anchor, tab.cell_selection_current) {
                                                         if ar == cr && ac == cc {
-                                                            // 仅点击了一个单元格 → 清除选区（后续由 click 逻辑处理编辑）
-                                                            tab.cell_selection_anchor = None;
-                                                            tab.cell_selection_current = None;
-                                                            tab.cell_selection_drag_started = false;
+                                                            if response.clicked() {
+                                                                // 真正的单击（按下后几乎未移动）：清除选区，由 click 逻辑处理选行/编辑
+                                                                tab.cell_selection_anchor = None;
+                                                                tab.cell_selection_current = None;
+                                                                tab.cell_selection_drag_started = false;
+                                                            } else {
+                                                                // 按下后明显移动但未离开锚点格（同格拖拽 / 拖出又收回）：
+                                                                // 视为拖拽框选 → 保留 1×1 矩形选区，清除行/列选中
+                                                                tab.selected_preview_row = None;
+                                                                tab.selected_preview_rows.clear();
+                                                                tab.selection_anchor_row = None;
+                                                                tab.selected_columns.clear();
+                                                                tab.column_selection_anchor = None;
+                                                                ui.ctx().request_repaint();
+                                                            }
                                                         }
                                                     }
                                                 }
