@@ -764,7 +764,11 @@ impl TextEdit<'_> {
                 let primary_cursor_rect = cursor_rect(&galley, &cursor_range.primary, row_height)
                     .translate(galley_pos.to_vec2());
 
-                if response.changed() || selection_changed {
+                // 全选（如 ⌘A）时 primary 光标落在文档末尾，跟随滚动会把视口拖到
+                // 文档末尾；全选不是光标位移，保持当前视口不动（仅无文本变更时判定）。
+                let just_select_all =
+                    !response.changed() && cursor_range == CCursorRange::select_all(&galley);
+                if (response.changed() || selection_changed) && !just_select_all {
                     // Scroll to keep primary cursor in view:
                     ui.scroll_to_rect(primary_cursor_rect + margin, None);
                 }

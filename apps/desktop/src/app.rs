@@ -38291,4 +38291,101 @@ mod tests {
         assert!(still_focused, "点击位于排除区域内时不应交出焦点");
         assert!(lingers, "点击位于排除区域内时不应取消选中");
     }
+
+    // ── SQL 编辑器 ⌘A 全选不应把滚动条滚到文档末尾 ──
+    // egui 全选时 primary 光标落在文档末尾，选区变化触发 scroll_to_rect 跟随，
+    // 会把视口拖到底部；补丁在全选（无文本变更）时跳过跟随滚动。
+    #[test]
+    fn sql_editor_select_all_keeps_scroll_offset() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let id = egui::Id::new("sql-editor-select-all-scroll-test");
+        // 200 行长文本，远超可视区，确保若触发跟随滚动会大幅跳动
+        let mut text = (0..200)
+            .map(|i| format!("SELECT {i:03}; -- line {i:03}\n"))
+            .collect::<String>();
+
+        let raw = |time: f64, events: Vec<egui::Event>| egui::RawInput {
+            time: Some(time),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let render = |ctx: &egui::Context, text: &mut String, focus: bool| -> f32 {
+            let mut offset = 0.0f32;
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let output = egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        let resp = ui.add_sized(
+                            [760.0, 6000.0],
+                            egui::TextEdit::multiline(text)
+                                .id(id)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if focus {
+                            resp.request_focus();
+                        }
+                    });
+                offset = output.state.offset.y;
+            });
+            offset
+        };
+
+        // 第 1 帧：渲染并聚焦编辑器；随后注入"上一帧已有光标"的存储状态
+        //（等价于用户先点击过编辑器——选区变化判定需要 prev 有光标，否则为
+        // None 时不走滚动分支，无法复现真实场景）
+        ctx.run(raw(1.0, vec![]), |ctx| {
+            render(ctx, &mut text, true);
+        });
+        {
+            let mut st = egui::TextEdit::load_state(&ctx, id).expect("应有 TextEdit 状态");
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(20),
+            )));
+            st.store(&ctx, id);
+        }
+
+        // 第 2 帧：⌘A 全选（滚动请求由 ScrollArea 于下一帧落位）
+        ctx.run(
+            raw(
+                2.0,
+                vec![egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: Some(egui::Key::A),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                }],
+            ),
+            |ctx| {
+                render(ctx, &mut text, false);
+            },
+        );
+        // 第 3 帧：观测最终滚动偏移
+        let mut offset2 = 0.0f32;
+        ctx.run(raw(3.0, vec![]), |ctx| {
+            offset2 = render(ctx, &mut text, false);
+        });
+
+        // ⌘A 应真的产生覆盖全文的选区，防止用例因事件没送达而假通过
+        let text_chars = text.chars().count();
+        let selected_all = egui::TextEdit::load_state(&ctx, id)
+            .map(|s| {
+                s.cursor.char_range().is_some_and(|r| {
+                    let [start, end] = r.sorted_cursors();
+                    !r.is_empty() && end.index - start.index >= text_chars
+                })
+            })
+            .unwrap_or(false);
+        assert!(selected_all, "⌘A 后应选中全文");
+        // 视口不应滚到底部（修复前会跳到约 6000 - 160 处）
+        assert!(
+            offset2 < 100.0,
+            "全选后滚动条不应跳到底部（offset={offset2}）"
+        );
+    }
 }
