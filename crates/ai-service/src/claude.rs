@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::{AiError, AiProvider, ChatMessage, Role, ToolCall, ToolDef, map_status_error};
+use crate::{AiError, AiProvider, ChatMessage, ChatStreamResult, Role, ToolCall, ToolDef, map_status_error};
 
 pub struct ClaudeProvider {
     client: Client,
@@ -203,7 +203,7 @@ impl AiProvider for ClaudeProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDef>,
         tx: mpsc::UnboundedSender<String>,
-    ) -> Result<Vec<ToolCall>, AiError> {
+    ) -> Result<ChatStreamResult, AiError> {
         let tools_json: Vec<Value> = tools
             .iter()
             .map(|t| {
@@ -320,7 +320,10 @@ impl AiProvider for ClaudeProvider {
                                 }
                             }
                             "message_stop" => {
-                                return Ok(completed_tools);
+                                return Ok(ChatStreamResult {
+                                    tool_calls: completed_tools,
+                                    reasoning_content: String::new(),
+                                });
                             }
                             _ => {}
                         }
@@ -329,7 +332,10 @@ impl AiProvider for ClaudeProvider {
             }
         }
 
-        Ok(completed_tools)
+        Ok(ChatStreamResult {
+            tool_calls: completed_tools,
+            reasoning_content: String::new(),
+        })
     }
 }
 

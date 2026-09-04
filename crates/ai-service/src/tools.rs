@@ -1,4 +1,4 @@
-use crate::{AiError, AiProvider, ChatMessage, Role, ToolDef, ToolExecutor};
+use crate::{AiError, AiProvider, ChatMessage, ChatResponse, ChatStreamResult, Role, ToolDef, ToolExecutor};
 use tokio::sync::mpsc;
 
 const MAX_TOOL_ROUNDS: usize = 20;
@@ -6,49 +6,58 @@ const MAX_TOOL_ROUNDS: usize = 20;
 /// 带工具调用的完整对话循环
 ///
 /// - `tx`: `Some` 时同时流式推送文本；`None` 时静默收集
-/// - 返回最终完整文本
+/// - 返回最终完整文本与 reasoning_content
 pub async fn chat_with_tools(
     provider: &dyn AiProvider,
     mut messages: Vec<ChatMessage>,
     tools: Vec<ToolDef>,
     executor: &dyn ToolExecutor,
     tx: Option<mpsc::UnboundedSender<String>>,
-) -> Result<String, AiError> {
+) -> Result<ChatResponse, AiError> {
     let mut final_text = String::new();
+    let mut final_reasoning = String::new();
 
     for _round in 0..MAX_TOOL_ROUNDS {
         // 有外部流式通道时直接实时转发，避免"先完整接收再排空"导致回答整块出现
-        let tool_calls = if let Some(outer) = &tx {
+        let result = if let Some(outer) = &tx {
             provider
                 .chat_stream_with_tools(messages.clone(), tools.clone(), outer.clone())
                 .await?
         } else {
             let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
-            let calls = provider
+            let res: ChatStreamResult = provider
                 .chat_stream_with_tools(messages.clone(), tools.clone(), stream_tx)
                 .await?;
             while let Some(chunk) = stream_rx.recv().await {
                 final_text.push_str(&chunk);
             }
-            calls
+            res
         };
 
-        if tool_calls.is_empty() {
-            return Ok(final_text);
+        if !result.reasoning_content.is_empty() {
+            final_reasoning = result.reasoning_content.clone();
+        }
+
+        if result.tool_calls.is_empty() {
+            return Ok(ChatResponse {
+                text: final_text,
+                reasoning_content: final_reasoning,
+            });
         }
 
         // 将 assistant 的 tool_calls 追加到消息历史
         messages.push(ChatMessage {
             role: Role::Assistant,
             content: String::new(),
-            tool_calls: Some(tool_calls.clone()),
+            tool_calls: Some(result.tool_calls.clone()),
             tool_call_id: None,
+            reasoning_content: Some(result.reasoning_content.clone()),
         });
 
         // 执行每个工具并追加结果
-        for call in &tool_calls {
-            let result = executor.execute(&call.name, &call.arguments).await;
-            messages.push(ChatMessage::tool_result(&call.id, result));
+        for call in &result.tool_calls {
+            let exec_result = executor.execute(&call.name, &call.arguments).await;
+            messages.push(ChatMessage::tool_result(&call.id, exec_result));
         }
     }
 

@@ -802,6 +802,8 @@ enum AiRole {
 struct AiMessage {
     role: AiRole,
     content: String,
+    /// 思考模式模型的推理内容，仅内部保存用于下一轮回传
+    reasoning: String,
 }
 
 /// 已保存查询拖拽目标位置
@@ -924,7 +926,9 @@ struct QueryTabState {
     /// 历史列表是否正在异步加载
     history_loading: bool,
     /// 流式完成通知接收器
-    ai_done_rx: Option<tokio::sync::oneshot::Receiver<Result<String, ai_service::AiError>>>,
+    ai_done_rx: Option<
+        tokio::sync::oneshot::Receiver<Result<ai_service::ChatResponse, ai_service::AiError>>,
+    >,
     /// AI 对话输入框内容
     ai_input: String,
     /// Markdown 渲染缓存
@@ -8736,10 +8740,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         tab.ai_conversation.push(AiMessage {
             role: AiRole::User,
             content: user_prompt,
+            reasoning: String::new(),
         });
         tab.ai_conversation.push(AiMessage {
             role: AiRole::Assistant,
             content: String::new(),
+            reasoning: String::new(),
         });
         if tab.ai_conversation.len() > MAX_AI_CONVERSATION_LEN {
             let drain_count = tab.ai_conversation.len() - MAX_AI_CONVERSATION_LEN;
@@ -11834,10 +11840,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         tab.ai_conversation.push(AiMessage {
                                                         role: AiRole::User,
                                                         content: user_input.clone(),
+                                                        reasoning: String::new(),
                                                     });
                                                     tab.ai_conversation.push(AiMessage {
                                                         role: AiRole::Assistant,
                                                         content: String::new(),
+                                                        reasoning: String::new(),
                                                     });
                                                     if tab.ai_conversation.len() > MAX_AI_CONVERSATION_LEN {
                                                         let drain_count = tab.ai_conversation.len() - MAX_AI_CONVERSATION_LEN;
@@ -11864,7 +11872,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     ai_service::Role::Assistant
                                                                 }
                                                             };
-                                                            messages.push(ai_service::ChatMessage::new(role, msg.content.clone()));
+                                                            let mut cm =
+                                                                ai_service::ChatMessage::new(role, msg.content.clone());
+                                                            // 思考模型（带 tools 时）要求历史 assistant 消息
+                                                            // 必须携带 reasoning_content 字段（即使为空串），否则 400
+                                                            if msg.role == AiRole::Assistant {
+                                                                cm.reasoning_content =
+                                                                    Some(msg.reasoning.clone());
+                                                            }
+                                                            messages.push(cm);
                                                         }
 
                                                         // 快照元数据用于工具执行
@@ -18017,10 +18033,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     tab.ai_is_streaming = false;
                     tab.ai_stream_rx = None;
                     tab.ai_done_rx = None;
-                    if let Err(e) = result {
-                        if let Some(last) = tab.ai_conversation.last_mut() {
-                            if matches!(last.role, AiRole::Assistant) {
-                                last.content = tr!("错误: {}", e);
+                    match result {
+                        Ok(resp) => {
+                            // 保存思考内容供下一轮对话回传（思考模型必需）
+                            if let Some(last) = tab.ai_conversation.last_mut() {
+                                if matches!(last.role, AiRole::Assistant) {
+                                    last.reasoning = resp.reasoning_content;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(last) = tab.ai_conversation.last_mut() {
+                                if matches!(last.role, AiRole::Assistant) {
+                                    last.content = tr!("错误: {}", e);
+                                }
                             }
                         }
                     }
@@ -22600,7 +22626,7 @@ fn render_result_table(
                                     ui.ctx().request_repaint();
                                 }
                                 // Cmd+A → 全选行（无矩形选区时）
-                                if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                                if should_table_handle_select_all(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
                                     if cell_selection_anchor.is_none() {
                                         select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
                                         selected_columns.clear();
@@ -22838,11 +22864,7 @@ fn render_result_table(
                                             *cell_selection_anchor = Some((index, col_idx));
                                             *cell_selection_current = Some((index, col_idx));
                                             *cell_selection_drag_started = true;
-                                            *selected_row = None;
-                                            selected_rows.clear();
-                                            *selection_anchor = None;
-                                            selected_columns.clear();
-                                            *column_selection_anchor = None;
+                                            // 行/列选中不在按下时清除，拖拽跨越单元格时才清除（避免单击闪烁）
                                             let editor_id = egui::Id::from(format!("query-editor-{}", tab_id));
                                             ui.ctx().memory_mut(|mem| mem.surrender_focus(editor_id));
                                         }
@@ -22852,10 +22874,39 @@ fn render_result_table(
                                             && cell_selection_anchor.is_some()
                                             && result_column_resize_drag.is_none()
                                         {
-                                            *cell_selection_current = Some((index, col_idx));
+                                            // 拖拽跨越到不同单元格：清除行选中和列选中，进入矩形选区模式
+                                            if *cell_selection_current != Some((index, col_idx)) {
+                                                *cell_selection_current = Some((index, col_idx));
+                                                *selected_row = None;
+                                                selected_rows.clear();
+                                                *selection_anchor = None;
+                                                selected_columns.clear();
+                                                *column_selection_anchor = None;
+                                            }
                                         }
                                         if pointer_just_released && cell_selection_anchor.is_some() {
                                             *cell_selection_drag_started = false;
+                                            // 仅当前单元格触发，避免同帧重复处理
+                                            if *cell_selection_current == Some((index, col_idx)) {
+                                                if let (Some((ar, ac)), Some((cr, cc))) = (*cell_selection_anchor, *cell_selection_current) {
+                                                    if ar == cr && ac == cc {
+                                                        // 纯点击（未拖拽）：选中整行，行为与行号列一致
+                                                        let modifiers = ui.ctx().input(|input| input.modifiers);
+                                                        if modifiers.shift {
+                                                            extend_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                                        } else if modifiers.ctrl || modifiers.command {
+                                                            toggle_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                                        } else {
+                                                            set_single_query_selection(selected_rows, selected_row, selection_anchor, index);
+                                                        }
+                                                        selected_columns.clear();
+                                                        *column_selection_anchor = None;
+                                                        *cell_selection_anchor = None;
+                                                        *cell_selection_current = None;
+                                                        ui.ctx().request_repaint();
+                                                    }
+                                                }
+                                            }
                                         }
                                     });
                                 }
@@ -23311,7 +23362,7 @@ fn render_editable_result_table(
                                     ui.ctx().request_repaint();
                                 }
                                 // Cmd+A → 全选行（无矩形选区时）
-                                if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                                if should_table_handle_select_all(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
                                     if cell_selection_anchor.is_none() {
                                         select_all_query_rows(selected_rows, selected_row, selection_anchor, result.rows.len());
                                         selected_columns.clear();
@@ -23664,12 +23715,7 @@ fn render_editable_result_table(
                                                 *cell_selection_is_null = false;
                                                 *cell_selection_drag_started = true;
                                                 edit.editing_cell = None;
-                                                // 矩形选区开始时清除行选中和列选中
-                                                *selected_row = None;
-                                                selected_rows.clear();
-                                                *selection_anchor = None;
-                                                selected_columns.clear();
-                                                *column_selection_anchor = None;
+                                                // 行/列选中不在按下时清除，拖拽跨越单元格时才清除（避免单击选中整行时闪烁）
                                                 // 让 SQL 编辑器失去焦点
                                                 let editor_id = egui::Id::from(format!("query-editor-{}", tab_id));
                                                 ui.ctx().memory_mut(|mem| mem.surrender_focus(editor_id));
@@ -23681,12 +23727,21 @@ fn render_editable_result_table(
                                                 && !*cell_selection_typing
                                                 && result_column_resize_drag.is_none()
                                             {
-                                                *cell_selection_current = Some((row_index, col_idx));
+                                                // 拖拽跨越到不同单元格：清除行选中和列选中，进入矩形选区模式
+                                                if *cell_selection_current != Some((row_index, col_idx)) {
+                                                    *cell_selection_current = Some((row_index, col_idx));
+                                                    *selected_row = None;
+                                                    selected_rows.clear();
+                                                    *selection_anchor = None;
+                                                    selected_columns.clear();
+                                                    *column_selection_anchor = None;
+                                                }
                                             }
                                             if pointer_just_released && cell_selection_anchor.is_some() && !*cell_selection_typing {
                                                 *cell_selection_drag_started = false;
                                                 if let (Some((ar, ac)), Some((cr, cc))) = (*cell_selection_anchor, *cell_selection_current) {
                                                     if ar == cr && ac == cc {
+                                                        // 仅点击了一个单元格 → 清除选区（后续由 click 逻辑处理选行/编辑）
                                                         clear_query_cell_selection(
                                                             cell_selection_anchor, cell_selection_current,
                                                             cell_selection_typing, cell_selection_input, cell_selection_is_null,
@@ -23705,7 +23760,7 @@ fn render_editable_result_table(
                                                     cell_selection_drag_started,
                                                 );
                                             }
-                                            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                                            if should_table_handle_select_all(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
                                                 let max_row = result.rows.len().saturating_sub(1);
                                                 let max_col = display_columns.len().saturating_sub(1);
                                                 *cell_selection_anchor = Some((0, 0));
@@ -23778,31 +23833,41 @@ fn render_editable_result_table(
                                         }
                                         // 点击进入编辑（有选区时先清除选区）
                                         if !is_editing && response.clicked() {
-                                            if cell_selection_anchor.is_some() {
+                                            let had_cell_selection = cell_selection_anchor.is_some();
+                                            if had_cell_selection {
                                                 clear_query_cell_selection(
                                                     cell_selection_anchor, cell_selection_current,
                                                     cell_selection_typing, cell_selection_input, cell_selection_is_null,
                                                     cell_selection_drag_started,
                                                 );
-                                            } else {
-                                                commit_query_edit_to_pending(edit);
-                                                edit.editing_cell = Some(TableCellEditState {
-                                                    target: TableEditTarget::ExistingRow(row_index),
-                                                    column: column.clone(),
-                                                    value: cell_value.as_text().unwrap_or_default().to_string(),
-                                                    is_null: cell_value.is_null(),
-                                                    original_value: cell_value.as_text().unwrap_or_default().to_string(),
-                                                    original_is_null: cell_value.is_null(),
-                                                    focus_requested: true,
-                                                });
-                                                // 进入单元格编辑时清除行选中和列选中
-                                                *selected_row = None;
-                                                selected_rows.clear();
-                                                *selection_anchor = None;
-                                                selected_columns.clear();
-                                                *column_selection_anchor = None;
-                                                ui.ctx().request_repaint();
                                             }
+                                            // 单击单元格：选中整行（行为与行号列一致）
+                                            let modifiers = ui.ctx().input(|input| input.modifiers);
+                                            let toggle_select = modifiers.ctrl || modifiers.command;
+                                            let range_select = modifiers.shift;
+                                            selected_columns.clear();
+                                            *column_selection_anchor = None;
+                                            if range_select {
+                                                extend_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                            } else if toggle_select {
+                                                toggle_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                            } else {
+                                                set_single_query_selection(selected_rows, selected_row, selection_anchor, row_index);
+                                                if !had_cell_selection {
+                                                    // 普通单击且无矩形选区残留：选中整行并进入编辑模式
+                                                    commit_query_edit_to_pending(edit);
+                                                    edit.editing_cell = Some(TableCellEditState {
+                                                        target: TableEditTarget::ExistingRow(row_index),
+                                                        column: column.clone(),
+                                                        value: cell_value.as_text().unwrap_or_default().to_string(),
+                                                        is_null: cell_value.is_null(),
+                                                        original_value: cell_value.as_text().unwrap_or_default().to_string(),
+                                                        original_is_null: cell_value.is_null(),
+                                                        focus_requested: true,
+                                                    });
+                                                }
+                                            }
+                                            ui.ctx().request_repaint();
                                         }
                                         // Enter/失焦/ESC提交或取消编辑
                                         if is_editing {
@@ -24219,6 +24284,14 @@ fn commit_query_edit_to_pending(edit: &mut QueryEditContext) {
     }
 }
 
+fn should_table_handle_select_all(ctx: &egui::Context) -> bool {
+    let focused = ctx.memory(|memory| memory.focused());
+    match focused {
+        Some(id) => egui::widgets::text_edit::TextEditState::load(ctx, id).is_none(),
+        None => true,
+    }
+}
+
 fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAction {
     let palette = mac_ui_palette_from_ui(ui);
     let Some(preview) = tab.preview.as_ref() else {
@@ -24370,7 +24443,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                         ui.ctx().request_repaint();
                                     }
                                     // Cmd+A → 全选行（无矩形选区时；pending insert 模式行号列隐藏，此处不执行）
-                                    if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                                    if should_table_handle_select_all(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
                                         if tab.cell_selection_anchor.is_none() {
                                             if let Some(preview) = tab.preview.as_ref() {
                                                 select_all_preview_rows(tab, preview.rows.len());
@@ -24895,12 +24968,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     tab.cell_selection_is_null = false;
                                                     tab.cell_selection_drag_started = true;
                                                     tab.editing_cell = None;
-                                                    // 矩形选区开始时清除行选中和列选中
-                                                    tab.selected_preview_row = None;
-                                                    tab.selected_preview_rows.clear();
-                                                    tab.selection_anchor_row = None;
-                                                    tab.selected_columns.clear();
-                                                    tab.column_selection_anchor = None;
+                                                    // 行/列选中不在按下时清除，拖拽跨越单元格时才清除（避免单击选中整行时闪烁）
                                                 }
                                                 // 拖拽中：指针持续按下且移动到当前单元格
                                                 if tab.cell_selection_drag_started
@@ -24910,7 +24978,15 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     && !tab.cell_selection_typing
                                                     && tab.column_resize_drag.is_none()
                                                 {
-                                                    tab.cell_selection_current = Some((row_index, col_idx));
+                                                    // 拖拽跨越到不同单元格：清除行选中和列选中，进入矩形选区模式
+                                                    if tab.cell_selection_current != Some((row_index, col_idx)) {
+                                                        tab.cell_selection_current = Some((row_index, col_idx));
+                                                        tab.selected_preview_row = None;
+                                                        tab.selected_preview_rows.clear();
+                                                        tab.selection_anchor_row = None;
+                                                        tab.selected_columns.clear();
+                                                        tab.column_selection_anchor = None;
+                                                    }
                                                 }
                                                 // 拖拽结束：指针松开
                                                 if pointer_just_released && tab.cell_selection_anchor.is_some() && !tab.cell_selection_typing {
@@ -24936,7 +25012,7 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                     tab.cell_selection_drag_started = false;
                                                 }
                                                 // Cmd+A → 全选
-                                                if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                                                if should_table_handle_select_all(ui.ctx()) && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
                                                     let max_row = tab.preview.as_ref().map(|p| p.rows.len().saturating_sub(1)).unwrap_or(0);
                                                     let max_col = columns.len().saturating_sub(1);
                                                     tab.cell_selection_anchor = Some((0, 0));
@@ -24996,34 +25072,42 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
                                                 }
                                             }
                                             if !is_editing && response.clicked() {
-                                                if tab.cell_selection_anchor.is_some() {
+                                                let had_cell_selection = tab.cell_selection_anchor.is_some();
+                                                if had_cell_selection {
                                                     // 有选区时的点击处理（输入模式下也生效）
                                                     clear_table_cell_selection(tab);
                                                 }
-                                                // 进入单元格编辑时清除行选中和列选中
-                                                tab.selected_preview_row = None;
-                                                tab.selected_preview_rows.clear();
-                                                tab.selection_anchor_row = None;
+                                                // 单击单元格：选中整行（行为与行号列一致）
+                                                let modifiers = ui.ctx().input(|input| input.modifiers);
+                                                let toggle_select = modifiers.ctrl || modifiers.command;
+                                                let range_select = modifiers.shift;
                                                 tab.selected_columns.clear();
                                                 tab.column_selection_anchor = None;
-                                                if tab.pending_insert_row.is_none() {
-                                                    // 无选区：进入编辑模式，不选中行
-                                                    commit_current_edit_to_pending(tab);
-                                                    tab.editing_cell = Some(TableCellEditState {
-                                                        target: TableEditTarget::ExistingRow(row_index),
-                                                        column: column.clone(),
-                                                        value: cell_value
-                                                            .as_text()
-                                                            .unwrap_or_default()
-                                                            .to_string(),
-                                                        is_null: cell_value.is_null(),
-                                                        original_value: cell_value
-                                                            .as_text()
-                                                            .unwrap_or_default()
-                                                            .to_string(),
-                                                        original_is_null: cell_value.is_null(),
-                                                        focus_requested: true,
-                                                    });
+                                                if range_select {
+                                                    extend_preview_selection(tab, row_index);
+                                                } else if toggle_select {
+                                                    toggle_preview_selection(tab, row_index);
+                                                } else {
+                                                    set_single_preview_selection(tab, row_index);
+                                                    if !had_cell_selection && tab.pending_insert_row.is_none() {
+                                                        // 普通单击且无矩形选区残留：选中整行并进入编辑模式
+                                                        commit_current_edit_to_pending(tab);
+                                                        tab.editing_cell = Some(TableCellEditState {
+                                                            target: TableEditTarget::ExistingRow(row_index),
+                                                            column: column.clone(),
+                                                            value: cell_value
+                                                                .as_text()
+                                                                .unwrap_or_default()
+                                                                .to_string(),
+                                                            is_null: cell_value.is_null(),
+                                                            original_value: cell_value
+                                                                .as_text()
+                                                                .unwrap_or_default()
+                                                                .to_string(),
+                                                            original_is_null: cell_value.is_null(),
+                                                            focus_requested: true,
+                                                        });
+                                                    }
                                                 }
                                                 ui.ctx().request_repaint();
                                             }
@@ -37819,6 +37903,25 @@ mod tests {
         let new_primary_idx = new_primary.map(|r| r.primary.index);
         let new_extras = extras_ranges.iter().map(|r| r.primary.index).collect();
         (cur_sql, new_primary_idx, new_extras)
+    }
+
+    #[test]
+    fn table_select_all_is_blocked_when_text_edit_is_focused() {
+        egui::__run_test_ctx(|ctx| {
+            let id = egui::Id::new("table-select-all-test-edit");
+            ctx.memory_mut(|memory| memory.request_focus(id));
+            ctx.data_mut(|data| {
+                data.insert_persisted(id, egui::widgets::text_edit::TextEditState::default());
+            });
+            assert!(!should_table_handle_select_all(ctx));
+        });
+    }
+
+    #[test]
+    fn table_select_all_is_allowed_without_text_edit_focus() {
+        egui::__run_test_ctx(|ctx| {
+            assert!(should_table_handle_select_all(ctx));
+        });
     }
 
     // ── 快速删除：一帧内主光标删多个字符，extra 无选区应复制主光标的删除长度与方向 ──

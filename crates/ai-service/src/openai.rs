@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::{AiError, AiProvider, ChatMessage, Role, ToolCall, ToolDef, map_status_error};
+use crate::{AiError, AiProvider, ChatMessage, ChatStreamResult, Role, ToolCall, ToolDef, map_status_error};
 
 pub struct OpenAiProvider {
     client: Client,
@@ -34,6 +34,13 @@ impl OpenAiProvider {
                     Role::Tool => "tool",
                 };
                 let mut msg = json!({ "role": role, "content": m.content });
+                // 思考模式模型要求历史 assistant 消息回传推理内容。
+                // 字段必须存在（即使为空字符串），否则 DeepSeek 返回 400。
+                if role == "assistant" {
+                    if let Some(ref rc) = m.reasoning_content {
+                        msg["reasoning_content"] = json!(rc);
+                    }
+                }
                 if let Some(ref tool_calls) = m.tool_calls {
                     msg["tool_calls"] = serde_json::to_value(tool_calls.iter().map(|tc| {
                         json!({
@@ -94,6 +101,8 @@ impl AiProvider for OpenAiProvider {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
+            eprintln!("[openai::chat_stream] REQUEST BODY: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            eprintln!("[openai::chat_stream] RESPONSE: {} {}", status, text);
             return Err(map_status_error(status, text));
         }
 
@@ -169,7 +178,7 @@ impl AiProvider for OpenAiProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDef>,
         tx: mpsc::UnboundedSender<String>,
-    ) -> Result<Vec<ToolCall>, AiError> {
+    ) -> Result<ChatStreamResult, AiError> {
         let tools_json: Vec<Value> = tools
             .iter()
             .map(|t| {
@@ -199,12 +208,16 @@ impl AiProvider for OpenAiProvider {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
+            eprintln!("[openai::chat_stream_with_tools] REQUEST BODY: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            eprintln!("[openai::chat_stream_with_tools] RESPONSE: {} {}", status, text);
             return Err(map_status_error(status, text));
         }
 
         // tool_calls 累积器：按 index 分组
         let mut tool_calls_map: std::collections::BTreeMap<usize, (String, String, String)> =
             std::collections::BTreeMap::new();
+        // 思考模式模型的推理内容累积
+        let mut reasoning = String::new();
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
@@ -231,6 +244,10 @@ impl AiProvider for OpenAiProvider {
                         {
                             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                                 let _ = tx.send(content.to_string());
+                            }
+                            // 思考模式：累积 reasoning_content（不回显给用户）
+                            if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                                reasoning.push_str(rc);
                             }
                             // 处理 tool_calls 增量
                             if let Some(tool_calls) =
@@ -270,11 +287,7 @@ impl AiProvider for OpenAiProvider {
             }
         }
 
-        if tool_calls_map.is_empty() {
-            return Ok(vec![]);
-        }
-
-        Ok(tool_calls_map
+        let tool_calls = tool_calls_map
             .into_values()
             .filter(|(id, name, _)| !id.is_empty() && !name.is_empty())
             .map(|(id, name, arguments)| ToolCall {
@@ -282,7 +295,12 @@ impl AiProvider for OpenAiProvider {
                 name,
                 arguments,
             })
-            .collect())
+            .collect();
+
+        Ok(ChatStreamResult {
+            tool_calls,
+            reasoning_content: reasoning,
+        })
     }
 }
 

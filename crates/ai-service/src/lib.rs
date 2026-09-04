@@ -24,6 +24,31 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// 流式结果：文本片段由调用方通过 channel 直接接收；本结构携带结构化返回
+#[derive(Debug, Clone, Default)]
+pub struct ChatStreamResult {
+    pub tool_calls: Vec<ToolCall>,
+    /// 思考模式模型的推理内容（OpenAI 兼容 thinking 模型），需要在下一轮回传
+    pub reasoning_content: String,
+}
+
+/// 一次完整对话的结果
+#[derive(Debug, Clone)]
+pub struct ChatResponse {
+    pub text: String,
+    /// 思考模式模型的推理内容，需在下一轮回传
+    pub reasoning_content: String,
+}
+
+impl ChatResponse {
+    pub fn empty() -> Self {
+        Self {
+            text: String::new(),
+            reasoning_content: String::new(),
+        }
+    }
+}
+
 /// 工具执行器 trait — 由 app 层实现，传入 chat_with_tools
 #[async_trait::async_trait]
 pub trait ToolExecutor: Send + Sync {
@@ -73,6 +98,8 @@ pub struct ChatMessage {
     pub content: String,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
+    /// 思考模式模型的推理内容（OpenAI 兼容 thinking 模型），下一轮需原样回传
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -141,17 +168,17 @@ pub trait AiProvider: Send + Sync {
     /// 非流式发送，返回完整回复
     async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, AiError>;
 
-    /// 带工具的流式调用：流式输出文本到 tx，流结束后返回 tool_calls（若无则为空 Vec）
+    /// 带工具的流式调用：流式输出文本到 tx，返回 tool_calls 与 reasoning_content
     async fn chat_stream_with_tools(
         &self,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDef>,
         tx: mpsc::UnboundedSender<String>,
-    ) -> Result<Vec<ToolCall>, AiError> {
+    ) -> Result<ChatStreamResult, AiError> {
         // 默认实现：忽略 tools，走普通流式调用
         let _ = tools;
         self.chat_stream(messages, tx).await?;
-        Ok(vec![])
+        Ok(ChatStreamResult::default())
     }
 }
 
