@@ -26244,7 +26244,7 @@ fn render_table_body_interactive_cell(
     }
     */
     let cell_hovered = false; // 预览功能已禁用
-    let response = response.on_hover_cursor(egui::CursorIcon::Text);
+    // 数据单元格默认不显示 I 型文本光标（拖拽是框选，不是选字）
     (response, cell_hovered, rect)
 }
 
