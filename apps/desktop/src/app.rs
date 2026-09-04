@@ -11501,6 +11501,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             tab.result_selections.push(QueryResultSelectionState::default());
                                         }
                                         let sel = &mut tab.result_selections[tab.selected_result_index];
+                                        // 结果网格所占区域（屏幕坐标，从当前光标向下铺满剩余空间）
+                                        let grid_region = egui::Rect::from_min_size(
+                                            ui.cursor().min,
+                                            egui::vec2(
+                                                ui.available_width().max(0.0),
+                                                ui.available_height().max(0.0),
+                                            ),
+                                        );
                                         if let Some(ref mut edit_ctx) = tab.edit_context {
                                             if edit_ctx.definition.is_some() {
                                                 let result_action = render_editable_result_table(
@@ -11536,6 +11544,29 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             if !matches!(result_action.action, TabUiAction::None) {
                                                 action = result_action.action;
                                             }
+                                        }
+                                        // 点击查询结果网格区域外（SQL 编辑器/工具栏/侧栏等）→
+                                        // 清除该结果表选中（选中行/列/矩形选区），与“失焦取消选中”一致
+                                        let click_outside_grid = ui.input(|i| {
+                                            i.pointer.button_clicked(egui::PointerButton::Primary)
+                                                && i.pointer
+                                                    .latest_pos()
+                                                    .is_some_and(|p| !grid_region.contains(p))
+                                        });
+                                        if click_outside_grid {
+                                            sel.selected_columns.clear();
+                                            sel.column_selection_anchor = None;
+                                            sel.selected_result_rows.clear();
+                                            sel.selected_result_row = None;
+                                            sel.selection_anchor_row = None;
+                                            clear_query_cell_selection(
+                                                &mut sel.cell_selection_anchor,
+                                                &mut sel.cell_selection_current,
+                                                &mut sel.cell_selection_typing,
+                                                &mut sel.cell_selection_input,
+                                                &mut sel.cell_selection_is_null,
+                                                &mut sel.cell_selection_drag_started,
+                                            );
                                         }
                                     } else {
                                         render_query_empty_state(
@@ -13100,6 +13131,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .stroke(Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(8, 8))
                         .show(ui, |ui| {
+                            // 点击列表内容区外（工具栏/搜索框/状态栏等）→ 清除多选行
+                            let content_region = ui.available_rect_before_wrap();
+                            let click_outside_list = ui.input(|i| {
+                                i.pointer.button_clicked(egui::PointerButton::Primary)
+                                    && i.pointer
+                                        .latest_pos()
+                                        .is_some_and(|p| !content_region.contains(p))
+                            });
+                            if click_outside_list {
+                                tab.selected_indices.clear();
+                            }
                             if tab.loading {
                                 ui.vertical_centered(|ui| {
                                     ui.add_space(80.0);
@@ -13958,6 +14000,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                         .stroke(Stroke::NONE)
                         .inner_margin(egui::Margin::symmetric(8, 8))
                         .show(ui, |ui| {
+                            // 点击列表内容区外（工具栏/搜索框/状态栏等）→ 清除多选行
+                            let content_region = ui.available_rect_before_wrap();
+                            let click_outside_list = ui.input(|i| {
+                                i.pointer.button_clicked(egui::PointerButton::Primary)
+                                    && i.pointer
+                                        .latest_pos()
+                                        .is_some_and(|p| !content_region.contains(p))
+                            });
+                            if click_outside_list {
+                                tab.selected_indices.clear();
+                            }
                             if tab.loading {
                                 ui.vertical_centered(|ui| {
                                     ui.add_space(80.0);
@@ -24382,6 +24435,12 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
 
     let viewport_width = ui.available_width().max(0.0);
     let viewport_height = ui.available_height().max(220.0);
+    // 表格所占区域（屏幕坐标，从当前光标铺满剩余可视区），
+    // 用于判定“点击表格区域外 → 清除选中”
+    let table_region = egui::Rect::from_min_size(
+        ui.cursor().min,
+        egui::vec2(viewport_width, viewport_height),
+    );
     let columns = table_visible_columns(tab);
     if columns.is_empty() {
         return TabUiAction::None;
@@ -25802,6 +25861,22 @@ fn render_editable_table(ui: &mut egui::Ui, tab: &mut TableTabState) -> TabUiAct
     if should_cancel_pending_insert {
         tab.pending_insert_row = None;
         tab.editing_cell = None;
+    }
+    // 点击表格区域外（工具栏/筛选排序面板/编辑器等）→ 清除该表选中
+    //（选中行/列/矩形选区；编辑中的单元格与未保存改动不属于“选中”，保留）
+    let click_outside_table = ui.input(|i| {
+        i.pointer.button_clicked(egui::PointerButton::Primary)
+            && i.pointer
+                .latest_pos()
+                .is_some_and(|p| !table_region.contains(p))
+    });
+    if click_outside_table {
+        tab.selected_preview_row = None;
+        tab.selected_preview_rows.clear();
+        tab.selection_anchor_row = None;
+        tab.selected_columns.clear();
+        tab.column_selection_anchor = None;
+        clear_table_cell_selection(tab);
     }
     action
 }
