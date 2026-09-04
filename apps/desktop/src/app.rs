@@ -12305,8 +12305,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     let pk = col.primary_key;
 
                                     body.row(28.0, |mut row| {
-                                        // 选中行用斑马纹色高亮（行号列铺斑马纹色；表单组件内部用 card_bg 盖住）
-                                        let index_fill = if is_selected { palette.table_alt_bg } else { Color32::TRANSPARENT };
+                                        // 选中行铺选中底色（行号列与其余单元格同色，整行可辨）
+                                        let index_fill = if is_selected { selected_field_row_fill(&palette) } else { Color32::TRANSPARENT };
                                         // 序号（点击选中行）
                                         row.col(|ui| {
                                             let resp = table_index_cell(ui, &palette, index_fill, &format!("{}", visible_idx + 1));
@@ -12415,6 +12415,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         }
                                         // 删除
                                         row.col(|ui| {
+                                            if is_selected {
+                                                ui.painter().rect_filled(ui.max_rect(), 0.0, selected_field_row_fill(&palette));
+                                            }
                                             let rect = ui.max_rect();
                                             let center = rect.center();
                                             let btn_rect = egui::Rect::from_center_size(center, egui::vec2(28.0, 24.0));
@@ -29937,8 +29940,8 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                 let pk = col.primary_key;
 
                                 body.row(28.0, |mut row| {
-                                    // 选中行用斑马纹色高亮（行号列铺斑马纹色；表单组件内部用 card_bg 盖住）
-                                    let index_fill = if is_selected { palette.table_alt_bg } else { Color32::TRANSPARENT };
+                                    // 选中行铺选中底色（行号列与其余单元格同色，整行可辨）
+                                    let index_fill = if is_selected { selected_field_row_fill(&palette) } else { Color32::TRANSPARENT };
                                     // 序号（可点击选中行）
                                     row.col(|ui| {
                                         let resp = table_index_cell(ui, &palette, index_fill, &format!("{}", visible_idx + 1));
@@ -30047,6 +30050,9 @@ fn render_editable_structure_grid(ui: &mut egui::Ui, tab: &mut TableTabState) {
                                     }
                                     // 删除
                                     row.col(|ui| {
+                                        if is_selected {
+                                            ui.painter().rect_filled(ui.max_rect(), 0.0, selected_field_row_fill(&palette));
+                                        }
                                         let rect = ui.max_rect();
                                         let center = rect.center();
                                         let btn_rect = egui::Rect::from_center_size(center, egui::vec2(28.0, 24.0));
@@ -33847,6 +33853,11 @@ fn blend_color(left: Color32, right: Color32, right_weight: f32) -> Color32 {
     )
 }
 
+/// 字段编辑表格（新建表 / 编辑表结构）选中行底色：card_bg 与 selection_bg 中度混合，深浅色主题下均清晰可辨
+fn selected_field_row_fill(palette: &MacUiPalette) -> Color32 {
+    blend_color(palette.card_bg, palette.selection_bg, 0.5)
+}
+
 fn toolbar_button(
     ui: &mut egui::Ui,
     label: &str,
@@ -34557,16 +34568,16 @@ fn segment_button_color(ui: &mut egui::Ui, label: &str, selected: bool, _accent:
     response
 }
 
-/// 单元格输入样式：选中行整格铺斑马纹色背景（与交替行一致），表单组件内部用 card_bg 盖住保持干净，未选中行透明底
+/// 单元格输入样式：选中行整格铺中度选中蓝（输入框背景透明，让选中底色透出整行），未选中行透明底
 fn apply_cell_input_style(ui: &mut egui::Ui, selected: bool) {
     let palette = mac_ui_palette_from_ui(ui);
     if selected {
-        ui.painter().rect_filled(ui.max_rect(), 0.0, palette.table_alt_bg);
+        ui.painter().rect_filled(ui.max_rect(), 0.0, selected_field_row_fill(&palette));
     }
     let v = ui.visuals_mut();
-    // TextEdit 背景取自 `text_edit_bg_color()`（默认 extreme_bg_color），选中行用不透明 card_bg 盖住斑马纹底色
-    v.text_edit_bg_color = if selected { Some(palette.card_bg) } else { None };
-    let bg_fill = if selected { palette.card_bg } else { Color32::TRANSPARENT };
+    // TextEdit 背景取自 `text_edit_bg_color()`（默认 extreme_bg_color）；选中行改为透明以透出选中底色
+    v.text_edit_bg_color = if selected { Some(Color32::TRANSPARENT) } else { None };
+    let bg_fill = Color32::TRANSPARENT;
     v.widgets.inactive.bg_fill = bg_fill;
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.soft_border);
     v.widgets.hovered.bg_fill = bg_fill;
