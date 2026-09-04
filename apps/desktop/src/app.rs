@@ -15200,14 +15200,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     TextEdit::singleline(&mut clause.value)
                                                                         .hint_text(RichText::new(tr!("输入原始条件")).color(ui.visuals().weak_text_color())),
                                                                 );
-                                                                release_filter_input_focus(ui, &value_resp);
+                                                                release_text_edit_on_outside_click(ui, &value_resp, None);
                                                             } else if clause.operator.uses_secondary_value() {
                                                                 let start_resp = ui.add_sized(
                                                                     [150.0, 22.0],
                                                                     TextEdit::singleline(&mut clause.value)
                                                                         .hint_text(RichText::new(tr!("起始值")).color(ui.visuals().weak_text_color())),
                                                                 );
-                                                                release_filter_input_focus(ui, &start_resp);
+                                                                release_text_edit_on_outside_click(ui, &start_resp, None);
                                                                 ui.small(
                                                                     RichText::new(tr!("到"))
                                                                         .color(palette.weak_text),
@@ -15219,7 +15219,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     )
                                                                     .hint_text(RichText::new(tr!("结束值")).color(ui.visuals().weak_text_color())),
                                                                 );
-                                                                release_filter_input_focus(ui, &end_resp);
+                                                                release_text_edit_on_outside_click(ui, &end_resp, None);
                                                             } else if clause.operator.uses_primary_value() {
                                                                 let has_suggestions = clause.column.as_ref()
                                                                     .and_then(|col| tab.filter_value_suggestions.get(col))
@@ -15231,7 +15231,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                                     TextEdit::singleline(&mut clause.value)
                                                                         .hint_text(RichText::new(clause.operator.value_hint()).color(ui.visuals().weak_text_color())),
                                                                 );
-                                                                release_filter_input_focus(ui, &resp);
+                                                                release_text_edit_on_outside_click(ui, &resp, None);
                                                                 if has_suggestions {
                                                                     // 点击输入框切换下拉
                                                                     if resp.clicked() {
@@ -19429,29 +19429,41 @@ fn sql_statement_type(sql: &str) -> &'static str {
     }
 }
 
-/// 搜索/筛选输入框的原生失焦行为。
+/// 文本输入控件的原生失焦行为（搜索/筛选输入框、SQL 编辑器通用）。
 ///
-/// 应用全局把 `surrender_focus_on` 设为 `Never`（保护编辑器选区），
-/// 因此点击输入框外部不会自动交出键盘焦点，选中文字会一直蓝着。
-/// 本函数针对搜索/筛选类输入框补回原生语义：
-/// 1. 本帧有点击且落在输入框外 → 主动交出键盘焦点；
-/// 2. 失焦时清空残留的文本选区（egui 失焦后仍会继续绘制选中高亮）。
-/// 光标位置由再次点击/键入时重新建立。
-fn release_filter_input_focus(ui: &egui::Ui, response: &egui::Response) {
+/// 应用全局把 `surrender_focus_on` 设为 `Never`（只有明确请求才交焦点），
+/// 因此点击控件外部不会自动交出键盘焦点，选中文字会一直蓝着。本函数把
+/// 该控件拉回原生语义：
+/// 1. 本帧有点击且落在控件外（`inside_rect` 用于把控件视觉整体视作“内部”，
+///    如编辑器含行号 gutter 与滚动条的区域）→ 主动交出键盘焦点；
+/// 2. 失焦时把选区折叠回主光标（egui 失焦后仍会继续绘制选中高亮，
+///    不折叠文字就永远蓝着；折叠成单点后高亮消失，光标位置得以保留）。
+/// 再次点击/键入时光标按正常交互重建。
+fn release_text_edit_on_outside_click(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    inside_rect: Option<egui::Rect>,
+) {
     if response.has_focus() {
-        let clicked_elsewhere =
-            ui.input(|i| i.pointer.any_click()) && !response.hovered();
+        let pointer_hover = ui.input(|i| i.pointer.hover_pos());
+        let inside = response.hovered()
+            || pointer_hover
+                .is_some_and(|pos| inside_rect.is_some_and(|rect| rect.contains(pos)));
+        let clicked_elsewhere = ui.input(|i| i.pointer.any_click()) && !inside;
         if clicked_elsewhere {
             response.surrender_focus();
         }
     }
     if response.lost_focus() {
         if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
-            let has_selection = state.cursor.char_range().is_some_and(|r| !r.is_empty());
-            if has_selection {
-                state.cursor.set_char_range(None);
-                state.store(ui.ctx(), response.id);
-                ui.ctx().request_repaint();
+            if let Some(range) = state.cursor.char_range() {
+                if !range.is_empty() {
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(range.primary)));
+                    state.store(ui.ctx(), response.id);
+                    ui.ctx().request_repaint();
+                }
             }
         }
     }
@@ -36111,6 +36123,10 @@ fn render_query_editor(
         egui::vec2((ui.available_width() - gutter_width).max(0.0), remaining_editor_height),
     );
 
+    // 编辑器整体区域（行号 gutter + 文本区，屏幕坐标）：点击其内滚动条/行号
+    // 不算"编辑器外部"，不触发失焦；文本区之外才交焦点。
+    let editor_region = egui::Rect::from_min_max(gutter_rect.min, editor_rect.max);
+
     let mut gutter_rows: Vec<(f32, usize)> = Vec::new();
     let mut gutter_line_offsets: HashMap<usize, usize> = HashMap::new();
 
@@ -36221,6 +36237,10 @@ fn render_query_editor(
                                 state.store(ui.ctx(), editor_id);
                             }
                         }
+
+                        // 点击编辑器整体区域外（工具栏/结果表等）→ 失焦并取消选中。
+                        // 编辑器行号 gutter、文本区、滚动条构成的 editor_region 内不算外部。
+                        release_text_edit_on_outside_click(ui, &output.response, Some(editor_region));
 
                         // 折叠时复制选中：egui 内建 Copy 从 editor_buf（display 文本）切片，
                         // 复制得到的是含 … 的省略版；这里把 display 选中范围映射回 sql 空间，
@@ -38156,8 +38176,11 @@ mod tests {
     // 所以必须在此用与真实应用一致的策略模拟：第 1 帧点击输入框聚焦并注入
     // 全选选区；第 2 帧点击远处空白，观察焦点与选区是否变化。
 
-    /// 返回 (点击外部后是否仍持有焦点, 是否仍残留非空选区)
-    fn simulate_filter_box_outside_click(apply_helper: bool) -> (bool, bool) {
+    /// 返回 (点击后是否仍持有焦点, 是否仍残留非空选区)
+    fn simulate_filter_box_outside_click(
+        apply_helper: bool,
+        inside_rect: Option<egui::Rect>,
+    ) -> (bool, bool) {
         let ctx = egui::Context::default();
         ctx.memory_mut(|mem| {
             mem.options.input_options.surrender_focus_on = egui::SurrenderFocusOn::Never;
@@ -38231,7 +38254,7 @@ mod tests {
                         egui::TextEdit::singleline(&mut text).id(id).hint_text(""),
                     );
                     if apply_helper {
-                        release_filter_input_focus(ui, &resp);
+                        release_text_edit_on_outside_click(ui, &resp, inside_rect);
                     }
                 });
             },
@@ -38246,16 +38269,26 @@ mod tests {
     #[test]
     fn filter_box_keeps_focus_and_selection_on_outside_click_without_helper() {
         // 对照组：复现 bug —— Never 策略下点外部既不交焦点也不丢选区
-        let (still_focused, lingers) = simulate_filter_box_outside_click(false);
+        let (still_focused, lingers) = simulate_filter_box_outside_click(false, None);
         assert!(still_focused, "对照组：点击外部后应仍持有焦点（复现现状）");
         assert!(lingers, "对照组：点击外部后应仍残留选区（复现现状）");
     }
 
     #[test]
     fn filter_box_releases_focus_and_selection_on_outside_click_with_helper() {
-        // 修复组：release_filter_input_focus 主动交出焦点并清空选区状态
-        let (still_focused, lingers) = simulate_filter_box_outside_click(true);
+        // 修复组：release_text_edit_on_outside_click 主动交出焦点并取消选区
+        let (still_focused, lingers) = simulate_filter_box_outside_click(true, None);
         assert!(!still_focused, "点击外部后输入框应交出焦点");
         assert!(!lingers, "点击外部后不再残留选区高亮");
+    }
+
+    #[test]
+    fn filter_box_keeps_focus_when_click_inside_exclusion_rect() {
+        // SQL 编辑器场景：inside_rect 覆盖点击位置（相当于点中行号/滚动条区域）
+        // 时不应视为"外部"——不交焦点、不清选区
+        let away = egui::Rect::from_min_max(egui::pos2(500.0, 300.0), egui::pos2(700.0, 500.0));
+        let (still_focused, lingers) = simulate_filter_box_outside_click(true, Some(away));
+        assert!(still_focused, "点击位于排除区域内时不应交出焦点");
+        assert!(lingers, "点击位于排除区域内时不应取消选中");
     }
 }
