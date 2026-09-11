@@ -31660,22 +31660,21 @@ fn mongo_clause_expr(clause: &TableFilterClause, definition: Option<&TableDefini
 /// 将用户输入的筛选值转换为 MongoDB JSON 字面量
 /// 日期 → ISODate("...")，Decimal128 → NumberDecimal("...")，数值 → 无引号数字，其他 → 带引号字符串
 fn mongo_value_literal(value: &str, column_type: Option<&str>) -> String {
-    let is_string_col = column_type == Some("String");
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     // 字符串字段不做类型推断，原样返回带引号字符串
-    if !is_string_col {
-        if looks_like_datetime(value) {
-            return format!("ISODate(\"{}\")", value.replace('\\', "\\\\").replace('"', "\\\""));
-        }
-        // ObjectId：column_type 为 ObjectId，或 24 位十六进制字符串（_id 常见）
-        if column_type == Some("ObjectId") || value.len() == 24 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
-            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-            return format!("ObjectId(\"{}\")", escaped);
-        }
-        // Decimal128 字段需要 NumberDecimal() 包裹才能正确匹配
-        if column_type == Some("Decimal128") {
-            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-            return format!("NumberDecimal(\"{}\")", escaped);
-        }
+    if column_type == Some("String") {
+        return format!("\"{}\"", escape(value));
+    }
+    if looks_like_datetime(value) {
+        return format!("ISODate(\"{}\")", escape(value));
+    }
+    // ObjectId：column_type 为 ObjectId，或 24 位十六进制字符串（_id 常见）
+    if column_type == Some("ObjectId") || value.len() == 24 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return format!("ObjectId(\"{}\")", escape(value));
+    }
+    // Decimal128 字段需要 NumberDecimal() 包裹才能正确匹配
+    if column_type == Some("Decimal128") {
+        return format!("NumberDecimal(\"{}\")", escape(value));
     }
     if let Ok(n) = value.parse::<i64>() {
         return n.to_string();
@@ -31683,7 +31682,7 @@ fn mongo_value_literal(value: &str, column_type: Option<&str>) -> String {
     if let Ok(n) = value.parse::<f64>() {
         return n.to_string();
     }
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("\"{}\"", escape(value))
 }
 
 fn build_table_preview_sql(
@@ -38527,6 +38526,67 @@ mod tests {
         assert!(
             offset2 < 100.0,
             "全选后滚动条不应跳到底部（offset={offset2}）"
+        );
+    }
+
+    // ── MongoDB 数据页筛选：字符串列的值即使看起来像数字也必须加引号 ──
+
+    fn mongo_string_column_definition() -> TableDefinition {
+        TableDefinition {
+            columns: vec![ColumnDefinition {
+                name: "transactionOrderNo".to_string(),
+                data_type: "String".to_string(),
+                nullable: true,
+                primary_key: false,
+                unique: false,
+                auto_increment: false,
+                on_update_current_timestamp: false,
+                default_value: None,
+                comment: None,
+            }],
+            create_sql: None,
+            table_comment: None,
+            engine: None,
+            charset: None,
+        }
+    }
+
+    #[test]
+    fn mongo_value_literal_keeps_quotes_for_string_column() {
+        assert_eq!(
+            mongo_value_literal("2026083102310175600000000", Some("String")),
+            "\"2026083102310175600000000\""
+        );
+        assert_eq!(mongo_value_literal("123", Some("String")), "\"123\"");
+        // 数值列仍生成无引号数字
+        assert_eq!(mongo_value_literal("123", Some("Int64")), "123");
+    }
+
+    #[test]
+    fn mongo_preview_cmd_quotes_string_column_value() {
+        let filter = TableFilterState {
+            clauses: vec![TableFilterClause {
+                joiner: TableFilterJoiner::And,
+                column: Some("transactionOrderNo".to_string()),
+                column_type: Some("String".to_string()),
+                operator: TableFilterOperator::Eq,
+                value: "2026083102310175600000000".to_string(),
+                second_value: String::new(),
+                enabled: true,
+            }],
+        };
+        let cmd = build_mongo_preview_cmd(
+            "st_ng_aicapay_bal_v1",
+            &filter,
+            &TableSortState { clauses: Vec::new() },
+            Some(1000),
+            Some(0),
+            Some(&mongo_string_column_definition()),
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "db.st_ng_aicapay_bal_v1.find({\"transactionOrderNo\": \"2026083102310175600000000\"}).limit(1000).skip(0)"
         );
     }
 }
