@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 use crate::autocomplete::{
-    apply_autocomplete_suggestion, autocomplete_min_prefix_len, autocomplete_palette, needs_space_padding, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
+    apply_autocomplete_suggestion, autocomplete_palette, needs_space_padding, render_autocomplete_popup, AutocompleteEngine, AutocompletePalette,
     AutocompleteState, AutocompleteSuggestion, AutocompleteUsageMemory, SchemaCache, SqlContext, SqlContextParser,
     SuggestionKind,
 };
@@ -116,6 +116,32 @@ pub struct DesktopApp {
     status_message: String,
     status_level: StatusLevel,
     sidebar_width: f32,
+    /// 右侧文件面板折叠状态（跨会话持久化）
+    files_panel_collapsed: bool,
+    /// 右侧文件面板宽度（跨会话持久化）
+    files_panel_width: f32,
+    /// 文件面板的项目根目录（跨会话持久化）
+    files_root: Option<std::path::PathBuf>,
+    /// 文件面板当前选中的文件/目录
+    files_selected: Option<std::path::PathBuf>,
+    /// 文件面板展开的目录（绝对路径字符串）
+    files_expanded: HashSet<String>,
+    /// 目录 → 子项缓存（按需扫描）
+    files_dir_children: HashMap<String, Vec<FilePanelEntry>>,
+    /// 文件路径 → 连接/库绑定（跨会话持久化）
+    file_bindings: HashMap<String, FileBinding>,
+    /// 待处理的自动保存冲突
+    file_conflict: Option<FileConflictState>,
+    /// 上一帧活跃标签页（用于切页时冲刷文件自动保存）
+    last_active_tab_for_flush: usize,
+    /// 文件面板上次是否处于聚焦状态（用于聚焦时刷新）
+    files_panel_focused: bool,
+    /// 文件面板的复制剪贴板（仅记录本应用内复制的文件/目录）
+    files_clipboard: Vec<std::path::PathBuf>,
+    /// 新建 / 重命名对话框
+    files_entry_dialog: Option<FilesEntryDialog>,
+    /// 待确认删除的路径
+    files_delete_confirm: Option<std::path::PathBuf>,
     /// 全局 DDL 面板默认展开状态（跨会话持久化），新打开的表信息页按此初始化
     ddl_panel_default_expanded: bool,
     is_connection_dialog_open: bool,
@@ -171,7 +197,21 @@ pub struct DesktopApp {
     pending_query_definition: Option<Receiver<QueryDefinitionLoadResult>>,
     pending_query_edit_context: Option<QueryEditContextTrigger>,
     pending_autocomplete_columns: Vec<Receiver<AutocompleteColumnsLoadResult>>,
+    /// 当前库字段后台预取：每批结果到达后写入 SchemaCache + 元数据缓存
+    pending_column_prefetch: Vec<Receiver<ColumnPrefetchChunk>>,
+    /// 已触发过字段预取的 (connection|database)，避免重复拉取
+    prefetched_databases: HashSet<String>,
     pending_schema_load: Option<Receiver<SchemaLoadResult>>,
+    /// 已尝试过整库表清单加载的连接（避免每帧重复触发）
+    schema_load_attempted: HashSet<String>,
+    /// 持久化元数据缓存的后台加载结果（避免在 UI 线程上做 SQLite 读取 + JSON 解析）
+    pending_metadata_cache_load: Vec<Receiver<(String, Vec<CachedEntry>)>>,
+    /// 查询页单元格修改的后台保存结果
+    pending_query_batch_save_result: Option<Receiver<QueryBatchSaveResult>>,
+    /// 表结构变更（ALTER TABLE 等）的后台执行结果：(tab_id, 结果)
+    pending_structure_sql: Option<(String, Receiver<Result<(), String>>)>,
+    /// 表数据页写操作（新增/删除行）的后台执行结果
+    pending_table_mutation: Option<Receiver<TableMutationResult>>,
     schema_cache: SchemaCache,
     autocomplete_usage: AutocompleteUsageMemory,
     cache_loaded_connections: HashSet<String>,
@@ -249,6 +289,91 @@ struct AutocompleteColumnsLoadResult {
     load_key: String,
     table_ref: TableRef,
     definition: Result<TableDefinition, String>,
+}
+
+/// 当前库字段后台预取的一批结果
+struct ColumnPrefetchChunk {
+    connection_id: String,
+    entries: Vec<(TableRef, Result<TableDefinition, String>)>,
+}
+
+/// 查询页单元格批量保存的后台执行结果
+struct QueryBatchSaveResult {
+    tab_id: String,
+    success: usize,
+    error: Option<String>,
+    source_sql: String,
+}
+
+/// 表数据页写操作（新增/删除行）成功后的界面收尾动作
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TableMutationFollowUp {
+    None,
+    InsertRow,
+    DeleteRows,
+}
+
+/// 表数据页写操作的后台执行结果
+struct TableMutationResult {
+    tab_id: String,
+    success_message: String,
+    affected: u64,
+    follow_up: TableMutationFollowUp,
+    error: Option<String>,
+}
+
+/// 右侧文件面板中的一项（目录或 .sql 文件）
+#[derive(Clone)]
+struct FilePanelEntry {
+    path: std::path::PathBuf,
+    name: String,
+    is_dir: bool,
+}
+
+/// 文件 → 连接/库 的绑定（按文件路径持久化）
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct FileBinding {
+    connection_id: Option<String>,
+    database: Option<String>,
+}
+
+/// 自动保存时发现磁盘被外部修改：等待用户选择覆盖还是重新加载
+#[derive(Clone)]
+struct FileConflictState {
+    tab_id: String,
+    path: std::path::PathBuf,
+}
+
+/// 文件面板当前帧需要显示的一行（目录树按展开状态摊平）
+struct FilePanelRow {
+    path: std::path::PathBuf,
+    name: String,
+    is_dir: bool,
+    depth: usize,
+    expanded: bool,
+}
+
+/// 文件面板工具栏触发的动作（延迟到面板渲染结束后执行）
+enum FilesPanelAction {
+    PickRoot,
+    Refresh,
+    Collapse,
+}
+
+/// 文件面板的新建 / 重命名对话框状态
+#[derive(Clone)]
+struct FilesEntryDialog {
+    kind: FilesEntryDialogKind,
+    name: String,
+    error: Option<String>,
+    focus_requested: bool,
+}
+
+#[derive(Clone)]
+enum FilesEntryDialogKind {
+    NewFolder { parent: std::path::PathBuf },
+    NewFile { parent: std::path::PathBuf },
+    Rename { path: std::path::PathBuf },
 }
 
 struct ConnectionTreeLoadResult {
@@ -838,6 +963,14 @@ struct QueryTabState {
     connection_id: Option<String>,
     database: Option<String>,
     sql: String,
+    /// 从右侧文件面板打开时对应的磁盘文件；None 表示普通查询页
+    file_path: Option<std::path::PathBuf>,
+    /// 上次与磁盘同步的内容（判断是否有未保存修改）
+    file_saved_text: Option<String>,
+    /// 上次读写磁盘时的修改时间（外部修改冲突检测）
+    file_disk_mtime: Option<std::time::SystemTime>,
+    /// 首次检测到未保存修改的时间（自动保存防抖）
+    file_dirty_since: Option<std::time::Instant>,
     cursor_range: Option<egui::text::CCursorRange>,
     /// Alt+drag column block selection (rectangular text selection across rows).
     column_block: Option<ColumnBlockSelection>,
@@ -871,6 +1004,14 @@ struct QueryTabState {
     editor_focus_requested: bool,
     editor_height: Option<f32>,
     bottom_panel_collapsed: bool,
+    /// 结果面板已关闭：不渲染底部面板与折叠条，重新执行或手动打开时恢复
+    bottom_panel_closed: bool,
+    /// 本次执行新增的结果页数量（用于判断是否切到结果页 / 触发编辑上下文分析）
+    run_result_count: usize,
+    /// 每个结果页的稳定编号（关闭中间结果页后不重新编号）
+    result_serials: Vec<u64>,
+    /// 下一个结果页编号
+    next_result_serial: u64,
     saved_queries_panel_visible: bool,
     saved_queries_panel_width: Option<f32>,
     /// 已保存查询树展开状态（节点 key 集合，空 = 全展开）
@@ -885,6 +1026,8 @@ struct QueryTabState {
     folded: Vec<crate::fold::FoldRegion>,
     /// 当前可折叠候选（每帧/sql 变化时刷新）
     fold_candidates: Vec<crate::fold::FoldCandidate>,
+    /// 生成 fold_candidates 时的 sql 快照，避免每帧重扫大 SQL
+    fold_candidates_sql_snapshot: String,
     /// 折叠后的显示文本与偏移映射（None = 无折叠，display == sql）
     fold_display: Option<crate::fold::FoldDisplay>,
     /// 生成 fold_display 时的 sql 快照，用于检测是否需要重建
@@ -901,6 +1044,14 @@ struct QueryTabState {
     autocomplete: AutocompleteState,
     /// Pending cursor position after autocomplete commit (char index).
     autocomplete_cursor_target: Option<usize>,
+    /// 是否为没有 LIMIT 的 SELECT 自动追加 LIMIT 500（工具栏可切换）
+    limit_result_rows: bool,
+    /// 本次执行是否真的追加了默认行数限制
+    row_limit_applied: bool,
+    /// 上一次执行模式，供结果区「显示全部」原样重跑
+    last_execute_mode: Option<ExecuteMode>,
+    /// 下一次执行跳过默认行数限制（一次性）
+    force_unlimited_once: bool,
     #[allow(dead_code)]
     abort_sender: Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::oneshot::Sender<()>>>>,
     explain_tree: Option<Vec<ExplainNode>>,
@@ -945,6 +1096,10 @@ impl Clone for QueryTabState {
             connection_id: self.connection_id.clone(),
             database: self.database.clone(),
             sql: self.sql.clone(),
+            file_path: self.file_path.clone(),
+            file_saved_text: self.file_saved_text.clone(),
+            file_disk_mtime: self.file_disk_mtime,
+            file_dirty_since: self.file_dirty_since,
             cursor_range: self.cursor_range,
             column_block: self.column_block.clone(),
             extra_cursors: self.extra_cursors.clone(),
@@ -972,6 +1127,10 @@ impl Clone for QueryTabState {
             editor_focus_requested: self.editor_focus_requested,
             editor_height: self.editor_height,
             bottom_panel_collapsed: self.bottom_panel_collapsed,
+            bottom_panel_closed: self.bottom_panel_closed,
+            run_result_count: self.run_result_count,
+            result_serials: self.result_serials.clone(),
+            next_result_serial: self.next_result_serial,
             saved_queries_panel_visible: self.saved_queries_panel_visible,
             saved_queries_panel_width: self.saved_queries_panel_width,
             saved_query_tree_collapsed: self.saved_query_tree_collapsed.clone(),
@@ -980,6 +1139,7 @@ impl Clone for QueryTabState {
             saved_query_drag_target: self.saved_query_drag_target.clone(),
             folded: self.folded.clone(),
             fold_candidates: self.fold_candidates.clone(),
+            fold_candidates_sql_snapshot: self.fold_candidates_sql_snapshot.clone(),
             fold_display: self.fold_display.clone(),
             fold_display_sql_snapshot: self.fold_display_sql_snapshot.clone(),
             selected_saved_query_id: self.selected_saved_query_id.clone(),
@@ -989,6 +1149,10 @@ impl Clone for QueryTabState {
             selected_saved_query_database: self.selected_saved_query_database.clone(),
             autocomplete: self.autocomplete.clone(),
             autocomplete_cursor_target: self.autocomplete_cursor_target,
+            limit_result_rows: self.limit_result_rows,
+            row_limit_applied: self.row_limit_applied,
+            last_execute_mode: self.last_execute_mode.clone(),
+            force_unlimited_once: self.force_unlimited_once,
             abort_sender: self.abort_sender.clone(),
             explain_tree: self.explain_tree.clone(),
             is_explain: self.is_explain,
@@ -1914,6 +2078,19 @@ impl DesktopApp {
             status_message: tr!("就绪").into(),
             status_level: StatusLevel::Normal,
             sidebar_width,
+            files_panel_collapsed: false,
+            files_panel_width: 240.0,
+            files_root: None,
+            files_selected: None,
+            files_expanded: HashSet::new(),
+            files_dir_children: HashMap::new(),
+            file_bindings: HashMap::new(),
+            file_conflict: None,
+            last_active_tab_for_flush: 0,
+            files_panel_focused: false,
+            files_clipboard: Vec::new(),
+            files_entry_dialog: None,
+            files_delete_confirm: None,
             ddl_panel_default_expanded,
             is_connection_dialog_open: false,
             editing_connection_id: None,
@@ -1965,7 +2142,14 @@ impl DesktopApp {
             pending_query_definition: None,
             pending_query_edit_context: None,
             pending_autocomplete_columns: Vec::new(),
+            pending_column_prefetch: Vec::new(),
+            prefetched_databases: HashSet::new(),
             pending_schema_load: None,
+            schema_load_attempted: HashSet::new(),
+            pending_metadata_cache_load: Vec::new(),
+            pending_query_batch_save_result: None,
+            pending_structure_sql: None,
+            pending_table_mutation: None,
             schema_cache: SchemaCache::new(),
             autocomplete_usage: AutocompleteUsageMemory::default(),
             cache_loaded_connections: HashSet::new(),
@@ -2030,6 +2214,27 @@ impl DesktopApp {
             frame_count: 0,
             last_cache_stats_log: None,
         };
+
+        // 加载右侧文件面板设置（根目录、宽度、折叠状态、文件→连接/库绑定）
+        if let Ok(Some(v)) = app.services.load_ui_state("files_panel_collapsed") {
+            app.files_panel_collapsed = v == "1";
+        }
+        if let Ok(Some(v)) = app.services.load_ui_state("files_panel_width") {
+            if let Ok(width) = v.parse::<f32>() {
+                app.files_panel_width = width.clamp(180.0, 720.0);
+            }
+        }
+        if let Ok(Some(v)) = app.services.load_ui_state("files_root") {
+            let path = std::path::PathBuf::from(v);
+            if path.is_dir() {
+                app.files_root = Some(path);
+            }
+        }
+        if let Ok(Some(json)) = app.services.load_ui_state("file_bindings") {
+            if let Ok(map) = serde_json::from_str::<HashMap<String, FileBinding>>(&json) {
+                app.file_bindings = map;
+            }
+        }
 
         // 加载最近打开的标签页
         if let Ok(Some(json)) = app.services.load_ui_state("recent_tabs") {
@@ -2255,21 +2460,29 @@ impl DesktopApp {
             return;
         }
         self.cache_loaded_connections.insert(connection_id.to_string());
-        let cached = self.services.load_cached_metadata(connection_id);
-        for entry in &cached {
-            self.schema_cache.add_table(entry.table.clone(), entry.is_view);
-            if let Some(ref db) = entry.database {
-                self.schema_cache.add_table_to_database(db, entry.table.clone(), entry.is_view);
-                self.schema_cache.add_database(connection_id, db.clone());
+        // SQLite 读取 + 列 JSON 解析可能耗时，放到后台线程，结果通过 channel 回填。
+        let services = self.services.clone();
+        let handle = self.runtime.handle().clone();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_metadata_cache_load.push(receiver);
+        let connection_id = connection_id.to_string();
+        handle.spawn_blocking(move || {
+            let cached = services.load_cached_metadata(&connection_id);
+            let _ = sender.send((connection_id, cached));
+        });
+    }
+
+    fn poll_metadata_cache_load(&mut self) {
+        let mut pending = std::mem::take(&mut self.pending_metadata_cache_load);
+        pending.retain(|receiver| match receiver.try_recv() {
+            Ok((connection_id, cached)) => {
+                apply_cached_metadata_entries(&mut self.schema_cache, &connection_id, &cached);
+                false
             }
-            if let Some(ref schema) = entry.schema {
-                self.schema_cache.add_table_to_schema(schema, entry.table.clone(), entry.is_view);
-                self.schema_cache.add_schema(connection_id, schema.clone());
-            }
-            if !entry.columns.is_empty() {
-                self.schema_cache.add_columns(entry.table.clone(), entry.columns.clone());
-            }
-        }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => false,
+        });
+        self.pending_metadata_cache_load = pending;
     }
 
     fn autocomplete_table_load_key(table_ref: &TableRef) -> String {
@@ -2288,20 +2501,27 @@ impl DesktopApp {
         is_view: bool,
         definition: &TableDefinition,
     ) {
-        self.schema_cache.add_table(table_ref.table.clone(), is_view);
-        self.schema_cache
-            .add_columns(table_ref.table.clone(), definition.columns.clone());
+        self.schema_cache.add_table(
+            &table_ref.connection_id,
+            table_ref.database.as_deref(),
+            table_ref.schema.as_deref(),
+            table_ref.table.clone(),
+            is_view,
+        );
+        self.schema_cache.add_columns(
+            &table_ref.connection_id,
+            table_ref.database.as_deref(),
+            table_ref.schema.as_deref(),
+            table_ref.table.clone(),
+            definition.columns.clone(),
+        );
         if let Some(ref db) = table_ref.database {
             self.schema_cache
                 .add_database(&table_ref.connection_id, db.clone());
-            self.schema_cache
-                .add_table_to_database(db, table_ref.table.clone(), is_view);
         }
         if let Some(ref schema) = table_ref.schema {
             self.schema_cache
                 .add_schema(&table_ref.connection_id, schema.clone());
-            self.schema_cache
-                .add_table_to_schema(schema, table_ref.table.clone(), is_view);
         }
         self.services.merge_metadata_cache(
             &table_ref.connection_id,
@@ -2352,17 +2572,23 @@ impl DesktopApp {
         // 只对连接树/元数据缓存确认存在的表加载列。用户输入过程中的未知表名
         // （未打完的表名、schema 名当裸表名等）静默跳过，避免每次输入都触发
         // 数据库查询并对不存在的表报错、把连接标为失败。
-        if !self
+        if !self.schema_cache.is_known_table(
+            Some(&connection_id),
+            table_ref.schema.as_deref(),
+            table_ref.database.as_deref(),
+            &table_ref.table,
+        ) {
+            return;
+        }
+        if self
             .schema_cache
-            .is_known_table(
-                table_ref.schema.as_deref(),
+            .columns_for_table(
+                Some(&connection_id),
                 table_ref.database.as_deref(),
                 &table_ref.table,
             )
+            .is_some()
         {
-            return;
-        }
-        if self.schema_cache.columns_for_table(&table_ref.table).is_some() {
             return;
         }
         let load_key = Self::autocomplete_table_load_key(&table_ref);
@@ -2388,27 +2614,12 @@ impl DesktopApp {
     }
 
     fn poll_autocomplete_columns(&mut self) {
-        let active_query_id = self.tabs.get(self.active_tab).and_then(|tab| match tab {
-            WorkspaceTab::Query(q) => Some(q.id.clone()),
-            _ => None,
-        });
         let mut pending = std::mem::take(&mut self.pending_autocomplete_columns);
         pending.retain(|receiver| match receiver.try_recv() {
             Ok(message) => {
                 self.loading_autocomplete_columns.remove(&message.load_key);
                 if let Ok(definition) = message.definition {
                     self.cache_table_definition(&message.table_ref, message.table_ref.is_view, &definition);
-                    if let Some(active_query_id) = active_query_id.as_deref() {
-                        if let Some(WorkspaceTab::Query(tab)) = self
-                            .tabs
-                            .iter_mut()
-                            .find(|tab| matches!(tab, WorkspaceTab::Query(q) if q.id == active_query_id))
-                        {
-                            if tab.autocomplete.visible {
-                                tab.autocomplete.trigger_requested = true;
-                            }
-                        }
-                    }
                 }
                 false
             }
@@ -2418,10 +2629,169 @@ impl DesktopApp {
         self.pending_autocomplete_columns = pending;
     }
 
+    /// 查询页所在连接还没有表清单时，后台补一次整库表名，
+    /// 避免「没展开过侧边栏」就完全提示不到表名。
+    fn ensure_schema_tables_for_active_query(&mut self) {
+        let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let Some(connection_id) = tab.connection_id.clone() else {
+            return;
+        };
+        if self.pending_schema_load.is_some()
+            || !self.pending_metadata_cache_load.is_empty()
+            || self.schema_load_attempted.contains(&connection_id)
+            || self.schema_cache.has_tables(&connection_id)
+        {
+            return;
+        }
+        self.spawn_schema_load(connection_id);
+    }
+
+    /// 当前查询页选定了库时触发预取（每帧调用，内部去重）
+    fn maybe_prefetch_active_database_columns(&mut self) {
+        let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let Some(connection_id) = tab.connection_id.clone() else {
+            return;
+        };
+        let Some(database) = tab.database.clone() else {
+            return;
+        };
+        self.prefetch_database_columns(connection_id, database);
+    }
+
+    /// 后台预取指定库所有表的列，写入本地元数据缓存，
+    /// 让后续表名/列名补全立即可用。每个 (连接, 库) 每次会话只触发一次。
+    fn prefetch_database_columns(&mut self, connection_id: String, database: String) {
+        let key = format!("{connection_id}|{database}");
+        if self.prefetched_databases.contains(&key) {
+            return;
+        }
+        // 同一时刻只跑一个预取任务：快速展开多个库时避免同时发起上千张表的 DDL 查询，
+        // 把数据库连接池/服务端拖慢。
+        if !self.pending_column_prefetch.is_empty() {
+            return;
+        }
+        // 表名还没加载时先等待，下一帧再试
+        let mut locations = self
+            .schema_cache
+            .table_locations(&connection_id, Some(&database));
+        if locations.is_empty() {
+            // 有些驱动返回的表节点不带 database（如部分 PG 场景），
+            // 退化为整连接的表，避免预取永远不触发。
+            locations = self.schema_cache.table_locations(&connection_id, None);
+        }
+        if locations.is_empty() {
+            return;
+        }
+        let targets: Vec<TableRef> = locations
+            .into_iter()
+            .filter(|(db, _schema, table, _is_view)| {
+                self.schema_cache
+                    .columns_for_table(Some(&connection_id), db.as_deref(), table)
+                    .is_none()
+            })
+            .take(500)
+            .map(|(db, schema, table, is_view)| TableRef {
+                connection_id: connection_id.clone(),
+                database: db,
+                schema,
+                table,
+                is_view,
+            })
+            .collect();
+        self.prefetched_databases.insert(key);
+        if targets.is_empty() {
+            return;
+        }
+
+        let services = self.services.clone();
+        let handle = self.runtime.handle().clone();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_column_prefetch.push(receiver);
+        handle.spawn(async move {
+            const BATCH: usize = 8;
+            for chunk in targets.chunks(BATCH) {
+                let entries = services
+                    .load_table_definitions(&connection_id, chunk)
+                    .await;
+                if sender
+                    .send(ColumnPrefetchChunk {
+                        connection_id: connection_id.clone(),
+                        entries,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                // 让出执行权，避免长批次预取长时间占满异步 worker
+                tokio::task::yield_now().await;
+            }
+        });
+    }
+
+    fn poll_column_prefetch(&mut self) {
+        if self.pending_column_prefetch.is_empty() {
+            return;
+        }
+        let mut pending = std::mem::take(&mut self.pending_column_prefetch);
+        let mut pending_writes: Vec<(String, Vec<CachedEntry>)> = Vec::new();
+        pending.retain(|receiver| match receiver.try_recv() {
+            Ok(chunk) => {
+                let mut entries: Vec<CachedEntry> = Vec::new();
+                for (table_ref, definition) in chunk.entries {
+                    let Ok(definition) = definition else { continue };
+                    self.schema_cache.add_table(
+                        &table_ref.connection_id,
+                        table_ref.database.as_deref(),
+                        table_ref.schema.as_deref(),
+                        table_ref.table.clone(),
+                        table_ref.is_view,
+                    );
+                    self.schema_cache.add_columns(
+                        &table_ref.connection_id,
+                        table_ref.database.as_deref(),
+                        table_ref.schema.as_deref(),
+                        table_ref.table.clone(),
+                        definition.columns.clone(),
+                    );
+                    entries.push(CachedEntry {
+                        database: table_ref.database.clone(),
+                        schema: table_ref.schema.clone(),
+                        table: table_ref.table.clone(),
+                        is_view: table_ref.is_view,
+                        columns: definition.columns,
+                    });
+                }
+                if !entries.is_empty() {
+                    pending_writes.push((chunk.connection_id.clone(), entries));
+                }
+                true
+            }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => false,
+        });
+        self.pending_column_prefetch = pending;
+        // 落盘放到后台线程：SQLite 写入会长时间持有共享连接锁，
+        // 若在 UI 线程执行，预取批次一多就会明显卡顿。
+        if !pending_writes.is_empty() {
+            let services = self.services.clone();
+            let handle = self.runtime.handle().clone();
+            handle.spawn_blocking(move || {
+                for (connection_id, entries) in pending_writes {
+                    services.merge_metadata_cache(&connection_id, &entries);
+                }
+            });
+        }
+    }
+
     fn spawn_schema_load(&mut self, connection_id: String) {
         if self.pending_schema_load.is_some() {
             return;
         }
+        self.schema_load_attempted.insert(connection_id.clone());
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
         let (sender, receiver) = mpsc::channel();
@@ -2431,7 +2801,7 @@ impl DesktopApp {
                 .load_all_schema_tables(&connection_id)
                 .await;
 
-            // 异步回写缓存（在后台线程，不阻塞 UI）
+            // 表清单落盘放到阻塞线程池：SQLite 写入会持有共享连接锁，不应占用异步 worker。
             if let Ok(ref nodes) = tables {
                 let entries: Vec<CachedEntry> = nodes
                     .iter()
@@ -2443,7 +2813,12 @@ impl DesktopApp {
                         columns: vec![],
                     })
                     .collect();
-                services.save_metadata_cache(&connection_id, &entries);
+                let services_for_write = services.clone();
+                let connection_for_write = connection_id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    services_for_write.save_metadata_table_list(&connection_for_write, &entries)
+                })
+                .await;
             }
 
             let _ = sender.send(SchemaLoadResult {
@@ -2646,13 +3021,13 @@ impl DesktopApp {
                     Ok(nodes) => {
                         for node in &nodes {
                             let is_view = matches!(node.node_type, ExplorerNodeType::View);
-                            self.schema_cache.add_table(node.name.clone(), is_view);
-                            if let Some(ref db) = node.database {
-                                self.schema_cache.add_table_to_database(db, node.name.clone(), is_view);
-                            }
-                            if let Some(ref schema) = node.schema {
-                                self.schema_cache.add_table_to_schema(schema, node.name.clone(), is_view);
-                            }
+                            self.schema_cache.add_table(
+                                &message.connection_id,
+                                node.database.as_deref(),
+                                node.schema.as_deref(),
+                                node.name.clone(),
+                                is_view,
+                            );
                         }
                     }
                     Err(error) => {
@@ -2749,28 +3124,35 @@ impl DesktopApp {
                                         ExplorerNodeType::Table | ExplorerNodeType::View => {
                                             let is_view = matches!(child.node_type, ExplorerNodeType::View);
                                             self.schema_cache.add_table(
+                                                &child.connection_id,
+                                                child.database.as_deref(),
+                                                child.schema.as_deref(),
                                                 child.name.clone(),
                                                 is_view,
                                             );
-                                            if let Some(ref db) = child.database {
-                                                self.schema_cache.add_table_to_database(
-                                                    db,
-                                                    child.name.clone(),
-                                                    is_view,
-                                                );
-                                            }
-                                            if let Some(ref schema) = child.schema {
-                                                self.schema_cache.add_table_to_schema(
-                                                    schema,
-                                                    child.name.clone(),
-                                                    is_view,
-                                                );
-                                            }
                                         }
                                         _ => {}
                                     }
                                 }
+                                // 展开库/schema 后，后台预取该库字段，加速后续补全
+                                let prefetch_target = children
+                                    .iter()
+                                    .find(|child| {
+                                        matches!(
+                                            child.node_type,
+                                            ExplorerNodeType::Table | ExplorerNodeType::View
+                                        )
+                                    })
+                                    .and_then(|child| {
+                                        child
+                                            .database
+                                            .clone()
+                                            .map(|db| (child.connection_id.clone(), db))
+                                    });
                                 self.children_by_node.insert(message.node_id, children);
+                                if let Some((connection_id, database)) = prefetch_target {
+                                    self.prefetch_database_columns(connection_id, database);
+                                }
                                 self.status_message = tr!("已加载节点").into();
                             }
                             Err(error) => {
@@ -2846,7 +3228,7 @@ impl DesktopApp {
                                             message.statement, affected, elapsed_sec
                                         );
                                         query_tab.messages.push(msg);
-                                        query_tab.bottom_panel_collapsed = false;
+                                        query_tab.open_bottom_panel();
                                     } else {
                                         // 查询语句：在消息面板显示 OK，同时保存结果到结果面板
                                         let msg = format!(
@@ -2870,37 +3252,34 @@ impl DesktopApp {
                                         // MongoDB EXPLAIN 结果只存入 JSON 视图，不加入结果表格
                                         let is_mongo_explain = message.is_explain && db_kind == DatabaseKind::MongoDb;
                                         if !is_mongo_explain {
-                                            query_tab.multi_results.push(result.clone());
-                                            query_tab.multi_statements.push(message.statement.clone());
-                                            if query_tab.multi_results.len() == 1 {
-                                                let mut display_result = result;
-                                                apply_saved_table_sort(&mut display_result, &mut query_tab.result_sort);
-                                                query_tab.result = Some(display_result);
-                                                query_tab.selected_result_index = 0;
-                                            }
+                                            // 每次执行追加新的结果页，历史结果保留在标签里，可手动关闭
+                                            push_query_result(query_tab, result, message.statement.clone());
+                                            query_tab.run_result_count += 1;
                                         }
-                                        query_tab.bottom_panel_collapsed = false;
+                                        query_tab.open_bottom_panel();
                                     }
                                     if message.is_last {
                                         self.status_message = tr!("执行完成").into();
-                                        if !query_tab.multi_results.is_empty() {
+                                        if query_tab.run_result_count > 0 {
                                             query_tab.active_bottom_tab = QueryBottomTab::Results;
                                         }
                                         query_tab.abort_sender = None;
                                         keep_receiver = false;
-                                        // 准备编辑上下文触发器
-                                        let stmt_sql = query_tab.multi_statements
-                                            .get(query_tab.selected_result_index)
-                                            .cloned()
-                                            .unwrap_or_else(|| message.statement.clone());
-                                        trigger_edit_context = Some(QueryEditContextTrigger {
-                                            tab_id: query_tab.id.clone(),
-                                            sql: stmt_sql,
-                                            connection_id: message.connection_id.clone(),
-                                            database: query_tab.database.clone(),
-                                            result_index: query_tab.selected_result_index,
-                                            all_statements: query_tab.executed_statements.clone(),
-                                        });
+                                        // 只为本次执行产生的结果页准备编辑上下文触发器
+                                        if query_tab.run_result_count > 0 {
+                                            let stmt_sql = query_tab.multi_statements
+                                                .get(query_tab.selected_result_index)
+                                                .cloned()
+                                                .unwrap_or_else(|| message.statement.clone());
+                                            trigger_edit_context = Some(QueryEditContextTrigger {
+                                                tab_id: query_tab.id.clone(),
+                                                sql: stmt_sql,
+                                                connection_id: message.connection_id.clone(),
+                                                database: query_tab.database.clone(),
+                                                result_index: query_tab.selected_result_index,
+                                                all_statements: query_tab.executed_statements.clone(),
+                                            });
+                                        }
                                         let (history, saved_queries, all_saved_queries) =
                                             load_query_library(&services, &message.connection_id);
                                         query_tab.history = history;
@@ -2913,7 +3292,7 @@ impl DesktopApp {
                                     query_tab.error = Some(err.clone());
                                     query_tab.messages.push(format!("{}: {}", message.statement, err));
                                     query_tab.active_bottom_tab = QueryBottomTab::Messages;
-                                    query_tab.bottom_panel_collapsed = false;
+                                    query_tab.open_bottom_panel();
                                     query_tab.abort_sender = None;
                                     keep_receiver = false;
                                     self.status_message = tr!("执行失败").into();
@@ -2954,6 +3333,11 @@ impl DesktopApp {
         // Poll query table definition (async: try_init_query_edit_context)
         self.poll_query_definition();
         self.poll_autocomplete_columns();
+        self.poll_column_prefetch();
+        self.poll_metadata_cache_load();
+        self.poll_query_batch_save();
+        self.poll_structure_sql();
+        self.poll_table_mutation();
 
         // 处理结果切换后的编辑上下文重新分析
         let pending_analysis: Vec<QueryEditContextTrigger> = self
@@ -4070,6 +4454,20 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
     }
 
+    /// Shift+单击表名：打开表信息页并直接展示 DDL（已有标签页则切到 DDL 视图）
+    fn open_table_ddl(&mut self, node: &ExplorerNode) {
+        self.open_table_tab(node, false, false);
+        if let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) {
+            if tab.table.connection_id == node.connection_id
+                && tab.table.database == node.database
+                && tab.table.schema == node.schema
+                && tab.table.table == node.name
+            {
+                tab.active_view = TableViewMode::Definition;
+            }
+        }
+    }
+
     fn open_table_tab(&mut self, node: &ExplorerNode, load_data: bool, force_new_tab: bool) {
         let table = TableRef {
             connection_id: node.connection_id.clone(),
@@ -4845,12 +5243,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         });
     }
 
-    fn create_query_tab(
+    /// 构造查询标签页状态（不压入 tabs），供新建查询与打开文件复用。
+    fn new_query_tab_state(
         &mut self,
         connection_id: Option<String>,
         database: Option<String>,
         initial_sql: Option<String>,
-    ) {
+    ) -> QueryTabState {
         let mut tab = QueryTabState::new(connection_id.clone());
         // 应用启动时加载的已保存查询树展开状态（QueryTabState::new 默认为空 = 全展开）
         tab.saved_query_tree_collapsed = self.saved_query_tree_collapsed.clone();
@@ -4867,10 +5266,1054 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         } else {
             tab.all_saved_queries = self.services.list_all_saved_queries().unwrap_or_default();
         }
+        tab
+    }
+
+    fn create_query_tab(
+        &mut self,
+        connection_id: Option<String>,
+        database: Option<String>,
+        initial_sql: Option<String>,
+    ) {
+        let tab = self.new_query_tab_state(connection_id, database, initial_sql);
         self.tabs.push(WorkspaceTab::Query(tab));
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.scroll_tabs_to_end = true;
     }
+
+    // ===== 右侧文件面板 =====
+
+    fn files_dir_key(dir: &std::path::Path) -> String {
+        dir.to_string_lossy().to_string()
+    }
+
+    /// 侧边栏当前选中的连接/库，作为首次打开文件时的默认绑定。
+    fn sidebar_file_binding(&self) -> FileBinding {
+        if let Some(node) = self.selected_sidebar_node() {
+            let database = match node.node_type {
+                ExplorerNodeType::Database | ExplorerNodeType::Schema => {
+                    node.database.clone().or_else(|| Some(node.name.clone()))
+                }
+                _ => node.database.clone(),
+            };
+            return FileBinding {
+                connection_id: Some(node.connection_id.clone()),
+                database,
+            };
+        }
+        FileBinding {
+            connection_id: self.selected_connection.clone(),
+            database: None,
+        }
+    }
+
+    /// 扫描一个目录：只保留子目录与 *.sql，目录在前、各自按名称排序。
+    fn files_read_dir(dir: &std::path::Path) -> Vec<FilePanelEntry> {
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(metadata) = entry.metadata() else { continue };
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if metadata.is_dir() {
+                    dirs.push(FilePanelEntry { path, name, is_dir: true });
+                } else if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("sql")) {
+                    files.push(FilePanelEntry { path, name, is_dir: false });
+                }
+            }
+        }
+        dirs.sort_by_key(|entry| entry.name.to_lowercase());
+        files.sort_by_key(|entry| entry.name.to_lowercase());
+        dirs.extend(files);
+        dirs
+    }
+
+    fn files_refresh_dir(&mut self, dir: &std::path::Path) {
+        let entries = Self::files_read_dir(dir);
+        self.files_dir_children.insert(Self::files_dir_key(dir), entries);
+    }
+
+    /// 刷新项目根与所有已展开目录（窗口重新获得焦点 / 手动刷新时调用）。
+    fn files_refresh_open_dirs(&mut self) {
+        let Some(root) = self.files_root.clone() else { return };
+        self.files_refresh_dir(&root);
+        let expanded: Vec<std::path::PathBuf> =
+            self.files_expanded.iter().map(std::path::PathBuf::from).collect();
+        for dir in expanded {
+            if dir.is_dir() {
+                self.files_refresh_dir(&dir);
+            }
+        }
+        // 消失的目录移出展开集合，避免下次刷新反复失败
+        self.files_expanded.retain(|key| std::path::Path::new(key).is_dir());
+    }
+
+    fn files_set_root(&mut self, dir: std::path::PathBuf) {
+        self.files_root = Some(dir.clone());
+        self.files_selected = None;
+        self.files_expanded.clear();
+        self.files_dir_children.clear();
+        self.files_refresh_dir(&dir);
+        let _ = self.services.save_ui_state("files_root", &dir.to_string_lossy());
+    }
+
+    fn files_pick_root(&mut self) {
+        let mut dialog = FileDialog::new();
+        if let Some(root) = &self.files_root {
+            dialog = dialog.set_directory(root);
+        }
+        if let Some(dir) = dialog.pick_folder() {
+            self.files_set_root(dir);
+        }
+    }
+
+    fn files_toggle_dir(&mut self, dir: &std::path::Path) {
+        let key = Self::files_dir_key(dir);
+        if self.files_expanded.contains(&key) {
+            self.files_expanded.remove(&key);
+        } else {
+            self.files_expanded.insert(key.clone());
+            if !self.files_dir_children.contains_key(&key) {
+                self.files_refresh_dir(dir);
+            }
+        }
+    }
+
+    /// 把目录树按展开状态摊平成行，供列表渲染。
+    fn files_collect_rows(
+        &self,
+        dir: &std::path::Path,
+        depth: usize,
+        rows: &mut Vec<FilePanelRow>,
+    ) {
+        if depth > 16 || rows.len() > 4000 {
+            return;
+        }
+        let Some(children) = self.files_dir_children.get(&Self::files_dir_key(dir)) else {
+            return;
+        };
+        for entry in children {
+            let expanded = entry.is_dir
+                && self.files_expanded.contains(&Self::files_dir_key(&entry.path));
+            rows.push(FilePanelRow {
+                path: entry.path.clone(),
+                name: entry.name.clone(),
+                is_dir: entry.is_dir,
+                depth,
+                expanded,
+            });
+            if expanded {
+                self.files_collect_rows(&entry.path, depth + 1, rows);
+            }
+        }
+    }
+
+    /// 双击文件：已打开则切换过去，否则新建文件标签页。
+    fn files_open_file(&mut self, path: &std::path::Path) {
+        if let Some(index) = self.tabs.iter().position(|tab| {
+            matches!(tab, WorkspaceTab::Query(query) if query.file_path.as_deref() == Some(path))
+        }) {
+            self.active_tab = index;
+            self.record_recent_tab();
+            return;
+        }
+        let raw = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) => {
+                self.status_level = StatusLevel::Error;
+                self.status_message = tr!("无法读取文件 {}: {}", path.display(), error).into();
+                return;
+            }
+        };
+        // 容忍 UTF-8 BOM，避免 BOM 被当作脚本文本执行
+        let content = raw.strip_prefix('\u{feff}').unwrap_or(&raw).to_string();
+        let key = Self::files_dir_key(path);
+        let binding = self
+            .file_bindings
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| self.sidebar_file_binding());
+        let title = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| tr!("查询").to_string());
+        let mut tab = self.new_query_tab_state(
+            binding.connection_id.clone(),
+            binding.database.clone(),
+            Some(content.clone()),
+        );
+        tab.title = title;
+        tab.file_path = Some(path.to_path_buf());
+        tab.file_saved_text = Some(content);
+        tab.file_disk_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        self.file_bindings.insert(key, binding);
+        self.persist_file_bindings();
+        self.tabs.push(WorkspaceTab::Query(tab));
+        self.active_tab = self.tabs.len().saturating_sub(1);
+        self.scroll_tabs_to_end = true;
+    }
+
+    /// 右键菜单的目标目录：选中目录则用它，选中文件则用其父目录。
+    fn files_target_dir(&self, entry: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+        match entry {
+            Some(path) if path.is_dir() => Some(path.to_path_buf()),
+            Some(path) => path.parent().map(|parent| parent.to_path_buf()),
+            None => match self.files_selected.as_deref() {
+                Some(path) if path.is_dir() => Some(path.to_path_buf()),
+                Some(path) => path.parent().map(|parent| parent.to_path_buf()),
+                None => self.files_root.clone(),
+            },
+        }
+    }
+
+    fn files_begin_new_entry(&mut self, parent: Option<std::path::PathBuf>, is_dir: bool) {
+        let Some(parent) = parent else { return };
+        self.files_expand_ancestors(&parent);
+        self.files_entry_dialog = Some(FilesEntryDialog {
+            kind: if is_dir {
+                FilesEntryDialogKind::NewFolder { parent }
+            } else {
+                FilesEntryDialogKind::NewFile { parent }
+            },
+            // 默认留空，直接输入即可，省去删除占位字符串
+            name: String::new(),
+            error: None,
+            focus_requested: false,
+        });
+    }
+
+    fn files_begin_rename(&mut self, path: &std::path::Path) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.files_entry_dialog = Some(FilesEntryDialog {
+            kind: FilesEntryDialogKind::Rename {
+                path: path.to_path_buf(),
+            },
+            name,
+            error: None,
+            focus_requested: false,
+        });
+    }
+
+    fn files_validate_name(name: &str) -> Result<String, &'static str> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(tr!("名称不能为空"));
+        }
+        if name.contains('/') || name.contains('\\') {
+            return Err(tr!("名称不能包含路径分隔符"));
+        }
+        if name == "." || name == ".." {
+            return Err(tr!("名称无效"));
+        }
+        Ok(name.to_string())
+    }
+
+    /// 确认新建 / 重命名对话框：完成磁盘操作并刷新面板。
+    fn files_apply_entry_dialog(&mut self) {
+        let Some(dialog) = self.files_entry_dialog.clone() else { return };
+        let name = match Self::files_validate_name(&dialog.name) {
+            Ok(name) => name,
+            Err(error) => {
+                if let Some(current) = self.files_entry_dialog.as_mut() {
+                    current.error = Some(error.to_string());
+                }
+                return;
+            }
+        };
+        // 新建文件时自动补 .sql 后缀，保证创建后能在文件面板中看到
+        let name = if matches!(&dialog.kind, FilesEntryDialogKind::NewFile { .. })
+            && std::path::Path::new(&name).extension().is_none()
+        {
+            format!("{name}.sql")
+        } else {
+            name
+        };
+        let result: Result<std::path::PathBuf, String> = match &dialog.kind {
+            FilesEntryDialogKind::NewFolder { parent } => {
+                let path = parent.join(&name);
+                if path.exists() {
+                    Err(tr!("已存在同名项").to_string())
+                } else {
+                    std::fs::create_dir_all(&path)
+                        .map(|_| path)
+                        .map_err(|error| error.to_string())
+                }
+            }
+            FilesEntryDialogKind::NewFile { parent } => {
+                let path = parent.join(&name);
+                if path.exists() {
+                    Err(tr!("已存在同名项").to_string())
+                } else {
+                    std::fs::write(&path, b"")
+                        .map(|_| path)
+                        .map_err(|error| error.to_string())
+                }
+            }
+            FilesEntryDialogKind::Rename { path } => {
+                let target = path
+                    .parent()
+                    .map(|parent| parent.join(&name))
+                    .unwrap_or_else(|| path.with_file_name(&name));
+                if target == *path {
+                    Ok(target)
+                } else if target.exists() {
+                    Err(tr!("已存在同名项").to_string())
+                } else {
+                    std::fs::rename(path, &target)
+                        .map(|_| target)
+                        .map_err(|error| error.to_string())
+                }
+            }
+        };
+        match result {
+            Ok(path) => {
+                self.files_entry_dialog = None;
+                if let FilesEntryDialogKind::Rename { path: old_path } = &dialog.kind {
+                    self.files_rebase_paths(old_path, &path);
+                }
+                if let Some(parent) = path.parent() {
+                    self.files_refresh_dir(parent);
+                    self.files_expand_ancestors(parent);
+                }
+                // 目录改名后需要重新扫描它自身，否则子项缓存仍挂在旧路径上
+                if path.is_dir() {
+                    self.files_refresh_dir(&path);
+                }
+                self.files_selected = Some(path.clone());
+                if matches!(&dialog.kind, FilesEntryDialogKind::NewFile { .. }) {
+                    self.files_open_file(&path);
+                }
+                self.status_level = StatusLevel::Success;
+                self.status_message = match &dialog.kind {
+                    FilesEntryDialogKind::Rename { .. } => tr!("已重命名为 {}", name),
+                    FilesEntryDialogKind::NewFolder { .. } => tr!("已新建文件夹 {}", name),
+                    FilesEntryDialogKind::NewFile { .. } => tr!("已新建文件 {}", name),
+                }
+                .into();
+            }
+            Err(error) => {
+                if let Some(current) = self.files_entry_dialog.as_mut() {
+                    current.error = Some(error);
+                }
+            }
+        }
+    }
+
+    /// 重命名目录后同步更新打开的标签页、文件绑定、展开状态与选中项。
+    fn files_rebase_paths(&mut self, old: &std::path::Path, new: &std::path::Path) {
+        let rebase = |path: &std::path::Path| -> Option<std::path::PathBuf> {
+            path.strip_prefix(old).ok().map(|rest| new.join(rest))
+        };
+        for workspace_tab in self.tabs.iter_mut() {
+            let WorkspaceTab::Query(tab) = workspace_tab else { continue };
+            let Some(path) = tab.file_path.clone() else { continue };
+            let Some(rebased) = rebase(&path) else { continue };
+            tab.title = rebased
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| tr!("查询").to_string());
+            tab.file_path = Some(rebased);
+        }
+        let mut rebased_bindings: HashMap<String, FileBinding> = HashMap::new();
+        for (key, binding) in std::mem::take(&mut self.file_bindings) {
+            match rebase(std::path::Path::new(&key)) {
+                Some(rebased) => {
+                    rebased_bindings.insert(Self::files_dir_key(&rebased), binding);
+                }
+                None => {
+                    rebased_bindings.insert(key, binding);
+                }
+            }
+        }
+        self.file_bindings = rebased_bindings;
+        self.persist_file_bindings();
+
+        let expanded: Vec<String> = self.files_expanded.iter().cloned().collect();
+        for key in expanded {
+            if let Some(rebased) = rebase(std::path::Path::new(&key)) {
+                self.files_expanded.remove(&key);
+                self.files_expanded.insert(Self::files_dir_key(&rebased));
+                self.files_dir_children.remove(&key);
+            }
+        }
+        if let Some(selected) = self.files_selected.clone() {
+            if let Some(rebased) = rebase(&selected) {
+                self.files_selected = Some(rebased);
+            }
+        }
+    }
+
+    /// 展开 dir 及其所有祖先目录，保证目录树能看到该路径。
+    fn files_expand_ancestors(&mut self, dir: &std::path::Path) {
+        let Some(root) = self.files_root.clone() else { return };
+        let mut current = dir.to_path_buf();
+        while current.starts_with(&root) && current != root {
+            let key = Self::files_dir_key(&current);
+            if !self.files_dir_children.contains_key(&key) {
+                self.files_refresh_dir(&current);
+            }
+            self.files_expanded.insert(key);
+            let Some(parent) = current.parent().map(|parent| parent.to_path_buf()) else { break };
+            current = parent;
+        }
+    }
+
+    fn files_copy(&mut self, path: &std::path::Path) {
+        self.files_clipboard = vec![path.to_path_buf()];
+        self.status_level = StatusLevel::Success;
+        self.status_message = tr!("已复制 {}", path.display()).into();
+    }
+
+    fn files_paste(&mut self, target_dir: Option<std::path::PathBuf>) {
+        let Some(dir) = target_dir else { return };
+        if self.files_clipboard.is_empty() {
+            return;
+        }
+        let mut pasted: Vec<std::path::PathBuf> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        for source in self.files_clipboard.clone() {
+            let Some(name) = source
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+            else {
+                continue;
+            };
+            let destination = unique_dest_path(&dir, &name);
+            let result = if source.is_dir() {
+                copy_dir_recursive(&source, &destination)
+            } else {
+                std::fs::copy(&source, &destination).map(|_| ())
+            };
+            match result {
+                Ok(()) => pasted.push(destination),
+                Err(error) => errors.push(format!("{}: {}", name, error)),
+            }
+        }
+        self.files_refresh_dir(&dir);
+        self.files_expand_ancestors(&dir);
+        if let Some(first) = pasted.first() {
+            self.files_selected = Some(first.clone());
+        }
+        if let Some(error) = errors.first() {
+            self.status_level = StatusLevel::Error;
+            self.status_message = tr!("粘贴失败: {}", error).into();
+        } else if !pasted.is_empty() {
+            self.status_level = StatusLevel::Success;
+            self.status_message = tr!("已粘贴 {} 项", pasted.len()).into();
+        }
+    }
+
+    fn files_delete(&mut self, path: &std::path::Path) {
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        match result {
+            Ok(()) => {
+                self.files_close_tabs_under(path);
+                self.files_drop_paths_under(path);
+                if let Some(parent) = path.parent() {
+                    self.files_refresh_dir(parent);
+                }
+                self.files_selected = None;
+                self.status_level = StatusLevel::Success;
+                self.status_message = tr!("已删除 {}", path.display()).into();
+            }
+            Err(error) => {
+                self.status_level = StatusLevel::Error;
+                self.status_message = tr!("删除失败: {}", error).into();
+            }
+        }
+    }
+
+    /// 删除文件/目录时关闭其下已打开的文件标签页（不再回写磁盘）。
+    fn files_close_tabs_under(&mut self, path: &std::path::Path) {
+        let targets: Vec<String> = self
+            .tabs
+            .iter()
+            .filter_map(|workspace_tab| match workspace_tab {
+                WorkspaceTab::Query(tab) => tab
+                    .file_path
+                    .as_ref()
+                    .filter(|file| file.starts_with(path))
+                    .map(|_| tab.id.clone()),
+                _ => None,
+            })
+            .collect();
+        for tab_id in targets {
+            let Some(index) = self.tabs.iter().position(
+                |workspace_tab| matches!(workspace_tab, WorkspaceTab::Query(tab) if tab.id == tab_id),
+            ) else {
+                continue;
+            };
+            self.close_workspace_tab_impl(index, false);
+        }
+    }
+
+    /// 丢弃已删除路径下的绑定、展开状态与目录缓存。
+    fn files_drop_paths_under(&mut self, path: &std::path::Path) {
+        let keep = |key: &str| !std::path::Path::new(key).starts_with(path);
+        self.file_bindings.retain(|key, _| keep(key));
+        self.files_expanded.retain(|key| keep(key));
+        self.files_dir_children.retain(|key, _| keep(key));
+        self.files_clipboard.retain(|item| !item.starts_with(path));
+        if let Some(selected) = self.files_selected.clone() {
+            if selected.starts_with(path) {
+                self.files_selected = None;
+            }
+        }
+        self.persist_file_bindings();
+    }
+
+    /// 文件面板右键菜单（entry=None 表示右键空白处）。
+    fn files_context_menu(&mut self, ui: &mut egui::Ui, entry: Option<&std::path::Path>) {
+        ctx_menu_style(ui);
+        let target_dir = self.files_target_dir(entry);
+        if ui.button(tr!("新建文件夹")).clicked() {
+            self.files_begin_new_entry(target_dir.clone(), true);
+            ui.close();
+        }
+        if ui.button(tr!("新建 SQL 文件")).clicked() {
+            self.files_begin_new_entry(target_dir.clone(), false);
+            ui.close();
+        }
+        if let Some(path) = entry {
+            ui.separator();
+            if ui.button(tr!("重命名")).clicked() {
+                self.files_begin_rename(path);
+                ui.close();
+            }
+            if ui.button(tr!("删除")).clicked() {
+                self.files_delete_confirm = Some(path.to_path_buf());
+                ui.close();
+            }
+            ui.separator();
+            if ui.button(tr!("复制")).clicked() {
+                self.files_copy(path);
+                ui.close();
+            }
+        }
+        if !self.files_clipboard.is_empty() && ui.button(tr!("粘贴")).clicked() {
+            self.files_paste(target_dir.clone());
+            ui.close();
+        }
+        if let Some(path) = entry {
+            ui.separator();
+            if ui.button(tr!("在文件夹中显示")).clicked() {
+                if let Some(parent) = path.parent() {
+                    let _ = open::that(parent);
+                }
+                ui.close();
+            }
+            if ui.button(tr!("复制路径")).clicked() {
+                ui.ctx().copy_text(path.to_string_lossy().to_string());
+                ui.close();
+            }
+        }
+        if let Some(dir) = target_dir {
+            if ui.button(tr!("刷新")).clicked() {
+                self.files_refresh_dir(&dir);
+                ui.close();
+            }
+        }
+    }
+
+    fn render_files_entry_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.files_entry_dialog.clone() else { return };
+        let title = match &dialog.kind {
+            FilesEntryDialogKind::NewFolder { .. } => tr!("新建文件夹"),
+            FilesEntryDialogKind::NewFile { .. } => tr!("新建 SQL 文件"),
+            FilesEntryDialogKind::Rename { .. } => tr!("重命名"),
+        };
+        let mut submit = false;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.label(tr!("名称"));
+                let hint = match &dialog.kind {
+                    FilesEntryDialogKind::NewFolder { .. } => tr!("例如：归档脚本"),
+                    FilesEntryDialogKind::NewFile { .. } => tr!("例如：daily_report.sql"),
+                    FilesEntryDialogKind::Rename { .. } => "",
+                };
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut dialog.name)
+                        .id(egui::Id::new("files-entry-name"))
+                        .hint_text(hint)
+                        .desired_width(f32::INFINITY),
+                );
+                if !dialog.focus_requested {
+                    response.request_focus();
+                    dialog.focus_requested = true;
+                }
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    submit = true;
+                }
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+                if let Some(error) = &dialog.error {
+                    ui.colored_label(Color32::from_rgb(220, 80, 80), error);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr!("确定")).clicked() {
+                        submit = true;
+                    }
+                    if ui.button(tr!("取消")).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            self.files_entry_dialog = None;
+        } else {
+            self.files_entry_dialog = Some(dialog);
+            if submit {
+                self.files_apply_entry_dialog();
+            }
+        }
+    }
+
+    fn render_files_delete_confirm(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.files_delete_confirm.clone() else { return };
+        let is_dir = path.is_dir();
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new(tr!("删除"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(tr!("确认删除 {} ？该操作不可撤销。", path.display()));
+                if is_dir {
+                    ui.label(tr!("删除文件夹会同时删除其中所有文件。"));
+                }
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr!("删除")).clicked() {
+                        confirm = true;
+                    }
+                    if ui.button(tr!("取消")).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            self.files_delete_confirm = None;
+        } else if confirm {
+            self.files_delete_confirm = None;
+            self.files_delete(&path);
+        }
+    }
+
+    /// 把文件标签页的编辑内容立即写回磁盘（关闭 / 切页前调用）。
+    fn flush_file_tab_at(&mut self, index: usize) {
+        let mut write_error: Option<String> = None;
+        if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(index) {
+            let Some(path) = tab.file_path.clone() else { return };
+            let saved = tab.file_saved_text.clone().unwrap_or_default();
+            if tab.sql == saved {
+                return;
+            }
+            match std::fs::write(&path, tab.sql.as_bytes()) {
+                Ok(()) => {
+                    tab.file_saved_text = Some(tab.sql.clone());
+                    tab.file_disk_mtime =
+                        std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+                    tab.file_dirty_since = None;
+                }
+                Err(error) => write_error = Some(format!("{}: {}", path.display(), error)),
+            }
+        }
+        if let Some(error) = write_error {
+            self.status_level = StatusLevel::Error;
+            self.status_message = tr!("保存文件失败: {}", error).into();
+        }
+    }
+
+    /// 每帧推进文件标签页的自动保存：停止输入 800ms 后写回磁盘。
+    fn auto_save_file_tabs(&mut self, ctx: &egui::Context) {
+        const AUTO_SAVE_DELAY: Duration = Duration::from_millis(800);
+        if self.file_conflict.is_some() {
+            return;
+        }
+        let mut dirty_wait: Option<Duration> = None;
+        let mut writes: Vec<(usize, std::path::PathBuf)> = Vec::new();
+        let mut conflicts: Vec<FileConflictState> = Vec::new();
+        for (index, workspace_tab) in self.tabs.iter_mut().enumerate() {
+            let WorkspaceTab::Query(tab) = workspace_tab else { continue };
+            let Some(path) = tab.file_path.clone() else { continue };
+            let saved = tab.file_saved_text.clone().unwrap_or_default();
+            if tab.sql == saved {
+                tab.file_dirty_since = None;
+                continue;
+            }
+            let since = *tab.file_dirty_since.get_or_insert_with(Instant::now);
+            let elapsed = since.elapsed();
+            if elapsed < AUTO_SAVE_DELAY {
+                dirty_wait = Some(AUTO_SAVE_DELAY - elapsed);
+                continue;
+            }
+            let disk_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+            let externally_modified = match (tab.file_disk_mtime, disk_mtime) {
+                // 文件被删除后按新建处理；读不到修改时间时不做冲突判断
+                (_, None) => false,
+                (Some(known), Some(current)) => current != known,
+                (None, Some(_)) => true,
+            };
+            if externally_modified {
+                conflicts.push(FileConflictState { tab_id: tab.id.clone(), path });
+                tab.file_dirty_since = None;
+                continue;
+            }
+            tab.file_dirty_since = None;
+            writes.push((index, path));
+        }
+        for (index, path) in writes {
+            let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(index) else { continue };
+            match std::fs::write(&path, tab.sql.as_bytes()) {
+                Ok(()) => {
+                    tab.file_saved_text = Some(tab.sql.clone());
+                    tab.file_disk_mtime =
+                        std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+                }
+                Err(error) => {
+                    self.status_level = StatusLevel::Error;
+                    self.status_message = tr!("自动保存失败: {}", error).into();
+                }
+            }
+        }
+        if let Some(conflict) = conflicts.into_iter().next() {
+            self.file_conflict = Some(conflict);
+        }
+        if let Some(wait) = dirty_wait {
+            ctx.request_repaint_after(wait.min(Duration::from_millis(200)));
+        }
+    }
+
+    fn persist_file_bindings(&mut self) {
+        if let Ok(json) = serde_json::to_string(&self.file_bindings) {
+            let _ = self.services.save_ui_state("file_bindings", &json);
+        }
+    }
+
+    /// 文件标签页顶部切换连接/库后，把绑定按文件路径持久化。
+    fn sync_file_binding_for_active_tab(&mut self) {
+        let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) else { return };
+        let Some(path) = tab.file_path.clone() else { return };
+        let key = Self::files_dir_key(&path);
+        let current = FileBinding {
+            connection_id: tab.connection_id.clone(),
+            database: tab.database.clone(),
+        };
+        let changed = match self.file_bindings.get(&key) {
+            Some(binding) => {
+                binding.connection_id != current.connection_id
+                    || binding.database != current.database
+            }
+            None => true,
+        };
+        if !changed {
+            return;
+        }
+        self.file_bindings.insert(key, current);
+        self.persist_file_bindings();
+    }
+
+    /// 自动保存发现磁盘已被外部修改时的选择窗口。
+    fn render_file_conflict_dialog(&mut self, ctx: &egui::Context) {
+        let Some(conflict) = self.file_conflict.clone() else { return };
+        let mut decision: Option<bool> = None; // true = 覆盖磁盘, false = 重新加载
+        egui::Window::new(tr!("文件已被外部修改"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(tr!(
+                    "{} 已被其他程序修改。请选择保留编辑器内容并覆盖磁盘，或重新加载磁盘内容。",
+                    conflict.path.display()
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr!("覆盖磁盘")).clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button(tr!("重新加载")).clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        let Some(overwrite) = decision else { return };
+        self.file_conflict = None;
+        let Some(index) = self.tabs.iter().position(|tab| {
+            matches!(tab, WorkspaceTab::Query(query) if query.id == conflict.tab_id)
+        }) else {
+            return;
+        };
+        let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(index) else { return };
+        if overwrite {
+            match std::fs::write(&conflict.path, tab.sql.as_bytes()) {
+                Ok(()) => {
+                    tab.file_saved_text = Some(tab.sql.clone());
+                    tab.file_disk_mtime = std::fs::metadata(&conflict.path)
+                        .ok()
+                        .and_then(|m| m.modified().ok());
+                    tab.file_dirty_since = None;
+                }
+                Err(error) => {
+                    self.status_level = StatusLevel::Error;
+                    self.status_message = tr!("保存文件失败: {}", error).into();
+                }
+            }
+        } else {
+            match std::fs::read_to_string(&conflict.path) {
+                Ok(raw) => {
+                    let content = raw.strip_prefix('\u{feff}').unwrap_or(&raw).to_string();
+                    tab.sql = content.clone();
+                    tab.file_saved_text = Some(content);
+                    tab.file_disk_mtime = std::fs::metadata(&conflict.path)
+                        .ok()
+                        .and_then(|m| m.modified().ok());
+                    tab.file_dirty_since = None;
+                }
+                Err(error) => {
+                    self.status_level = StatusLevel::Error;
+                    self.status_message = tr!("无法读取文件 {}: {}", conflict.path.display(), error).into();
+                }
+            }
+        }
+    }
+    /// 右侧文件面板：项目根 + 目录树，双击 .sql 打开文件标签页。
+    fn render_files_panel(&mut self, ui: &mut egui::Ui) {
+        let palette = MacUiPalette::from(&self.theme);
+        let mut action: Option<FilesPanelAction> = None;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let root_name = self
+                .files_root
+                .as_ref()
+                .and_then(|root| root.file_name())
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| tr!("文件").to_string());
+            ui.label(
+                RichText::new(root_name)
+                    .strong()
+                    .size(palette.fonts.sm)
+                    .color(palette.text),
+            )
+            .on_hover_text(
+                self.files_root
+                    .as_ref()
+                    .map(|root| root.display().to_string())
+                    .unwrap_or_default(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                if files_panel_icon_button(ui, "»", tr!("收起文件面板")) {
+                    action = Some(FilesPanelAction::Collapse);
+                }
+                if self.files_root.is_some() {
+                    if files_panel_icon_button(ui, "⟳", tr!("刷新")) {
+                        action = Some(FilesPanelAction::Refresh);
+                    }
+                    if files_panel_icon_button(ui, "…", tr!("切换文件夹")) {
+                        action = Some(FilesPanelAction::PickRoot);
+                    }
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+
+        let Some(root) = self.files_root.clone() else {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                if ui.button(tr!("打开文件夹")).clicked() {
+                    action = Some(FilesPanelAction::PickRoot);
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(tr!("选择一个文件夹作为项目根"))
+                        .size(palette.fonts.xs)
+                        .color(palette.weak_text),
+                );
+            });
+            self.apply_files_panel_action(action);
+            return;
+        };
+
+        let mut rows: Vec<FilePanelRow> = Vec::new();
+        self.files_collect_rows(&root, 0, &mut rows);
+        let row_height = 22.0;
+        egui::ScrollArea::vertical()
+            .id_salt("files-panel-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    ui.add_space(12.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(tr!("没有 .sql 文件"))
+                                .size(palette.fonts.xs)
+                                .color(palette.weak_text),
+                        );
+                    });
+                }
+                let width = ui.available_width().max(60.0);
+                for row in &rows {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(width, row_height), egui::Sense::click());
+                    let selected = self.files_selected.as_deref() == Some(row.path.as_path());
+                    if selected {
+                        ui.painter().rect_filled(rect, 4.0, palette.selection_bg);
+                    } else if response.hovered() {
+                        ui.painter()
+                            .rect_filled(rect, 4.0, palette.selection_bg.gamma_multiply(0.35));
+                    }
+                    let indent = 8.0 + row.depth as f32 * 14.0;
+                    if row.is_dir {
+                        ui.painter().text(
+                            egui::pos2(rect.left() + indent, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            if row.expanded { "▾" } else { "▸" },
+                            FontId::new(palette.fonts.xs, FontFamily::Proportional),
+                            palette.weak_text,
+                        );
+                    }
+                    let text_color = if selected {
+                        palette.selection_text
+                    } else {
+                        palette.text
+                    };
+                    ui.painter().text(
+                        egui::pos2(rect.left() + indent + 16.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        &row.name,
+                        FontId::new(palette.fonts.sm, FontFamily::Proportional),
+                        text_color,
+                    );
+
+                    if response.double_clicked() {
+                        self.files_selected = Some(row.path.clone());
+                        if row.is_dir {
+                            self.files_toggle_dir(&row.path);
+                        } else {
+                            self.files_open_file(&row.path);
+                        }
+                    } else if response.clicked() {
+                        self.files_selected = Some(row.path.clone());
+                        if row.is_dir {
+                            let pointer_x = ui
+                                .input(|i| i.pointer.interact_pos())
+                                .map(|pos| pos.x)
+                                .unwrap_or(f32::MAX);
+                            if pointer_x < rect.left() + indent + 16.0 {
+                                self.files_toggle_dir(&row.path);
+                            }
+                        }
+                    }
+
+                    let menu_path = row.path.clone();
+                    response.context_menu(|ui| {
+                        self.files_context_menu(ui, Some(&menu_path));
+                    });
+                }
+                // 列表下方空白区域：右键新建 / 粘贴
+                let rest = ui.available_size();
+                if rest.y > 0.0 {
+                    let (_, blank_response) =
+                        ui.allocate_exact_size(rest, egui::Sense::click());
+                    blank_response.context_menu(|ui| {
+                        self.files_context_menu(ui, None);
+                    });
+                }
+            });
+        self.apply_files_panel_action(action);
+    }
+
+    fn apply_files_panel_action(&mut self, action: Option<FilesPanelAction>) {
+        match action {
+            Some(FilesPanelAction::PickRoot) => self.files_pick_root(),
+            Some(FilesPanelAction::Refresh) => self.files_refresh_open_dirs(),
+            Some(FilesPanelAction::Collapse) => {
+                self.files_panel_collapsed = true;
+                let _ = self.services.save_ui_state("files_panel_collapsed", "1");
+            }
+            None => {}
+        }
+    }
+
+    /// 把文件面板挂到窗口右侧；折叠时只保留 26px 竖条。
+    fn render_files_panel_panel(&mut self, ctx: &egui::Context) {
+        let palette = MacUiPalette::from(&self.theme);
+        let half_screen = (ctx.screen_rect().width() * 0.45).max(220.0);
+        if self.files_panel_collapsed {
+            egui::SidePanel::right("files-panel-collapsed")
+                .resizable(false)
+                .exact_width(26.0)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(palette.sidebar_bg))
+                .show(ctx, |ui| {
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(26.0, ui.available_height().max(26.0)),
+                        egui::Sense::click(),
+                    );
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if response.clicked() {
+                        self.files_panel_collapsed = false;
+                        let _ = self.services.save_ui_state("files_panel_collapsed", "0");
+                    }
+                    ui.painter().text(
+                        egui::pos2(rect.center().x, rect.top() + 14.0),
+                        egui::Align2::CENTER_CENTER,
+                        "«",
+                        FontId::new(13.0, FontFamily::Proportional),
+                        palette.weak_text,
+                    );
+                });
+            return;
+        }
+        let previous_width = self.files_panel_width;
+        let panel = egui::SidePanel::right("files-panel")
+            .resizable(true)
+            .default_width(self.files_panel_width)
+            .min_width(180.0)
+            .max_width(half_screen)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(palette.sidebar_bg).inner_margin(egui::Margin {
+                left: 0,
+                right: 0,
+                top: 28,
+                bottom: 0,
+            }))
+            .show(ctx, |ui| self.render_files_panel(ui));
+        let width = panel.response.rect.width().clamp(180.0, half_screen);
+        self.files_panel_width = width;
+        if (width - previous_width).abs() > 0.5 && ctx.input(|i| i.pointer.any_released()) {
+            let _ = self
+                .services
+                .save_ui_state("files_panel_width", &format!("{width:.1}"));
+        }
+    }
+
     fn new_query_from_selected_node(&mut self) {
         if let Some(node) = self.selected_sidebar_node() {
             match node.node_type {
@@ -4958,11 +6401,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     }
 
     fn close_workspace_tab(&mut self, index: usize) {
+        self.close_workspace_tab_impl(index, true);
+    }
+
+    fn close_workspace_tab_impl(&mut self, index: usize, flush_file: bool) {
         if index >= self.tabs.len() {
             return;
         }
         if index == self.active_tab {
             self.record_recent_tab();
+        }
+        // 文件标签页关闭前先把未保存内容写回磁盘
+        if flush_file {
+            self.flush_file_tab_at(index);
         }
         // 关闭前清理异步资源：取消正在执行的查询、丢弃关联的 pending 操作
         let tab_id = self.tabs[index].tab_id().map(|s| s.to_owned());
@@ -4973,6 +6424,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             self.cleanup_pending_for_tab(id);
         }
         self.tabs.remove(index);
+        if self.last_active_tab_for_flush > index {
+            self.last_active_tab_for_flush -= 1;
+        } else if self.last_active_tab_for_flush >= self.tabs.len() {
+            self.last_active_tab_for_flush = self.tabs.len().saturating_sub(1);
+        }
         self.tab_back_stack.retain(|i| *i != index);
         self.tab_back_stack.iter_mut().for_each(|i| { if *i > index { *i -= 1; } });
         self.tab_forward_stack.retain(|i| *i != index);
@@ -5377,11 +6833,30 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
+    /// 解除默认 500 行限制，按上次执行模式重跑一次
+    fn execute_last_query_unlimited(&mut self) {
+        if self.pending_query_execution.is_some() {
+            self.status_message = tr!("当前已有语句正在执行").into();
+            return;
+        }
+        let mode = match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Query(tab)) => tab.last_execute_mode.clone(),
+            _ => None,
+        };
+        let Some(mode) = mode else { return };
+        if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+            tab.force_unlimited_once = true;
+        }
+        self.execute_current_query(mode);
+    }
+
     fn execute_current_query(&mut self, mode: ExecuteMode) {
         if self.pending_query_execution.is_some() {
             self.status_message = tr!("当前已有语句正在执行").into();
             return;
         }
+        // 文件标签页执行前先落盘，避免磁盘脚本落后于编辑器内容
+        self.flush_file_tab_at(self.active_tab);
 
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
@@ -5389,6 +6864,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let WorkspaceTab::Query(query_tab) = tab else {
             return;
         };
+        // 记录本次执行模式，供结果区「显示全部」原样重跑
+        query_tab.last_execute_mode = Some(mode.clone());
+        let skip_row_limit = std::mem::take(&mut query_tab.force_unlimited_once);
         let Some(connection_id) = query_tab.connection_id.clone() else {
             self.status_level = StatusLevel::Error;
             self.status_message = tr!("请先选择一个连接").into();
@@ -5441,11 +6919,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return;
         }
 
-        // 清空旧结果
-        query_tab.result = None;
-        query_tab.multi_results.clear();
-        query_tab.multi_statements.clear();
+        // 上一轮的结果页保留在结果标签里（可手动关闭），本次执行追加新的结果页；
+        // 执行期间继续显示上一次选中的结果，避免表格闪烁
         query_tab.executed_statements.clear();
+        query_tab.run_result_count = 0;
         query_tab.error = None;
         query_tab.messages.clear();
         query_tab.explain_tree = None;
@@ -5453,7 +6930,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         query_tab.explain_view_mode = ExplainViewMode::Tree;
         query_tab.query_explain_json = None;
         query_tab.edit_context = None;
-        query_tab.result_selections.clear();
+        query_tab.row_limit_applied = false;
 
         // 检测是否为 EXPLAIN 查询
         let is_explain = statements.iter().any(|s| is_explain_query(s));
@@ -5475,9 +6952,34 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             statements
         };
 
+        // 默认给没有 LIMIT 的只读查询追加 LIMIT 500（工具栏「限制 500 行」可关闭）
+        let (statements, row_limit_applied) =
+            if query_tab.limit_result_rows && !is_explain && !skip_row_limit {
+            let mut applied = false;
+            let limited: Vec<String> = statements
+                .into_iter()
+                .map(|statement| match apply_default_row_limit(&statement, kind) {
+                    Some(limited) => {
+                        applied = true;
+                        limited
+                    }
+                    None => statement,
+                })
+                .collect();
+            (limited, applied)
+        } else {
+            (statements, false)
+        };
+        query_tab.row_limit_applied = row_limit_applied;
+        if row_limit_applied {
+            query_tab.messages.push(
+                tr!("已默认限制前 500 行；可在工具栏取消「限制 500 行」以查询全部").into(),
+            );
+        }
+
         // 执行开始：打开消息面板
         query_tab.active_bottom_tab = QueryBottomTab::Messages;
-        query_tab.bottom_panel_collapsed = false;
+        query_tab.open_bottom_panel();
 
         let tab_id = query_tab.id.clone();
         let database = query_tab.database.clone();
@@ -6567,6 +8069,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     }
                 }
                 SidebarAction::OpenTable { node, load_data, force_new_tab } => self.open_table_tab(&node, load_data, force_new_tab),
+                SidebarAction::OpenTableDdl { node } => self.open_table_ddl(&node),
                 SidebarAction::OpenRoutine { node, force_new_tab } => self.open_routine_tab(&node, force_new_tab),
                 SidebarAction::OpenTableSummary { connection_id, database, schema, db_label, ddl_target } => {
                     let database_kind = self.database_kind_for_connection(&connection_id);
@@ -7266,6 +8769,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             });
                             ui.close();
                         }
+                        // 快捷方式：Shift+单击表名直接看 DDL（表信息页切到 DDL 视图）
+                        if menu_button_with_shortcut(ui, tr!("查看 DDL"), "Shift+Click") {
+                            actions.push(SidebarAction::OpenTableDdl { node: node.clone() });
+                            ui.close();
+                        }
                         if ui.button(tr!("在新标签页中打开")).clicked() {
                             actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: true, force_new_tab: true });
                             ui.close();
@@ -7506,7 +9014,24 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.selected_connection = Some(node.connection_id.clone());
                 self.selected_tree_item = Some(node.id.clone());
             }
-            if response.double_clicked() && !is_node_loading {
+            // Shift+单击表/视图名 → 直接看 DDL
+            if response.clicked()
+                && matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View)
+                && ui.input(|i| i.modifiers.shift)
+            {
+                actions.push(SidebarAction::OpenTableDdl { node: node.clone() });
+            }
+            // 按住 Shift 悬停表/视图时给出可点击提示
+            if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View)
+                && response.hovered()
+                && ui.input(|i| i.modifiers.shift)
+            {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if response.double_clicked()
+                && !is_node_loading
+                && !ui.input(|i| i.modifiers.shift)
+            {
                 if matches!(node.node_type, ExplorerNodeType::Table | ExplorerNodeType::View) {
                     actions.push(SidebarAction::OpenTable { node: node.clone(), load_data: true, force_new_tab: false });
                 } else if matches!(node.node_type, ExplorerNodeType::Procedure | ExplorerNodeType::Function) {
@@ -7567,12 +9092,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         let explicitly_expanded = self.expanded_nodes.contains(&node.id);
-        // 展开的节点显示子节点
+        // 展开的节点显示子节点。
+        // 用 remove + 还原代替 clone：大库有上千张表时，每帧克隆整份子节点列表
+        // 会造成明显的分配开销和卡顿。
         if explicitly_expanded {
-            if let Some(children) = self.children_by_node.get(&node.id).cloned() {
-                for child in children {
-                    self.render_node(ui, &child, depth + 1, actions, false);
+            if let Some(children) = self.children_by_node.remove(&node.id) {
+                for child in &children {
+                    self.render_node(ui, child, depth + 1, actions, false);
                 }
+                self.children_by_node.insert(node.id.clone(), children);
             }
         }
     }
@@ -7753,6 +9281,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 let interaction = tab_button(
                                                     ui, index, icon, title, self.active_tab == index,
                                                 );
+                                                if let WorkspaceTab::Query(query) = tab {
+                                                    if let Some(path) = &query.file_path {
+                                                        interaction.tab_response.clone().on_hover_text(
+                                                            path.display().to_string(),
+                                                        );
+                                                    }
+                                                }
                                                 let tab_rect = interaction.tab_response.rect;
                                                 if interaction.tab_response.dragged() {
                                                     drag_source = Some(index);
@@ -8040,18 +9575,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             Self::render_schema_summary_tab(ui, tab, &self.theme.colors, &self.theme.fonts)
                         }
                         WorkspaceTab::Routine(tab) => {
+                            let mut routine_action = TabUiAction::None;
                             if tab.loading {
                                 ui.vertical_centered(|ui| { ui.label(tr!("正在加载定义...")); });
                             } else if let Some(definition) = &tab.definition {
                                 if let Some(create_sql) = &definition.create_sql {
-                                    render_definition_sql_view(ui, &tab.title, create_sql, &self.theme.colors, &self.theme.fonts);
+                                    if let Some(sql) = render_definition_sql_view(ui, &tab.title, create_sql, &self.theme.colors, &self.theme.fonts) {
+                                        routine_action = TabUiAction::OpenSqlInNewQuery {
+                                            connection_id: tab.routine.connection_id.clone(),
+                                            database: tab.routine.database.clone(),
+                                            sql,
+                                        };
+                                    }
                                 } else {
                                     ui.label(tr!("当前对象没有可展示的 DDL"));
                                 }
                             } else if let Some(error) = &tab.error {
                                 ui.label(format!("{}: {}", tr!("加载失败"), error));
                             }
-                            TabUiAction::None
+                            routine_action
                         }
                         WorkspaceTab::SlowQuery(state) => {
                             render_slow_query_tab(ui, state, &self.theme)
@@ -8486,6 +10028,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let shortcuts = [
             (format!("{} + D", MOD_KEY), tr!("新建查询")),
             (format!("{} + R", MOD_KEY), tr!("执行查询")),
+            (format!("{} + Enter", MOD_KEY), tr!("执行光标所在语句")),
             (format!("{} + S", MOD_KEY), tr!("保存查询")),
             (format!("{} + W", MOD_KEY), tr!("关闭标签页")),
             (format!("{} + [", MOD_KEY), tr!("标签页后退")),
@@ -8599,31 +10142,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let conn_schemas: Vec<(String, Vec<String>)> = self.schema_cache
             .schema_names_for(&connection_id)
             .iter()
-            .map(|s| (s.to_string(), self.schema_cache.tables_for_schema(s)
-                .unwrap_or(&[])
-                .iter()
-                .map(|t| t.to_string())
-                .collect()))
+            .map(|s| {
+                (
+                    s.to_string(),
+                    self.schema_cache.tables_for_schema(&connection_id, s),
+                )
+            })
             .collect();
         let db_tables: Vec<(String, Vec<String>)> = conn_databases
             .iter()
-            .map(|db| (db.clone(), self.schema_cache.tables_for_database(db)
-                .unwrap_or(&[])
-                .iter()
-                .map(|t| t.to_string())
-                .collect()))
-            .collect();
-        let all_tables: Vec<(String, bool, Vec<core_domain::ColumnDefinition>)> = self.schema_cache
-            .table_names()
-            .iter()
-            .map(|name| {
-                let is_view = self.schema_cache.is_view(name);
-                let cols = self.schema_cache.columns_for_table(name)
-                    .unwrap_or(&[])
-                    .to_vec();
-                (name.to_string(), is_view, cols)
+            .map(|db| {
+                (
+                    db.clone(),
+                    self.schema_cache.tables_for_database(&connection_id, db),
+                )
             })
             .collect();
+        let all_tables: Vec<(String, bool, Vec<core_domain::ColumnDefinition>)> = self
+            .schema_cache
+            .table_entries_for_connection(&connection_id);
 
         let tool_services = self.services.clone();
         let tool_connection_id = connection_id.clone();
@@ -8737,7 +10274,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let provider = ai_service::create_provider(&config.provider);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        tab.bottom_panel_collapsed = false;
+        tab.open_bottom_panel();
         tab.active_bottom_tab = QueryBottomTab::AiChat;
         tab.ai_stream_rx = Some(rx);
         tab.ai_is_streaming = true;
@@ -8834,6 +10371,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
             }
             TabUiAction::ExecuteQuery(mode) => self.execute_current_query(mode),
+            TabUiAction::ExecuteQueryUnlimited => self.execute_last_query_unlimited(),
             TabUiAction::ExplainQuery(mode) => self.execute_explain_query(mode),
             TabUiAction::StopExecution => {
                 if let Some(WorkspaceTab::Query(query_tab)) = self.tabs.get_mut(self.active_tab) {
@@ -9216,11 +10754,91 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.create_query_tab(Some(connection_id), database, Some(sql));
                 self.record_recent_tab();
             }
+            TabUiAction::OpenSqlInNewQuery {
+                connection_id,
+                database,
+                sql,
+            } => {
+                self.create_query_tab(Some(connection_id), database, Some(sql));
+                self.record_recent_tab();
+            }
+            TabUiAction::OpenTableDdl {
+                connection_id,
+                database,
+                schema,
+                table,
+                is_view,
+            } => {
+                let node = ExplorerNode {
+                    id: format!("{connection_id}::{table}"),
+                    connection_id,
+                    name: table,
+                    node_type: if is_view {
+                        ExplorerNodeType::View
+                    } else {
+                        ExplorerNodeType::Table
+                    },
+                    parent_id: None,
+                    database,
+                    schema,
+                    expandable: false,
+                    loaded: true,
+                };
+                self.open_table_ddl(&node);
+            }
+            TabUiAction::OpenTableData {
+                connection_id,
+                database,
+                schema,
+                table,
+                is_view,
+            } => {
+                let node = ExplorerNode {
+                    id: format!("{connection_id}::{table}"),
+                    connection_id,
+                    name: table,
+                    node_type: if is_view {
+                        ExplorerNodeType::View
+                    } else {
+                        ExplorerNodeType::Table
+                    },
+                    parent_id: None,
+                    database,
+                    schema,
+                    expandable: false,
+                    loaded: true,
+                };
+                self.open_table_tab(&node, true, false);
+            }
             TabUiAction::ExecuteStructureSql(sql) => {
-                let success = self.execute_active_table_mutation(sql, tr!("表结构已更新"));
-                if success {
-                    self.refresh_active_table_preview(true);
+                // ALTER TABLE 可能很慢（大表/元数据锁），放到后台执行，避免 UI 卡死
+                if self.pending_structure_sql.is_some() {
+                    self.status_message = tr!("正在应用表结构变更...").into();
+                    return;
                 }
+                let Some(WorkspaceTab::Table(tab)) = self.tabs.get(self.active_tab) else {
+                    return;
+                };
+                let connection_id = tab.table.connection_id.clone();
+                let database = tab.table.database.clone();
+                let tab_id = tab.id.clone();
+                let services = self.services.clone();
+                let handle = self.runtime.handle().clone();
+                let (sender, receiver) = mpsc::channel();
+                self.pending_structure_sql = Some((tab_id, receiver));
+                self.status_message = tr!("正在应用表结构变更...").into();
+                handle.spawn(async move {
+                    let result = services
+                        .execute_sql_no_history(QueryExecution {
+                            connection_id,
+                            database,
+                            sql,
+                        })
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string());
+                    let _ = sender.send(result);
+                });
             }
             TabUiAction::LoadSavedQuery(connection_id) => {
                 self.services.clear_user_disconnect(&connection_id);
@@ -9353,7 +10971,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             TabUiAction::OpenAiChat => {
                 if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.bottom_panel_collapsed = false;
+                    tab.open_bottom_panel();
                     tab.active_bottom_tab = QueryBottomTab::AiChat;
                 }
             }
@@ -9637,17 +11255,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
                 ExplorerNodeType::Table | ExplorerNodeType::View => {
                     let is_view = matches!(node.node_type, ExplorerNodeType::View);
-                    // Add to flat table map (backward compat)
-                    self.schema_cache.add_table(node.name.clone(), is_view);
-                    // Also register in database/schema context if available
-                    if let Some(ref db) = node.database {
-                        self.schema_cache
-                            .add_table_to_database(db, node.name.clone(), is_view);
-                    }
-                    if let Some(ref schema) = node.schema {
-                        self.schema_cache
-                            .add_table_to_schema(schema, node.name.clone(), is_view);
-                    }
+                    self.schema_cache.add_table(
+                        connection_id,
+                        node.database.as_deref(),
+                        node.schema.as_deref(),
+                        node.name.clone(),
+                        is_view,
+                    );
                 }
                 _ => {}
             }
@@ -9687,6 +11301,109 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.status_message = tr!("执行失败: {}", error);
                 false
             }
+        }
+    }
+
+    /// 在后台执行表数据页的写语句（新增/删除行），避免慢 SQL 卡住 UI。
+    fn spawn_table_mutation(
+        &mut self,
+        sql: String,
+        success_message: impl Into<String>,
+        follow_up: TableMutationFollowUp,
+    ) {
+        if self.pending_table_mutation.is_some() {
+            self.status_message = tr!("当前已有语句正在执行").into();
+            return;
+        }
+        let Some(WorkspaceTab::Table(tab)) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        let tab_id = tab.id.clone();
+        let connection_id = tab.table.connection_id.clone();
+        let database = tab.table.database.clone();
+        let success_message = success_message.into();
+        let services = self.services.clone();
+        let handle = self.runtime.handle().clone();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_table_mutation = Some(receiver);
+        self.status_level = StatusLevel::Pending;
+        self.status_message = tr!("正在执行…").into();
+        handle.spawn(async move {
+            let outcome = services
+                .execute_sql_no_history(QueryExecution {
+                    connection_id,
+                    database,
+                    sql,
+                })
+                .await;
+            let (affected, error) = match outcome {
+                Ok(result) => (result.affected_rows.unwrap_or(0), None),
+                Err(error) => (0, Some(error.to_string())),
+            };
+            let _ = sender.send(TableMutationResult {
+                tab_id,
+                success_message,
+                affected,
+                follow_up,
+                error,
+            });
+        });
+    }
+
+    fn poll_table_mutation(&mut self) {
+        let Some(receiver) = self.pending_table_mutation.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                if let Some(error) = result.error {
+                    self.status_level = StatusLevel::Error;
+                    self.status_message = tr!("执行失败: {}", error).into();
+                    if let Some(WorkspaceTab::Table(tab)) = self
+                        .tabs
+                        .iter_mut()
+                        .find(|t| matches!(t, WorkspaceTab::Table(t) if t.id == result.tab_id))
+                    {
+                        tab.error = Some(error);
+                    }
+                    return;
+                }
+                self.status_message =
+                    tr!("{}，影响 {} 行", result.success_message, result.affected);
+                let is_active = matches!(
+                    self.tabs.get(self.active_tab),
+                    Some(WorkspaceTab::Table(tab)) if tab.id == result.tab_id
+                );
+                if !is_active {
+                    return;
+                }
+                if let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.error = None;
+                    match result.follow_up {
+                        TableMutationFollowUp::InsertRow => {
+                            tab.pending_insert_row = None;
+                            tab.editing_cell = None;
+                            tab.selected_preview_row = None;
+                            tab.selected_preview_rows.clear();
+                            tab.selection_anchor_row = None;
+                        }
+                        TableMutationFollowUp::DeleteRows => {
+                            tab.selected_preview_row = None;
+                            tab.selected_preview_rows.clear();
+                            tab.selection_anchor_row = None;
+                            tab.editing_cell = None;
+                        }
+                        TableMutationFollowUp::None => {}
+                    }
+                }
+                if !matches!(result.follow_up, TableMutationFollowUp::None) {
+                    self.refresh_active_table_preview(false);
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.pending_table_mutation = Some(receiver);
+            }
+            Err(TryRecvError::Disconnected) => {}
         }
     }
 
@@ -10071,6 +11788,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
     ) -> Option<TableRef> {
         let partial_schema = partial.schema.as_deref().unwrap_or("");
         let partial_table = &partial.table;
+        // 表清单已完整加载时，缓存里没有就是真的没有：不再同步查询 information_schema，
+        // 否则每次执行引用了未缓存表名的 SQL 都会在 UI 线程上等一次数据库往返（表现为卡死）。
+        if self.schema_cache.has_tables(&partial.connection_id) {
+            return None;
+        }
         // 构建 LIKE 模式：前缀 + %
         let schema_pattern = format!("{}%", partial_schema);
         let table_pattern = format!("{}%", partial_table);
@@ -10166,8 +11888,12 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
-    /// 保存查询页的单元格修改
-    fn save_query_tab_cell_changes(&mut self) -> Option<String> {
+    /// 保存查询页的单元格修改（后台执行，结果由 poll_query_batch_save 处理）
+    fn save_query_tab_cell_changes(&mut self) {
+        if self.pending_query_batch_save_result.is_some() {
+            self.status_message = tr!("正在保存修改...").into();
+            return;
+        }
         let database_kind: DatabaseKind;
         let table: TableRef;
         let definition: Option<TableDefinition>;
@@ -10176,11 +11902,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
         if let Some(WorkspaceTab::Query(tab)) = self.tabs.get(self.active_tab) {
             let Some(ref edit_ctx) = tab.edit_context else {
-                return None;
+                return;
             };
             if edit_ctx.pending_cell_changes.is_empty() {
                 self.status_message = tr!("没有待保存的修改").into();
-                return None;
+                return;
             }
             database_kind = edit_ctx.database_kind;
             table = edit_ctx.table_ref.clone();
@@ -10265,77 +11991,133 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 }
             }
         } else {
-            return None;
+            return;
         }
 
-        let mut success_count = 0;
-        let mut last_error: Option<String> = None;
-
-        for sql in &sql_statements {
-            if self.execute_query_tab_mutation(sql.clone(), "") {
-                success_count += 1;
-            } else {
-                let err = self.tabs.get(self.active_tab).and_then(|t| match t {
-                    WorkspaceTab::Query(tab) => tab.error.clone(),
-                    _ => None,
-                });
-                last_error = err.or(Some(tr!("执行失败").into()));
-            }
+        if sql_statements.is_empty() {
+            return;
         }
 
-        if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-            if last_error.is_none() {
-                if let Some(ref mut ctx) = tab.edit_context {
-                    ctx.pending_cell_changes.clear();
+        // 逐条在后台执行：此前在 UI 线程 block_on，一次保存几十个单元格修改时
+        // 会有几十次同步数据库往返，界面直接卡住。
+        let tab_id = match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Query(tab)) => tab.id.clone(),
+            _ => return,
+        };
+        let services = self.services.clone();
+        let handle = self.runtime.handle().clone();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_query_batch_save_result = Some(receiver);
+        self.status_message = tr!("正在保存修改...").into();
+        let connection_id = table.connection_id.clone();
+        let database = table.database.clone();
+        handle.spawn(async move {
+            let mut success = 0usize;
+            let mut last_error: Option<String> = None;
+            for sql in sql_statements {
+                match services
+                    .execute_sql(QueryExecution {
+                        connection_id: connection_id.clone(),
+                        database: database.clone(),
+                        sql,
+                    })
+                    .await
+                {
+                    Ok(_) => success += 1,
+                    Err(error) => last_error = Some(error.to_string()),
                 }
             }
-        }
-
-        if last_error.is_none() {
-            self.status_message = tr!("已保存 {} 处修改", success_count).into();
-            self.re_execute_query_tab_sql(&source_sql);
-        } else if success_count > 0 {
-            self.status_message = tr!("部分保存：成功 {}，有失败", success_count).into();
-            self.re_execute_query_tab_sql(&source_sql);
-        }
-        last_error
+            let _ = sender.send(QueryBatchSaveResult {
+                tab_id,
+                success,
+                error: last_error,
+                source_sql,
+            });
+        });
     }
 
-    /// 执行查询页的 SQL 变更语句（INSERT/UPDATE/DELETE）
-    fn execute_query_tab_mutation(&mut self, sql: String, success_message: &str) -> bool {
-        let (connection_id, database) = match self.tabs.get(self.active_tab) {
-            Some(WorkspaceTab::Query(tab)) => {
-                if let Some(ref ctx) = tab.edit_context {
-                    (ctx.table_ref.connection_id.clone(), ctx.table_ref.database.clone())
-                } else {
-                    return false;
-                }
-            }
-            _ => return false,
+    fn poll_structure_sql(&mut self) {
+        let Some((tab_id, receiver)) = self.pending_structure_sql.take() else {
+            return;
         };
-        match self.runtime.block_on(self.services.execute_sql(QueryExecution {
-            connection_id,
-            database,
-            sql,
-        })) {
+        match receiver.try_recv() {
+            Ok(Ok(())) => {
+                self.status_message = tr!("表结构已更新").into();
+                // 只有目标表标签页仍是当前页时才刷新，避免刷新到别的表
+                let is_active = matches!(
+                    self.tabs.get(self.active_tab),
+                    Some(WorkspaceTab::Table(tab)) if tab.id == tab_id
+                );
+                if is_active {
+                    self.refresh_active_table_preview(true);
+                }
+            }
+            Ok(Err(error)) => {
+                self.status_level = StatusLevel::Error;
+                self.status_message = tr!("表结构变更失败: {}", error).into();
+                if let Some(WorkspaceTab::Table(tab)) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| matches!(t, WorkspaceTab::Table(t) if t.id == tab_id))
+                {
+                    tab.error = Some(error);
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.pending_structure_sql = Some((tab_id, receiver));
+            }
+            Err(TryRecvError::Disconnected) => {}
+        }
+    }
+
+    fn poll_query_batch_save(&mut self) {
+        let Some(receiver) = self.pending_query_batch_save_result.take() else {
+            return;
+        };
+        match receiver.try_recv() {
             Ok(result) => {
-                let affected = result.affected_rows.unwrap_or(0);
-                if !success_message.is_empty() {
-                    self.status_message = tr!("{}，影响 {} 行", success_message, affected);
+                let is_active = matches!(
+                    self.tabs.get(self.active_tab),
+                    Some(WorkspaceTab::Query(tab)) if tab.id == result.tab_id
+                );
+                if let Some(WorkspaceTab::Query(tab)) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| matches!(t, WorkspaceTab::Query(q) if q.id == result.tab_id))
+                {
+                    if result.error.is_none() {
+                        if let Some(ref mut ctx) = tab.edit_context {
+                            ctx.pending_cell_changes.clear();
+                        }
+                    }
+                    if let Some(ref error) = result.error {
+                        tab.error = Some(error.clone());
+                    } else {
+                        tab.error = None;
+                    }
                 }
-                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.error = None;
+                match (&result.error, result.success) {
+                    (None, _) => {
+                        self.status_message = tr!("已保存 {} 处修改", result.success).into();
+                    }
+                    (Some(_), 0) => {
+                        self.status_level = StatusLevel::Error;
+                        self.status_message = tr!("保存失败: {}", result.error.clone().unwrap_or_default()).into();
+                    }
+                    (Some(_), _) => {
+                        self.status_level = StatusLevel::Error;
+                        self.status_message =
+                            tr!("部分保存：成功 {}，有失败", result.success).into();
+                    }
                 }
-                true
+                if is_active && result.success > 0 {
+                    self.re_execute_query_tab_sql(&result.source_sql);
+                }
             }
-            Err(error) => {
-                let error = error.to_string();
-                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.error = Some(error.clone());
-                }
-                self.status_message = tr!("执行失败: {}", error);
-                false
+            Err(TryRecvError::Empty) => {
+                self.pending_query_batch_save_result = Some(receiver);
             }
+            Err(TryRecvError::Disconnected) => {}
         }
     }
 
@@ -10353,48 +12135,14 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             }
             return;
         }
-        let (connection_id, database, tab_id) = match self.tabs.get(self.active_tab) {
-            Some(WorkspaceTab::Query(tab)) => {
-                if let Some(ref ctx) = tab.edit_context {
-                    (
-                        ctx.table_ref.connection_id.clone(),
-                        ctx.table_ref.database.clone(),
-                        tab.id.clone(),
-                    )
-                } else {
-                    return;
-                }
-            }
-            _ => return,
-        };
-        match self.runtime.block_on(self.services.execute_sql(QueryExecution {
-            connection_id,
-            database,
-            sql: source_sql.to_string(),
-        })) {
-            Ok(result) => {
-                if let Some(WorkspaceTab::Query(tab)) = self.tabs.iter_mut().find(|t| {
-                    matches!(t, WorkspaceTab::Query(q) if q.id == tab_id)
-                }) {
-                    tab.result = Some(result.clone());
-                    if let Some(entry) = tab.multi_results.get_mut(tab.selected_result_index) {
-                        *entry = result;
-                    }
-                    // 清除编辑状态但保留 edit_context（查询仍为简单单表查询）
-                    if let Some(ref mut ctx) = tab.edit_context {
-                        ctx.editing_cell = None;
-                        ctx.pending_cell_changes.clear();
-                    }
-                }
-            }
-            Err(e) => {
-                if let Some(WorkspaceTab::Query(tab)) = self.tabs.iter_mut().find(|t| {
-                    matches!(t, WorkspaceTab::Query(q) if q.id == tab_id)
-                }) {
-                    tab.error = Some(e.to_string());
-                }
-            }
+        let is_query_tab =
+            matches!(self.tabs.get(self.active_tab), Some(WorkspaceTab::Query(_)));
+        if !is_query_tab {
+            return;
         }
+        // 走统一的异步执行通道重跑：此前在 UI 线程 block_on 执行 SELECT，
+        // 慢查询会直接把界面卡住。
+        self.execute_current_query(ExecuteMode::Explicit(source_sql.to_string()));
     }
 
     fn save_pending_insert_row(&mut self) {
@@ -10419,16 +12167,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             self.status_message = tr!("请至少填写一个字段后再保存").into();
             return;
         };
-        if self.execute_active_table_mutation(sql, tr!("新增记录成功")) {
-            if let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) {
-                tab.pending_insert_row = None;
-                tab.editing_cell = None;
-                tab.selected_preview_row = None;
-                tab.selected_preview_rows.clear();
-                tab.selection_anchor_row = None;
-            }
-            self.refresh_active_table_preview(false);
-        }
+        self.spawn_table_mutation(sql, tr!("新增记录成功"), TableMutationFollowUp::InsertRow);
     }
 
     fn delete_active_table_rows(&mut self, row_indices: &[usize]) {
@@ -10502,15 +12241,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         } else {
             tr!("删除记录成功").into()
         };
-        if self.execute_active_table_mutation(sql, success_message) {
-            if let Some(WorkspaceTab::Table(tab)) = self.tabs.get_mut(self.active_tab) {
-                tab.selected_preview_row = None;
-                tab.selected_preview_rows.clear();
-                tab.selection_anchor_row = None;
-                tab.editing_cell = None;
-            }
-            self.refresh_active_table_preview(false);
-        }
+        self.spawn_table_mutation(sql, success_message, TableMutationFollowUp::DeleteRows);
     }
 
     fn request_delete_active_table_rows(&mut self, mut row_indices: Vec<usize>) {
@@ -10788,11 +12519,11 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             .unwrap_or_else(|| tr!("请选择连接").into());
         let tab_db_kind = tab.connection_id.as_deref()
             .and_then(|cid| connections.iter().find(|c| c.id == cid).map(|c| c.kind));
-        let has_result = (tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
-            || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan | QueryBottomTab::AiChat))
-            && !tab.bottom_panel_collapsed;
-        let has_result_data = tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
+        let has_bottom_data = tab.result.is_some() || tab.error.is_some() || tab.last_executed_sql.is_some()
             || matches!(tab.active_bottom_tab, QueryBottomTab::History | QueryBottomTab::Messages | QueryBottomTab::ExplainPlan | QueryBottomTab::AiChat);
+        // 关闭后底部面板（含折叠条）整体不渲染
+        let has_result = has_bottom_data && !tab.bottom_panel_collapsed && !tab.bottom_panel_closed;
+        let has_result_data = has_bottom_data && !tab.bottom_panel_closed;
         // 首次打开编辑器高度取默认值
         let editor_height = tab.editor_height.unwrap_or(200.0);
         let mut query_batch_dialog_open = pending_query_batch_save;
@@ -10866,6 +12597,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         tab.editor_height = Some(200.0);
                                     }
                                     // 如果底部面板折叠，展开它
+                                    tab.bottom_panel_collapsed = false;
+                                    tab.bottom_panel_closed = false;
+                                }
+                                if tab.bottom_panel_closed
+                                    && query_toolbar_button(ui, tr!("结果面板"), subtle_button_style(colors, fonts.md))
+                                        .on_hover_text(tr!("重新打开查询结果面板"))
+                                        .clicked()
+                                {
+                                    tab.bottom_panel_closed = false;
                                     tab.bottom_panel_collapsed = false;
                                 }
                                 if query_toolbar_button(ui, tr!("保存查询"), subtle_button_style(colors, fonts.md))
@@ -11016,7 +12756,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 for c in connections {
                                     conn_items.push((&c.name, tab.connection_id.as_deref() == Some(&c.id)));
                                 }
-                                if let Some(sel) = toolbar_dropdown_with_border(ui, combo_id, &selected_connection_label, 200.0, &conn_items, Color32::from_rgba_unmultiplied(chrome.secondary_button_stroke.r(), chrome.secondary_button_stroke.g(), chrome.secondary_button_stroke.b(), 120)) {
+                                if let Some(sel) = toolbar_searchable_dropdown(ui, combo_id, &selected_connection_label, 200.0, &conn_items, Color32::from_rgba_unmultiplied(chrome.secondary_button_stroke.r(), chrome.secondary_button_stroke.g(), chrome.secondary_button_stroke.b(), 120)) {
                                     if sel == 0 {
                                         tab.connection_id = None;
                                     } else if let Some(c) = connections.get(sel - 1) {
@@ -11053,7 +12793,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         db_items.push((db, tab.database.as_deref() == Some(db.as_str())));
                                     }
                                 }
-                                if let Some(sel) = toolbar_dropdown_with_border(ui, db_combo_id, &db_label, 180.0, &db_items, Color32::from_rgba_unmultiplied(chrome.secondary_button_stroke.r(), chrome.secondary_button_stroke.g(), chrome.secondary_button_stroke.b(), 120)) {
+                                if let Some(sel) = toolbar_searchable_dropdown(ui, db_combo_id, &db_label, 180.0, &db_items, Color32::from_rgba_unmultiplied(chrome.secondary_button_stroke.r(), chrome.secondary_button_stroke.g(), chrome.secondary_button_stroke.b(), 120)) {
                                     if sel == 0 {
                                         tab.database = None;
                                     } else if let Some(dbs) = databases {
@@ -11065,6 +12805,18 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 if tab.database != prev_db {
                                     tab.messages.push(tr!("已选择数据库: {}", tab.database.as_deref().unwrap_or(tr!("(无)"))));
                                 }
+
+                                // 默认行数限制：对没有 LIMIT 的 SELECT 自动追加 LIMIT 500
+                                ui.add_space(16.0);
+                                ui.checkbox(
+                                    &mut tab.limit_result_rows,
+                                    RichText::new(tr!("限制 500 行"))
+                                        .size(chrome.fonts.sm)
+                                        .color(chrome.weak_text),
+                                )
+                                .on_hover_text(tr!(
+                                    "对没有 LIMIT 的 SELECT 自动追加 LIMIT 500；取消勾选可查询全部"
+                                ));
                             });
                         });
                 });
@@ -11417,6 +13169,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     }
                                 }
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // 隐藏结果面板：不再显示折叠条，重新执行或点「结果面板」恢复
+                                    let close_btn = ui.add(
+                                        egui::Button::new(RichText::new("✕").size(chrome.fonts.md))
+                                            .frame(false),
+                                    );
+                                    if close_btn.on_hover_text(tr!("隐藏结果面板")).clicked() {
+                                        tab.bottom_panel_closed = true;
+                                    }
+                                    ui.add_space(6.0);
                                     let summary = match tab.active_bottom_tab {
                                         QueryBottomTab::Results => tab
                                             .result
@@ -11427,6 +13188,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     result.rows.len(),
                                                     result.elapsed_ms
                                                 );
+                                                let base = if tab.row_limit_applied
+                                                    && result.rows.len() >= DEFAULT_QUERY_ROW_LIMIT
+                                                {
+                                                    format!("{} · {}", base, tr!("限制 500 行"))
+                                                } else {
+                                                    base
+                                                };
                                                 if tab.multi_results.len() > 1 {
                                                     tr!("结果 {}/{} — {}", tab.selected_result_index + 1, tab.multi_results.len(), base)
                                                 } else {
@@ -11454,6 +13222,29 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             action = TabUiAction::ExportActiveResult(ExportFormat::Xlsx);
                                         }
                                     }
+                                    // 结果被默认 500 行限制时，提供一键重跑全部
+                                    if tab.active_bottom_tab == QueryBottomTab::Results
+                                        && tab.row_limit_applied
+                                        && tab
+                                            .result
+                                            .as_ref()
+                                            .is_some_and(|r| r.rows.len() >= DEFAULT_QUERY_ROW_LIMIT)
+                                    {
+                                        let btn = mini_button(
+                                            ui,
+                                            tr!("显示全部"),
+                                            mini_subtle_style(colors, fonts.sm),
+                                        );
+                                        if btn
+                                            .on_hover_text(tr!(
+                                                "解除默认 500 行限制，按上次执行方式重跑"
+                                            ))
+                                            .clicked()
+                                        {
+                                            action = TabUiAction::ExecuteQueryUnlimited;
+                                        }
+                                        ui.add_space(4.0);
+                                    }
                                     ui.label(RichText::new(summary).size(chrome.fonts.sm).color(chrome.weak_text));
                                     // 模型名（靠右，summary 左侧）
                                     if let Some(entry) = ai_model_store.models.get(ai_model_store.active_index) {
@@ -11472,13 +13263,65 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
 
                             match tab.active_bottom_tab {
                                 QueryBottomTab::Results => {
-                                    // 多语句查询结果切换器
-                                    if tab.multi_results.len() > 1 {
-                                        ui.horizontal(|ui| {
-                                            for (index, result) in tab.multi_results.iter().enumerate() {
-                                                let label = tr!("结果{}", index + 1);
+                                    // 结果页切换器：每次执行追加新结果，历史结果页可手动关闭
+                                    if !tab.multi_results.is_empty() {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            let mut close_index: Option<usize> = None;
+                                            let mut close_action: Option<(usize, QueryResultCloseScope)> = None;
+                                            let tab_count = tab.multi_results.len();
+                                            for index in 0..tab.multi_results.len() {
+                                                let serial = tab
+                                                    .result_serials
+                                                    .get(index)
+                                                    .copied()
+                                                    .unwrap_or((index + 1) as u64);
+                                                let label = tr!("结果{}", serial);
                                                 let is_selected = index == tab.selected_result_index;
-                                                if segment_button(ui, &label, is_selected).clicked() {
+                                                let label_response = segment_button(ui, &label, is_selected);
+                                                // 悬停显示该结果对应的语句，便于识别历史结果
+                                                if let Some(statement) = tab.multi_statements.get(index) {
+                                                    let preview: String = statement
+                                                        .trim()
+                                                        .lines()
+                                                        .next()
+                                                        .unwrap_or("")
+                                                        .trim()
+                                                        .chars()
+                                                        .take(80)
+                                                        .collect();
+                                                    if !preview.is_empty() {
+                                                        label_response.clone().on_hover_text(preview);
+                                                    }
+                                                }
+                                                // 右键批量关闭（以右键点击的结果页为锚点）
+                                                label_response.context_menu(|ui| {
+                                                    ctx_menu_style(ui);
+                                                    if ui.button(tr!("关闭当前")).clicked() {
+                                                        close_action = Some((index, QueryResultCloseScope::Current));
+                                                        ui.close();
+                                                    }
+                                                    if index > 0 && ui.button(tr!("关闭左侧")).clicked() {
+                                                        close_action = Some((index, QueryResultCloseScope::Left));
+                                                        ui.close();
+                                                    }
+                                                    if index + 1 < tab_count
+                                                        && ui.button(tr!("关闭右侧")).clicked()
+                                                    {
+                                                        close_action = Some((index, QueryResultCloseScope::Right));
+                                                        ui.close();
+                                                    }
+                                                    if tab_count > 1 && ui.button(tr!("关闭其他")).clicked() {
+                                                        close_action = Some((index, QueryResultCloseScope::Others));
+                                                        ui.close();
+                                                    }
+                                                    ui.separator();
+                                                    if ui.button(tr!("关闭所有")).clicked() {
+                                                        close_action = Some((index, QueryResultCloseScope::All));
+                                                        ui.close();
+                                                    }
+                                                });
+                                                if label_response.clicked() {
                                                     tab.selected_result_index = index;
                                                     // 不立即清除 edit_context，等新分析完成后再替换，避免布局跳动
                                                     if let Some(mut selected) =
@@ -11493,6 +13336,23 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     // 标记需要重新分析编辑上下文
                                                     tab.pending_edit_context_analysis = true;
                                                 }
+                                                let close = ui.add(
+                                                    egui::Button::new(
+                                                        RichText::new("✕")
+                                                            .size(chrome.fonts.tiny)
+                                                            .color(chrome.weak_text),
+                                                    )
+                                                    .frame(false),
+                                                );
+                                                if close.on_hover_text(tr!("关闭该结果")).clicked() {
+                                                    close_index = Some(index);
+                                                }
+                                                ui.add_space(8.0);
+                                            }
+                                            if let Some((anchor, scope)) = close_action {
+                                                close_query_results(tab, anchor, scope);
+                                            } else if let Some(index) = close_index {
+                                                close_query_result(tab, index);
                                             }
                                         });
                                         ui.add_space(4.0);
@@ -11984,20 +13844,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                             .iter().map(|s| s.to_string()).collect();
                                                         let conn_schemas: Vec<(String, Vec<String>)> = schema_cache
                                                             .schema_names_for(&cid)
-                                                            .iter().map(|s| (s.to_string(), schema_cache.tables_for_schema(s)
-                                                                .unwrap_or(&[]).iter().map(|t| t.to_string()).collect()))
+                                                            .iter().map(|s| (s.to_string(), schema_cache.tables_for_schema(&cid, s)))
                                                             .collect();
                                                         let db_tables: Vec<(String, Vec<String>)> = conn_databases
-                                                            .iter().map(|db| (db.clone(), schema_cache.tables_for_database(db)
-                                                                .unwrap_or(&[]).iter().map(|t| t.to_string()).collect()))
+                                                            .iter().map(|db| (db.clone(), schema_cache.tables_for_database(&cid, db)))
                                                             .collect();
                                                         let all_tables: Vec<(String, bool, Vec<core_domain::ColumnDefinition>)> = schema_cache
-                                                            .table_names().iter().map(|name| {
-                                                                let is_view = schema_cache.is_view(name);
-                                                                let cols = schema_cache.columns_for_table(name)
-                                                                    .unwrap_or(&[]).to_vec();
-                                                                (name.to_string(), is_view, cols)
-                                                            }).collect();
+                                                            .table_entries_for_connection(&cid);
 
                                                         let tool_services = services.clone();
                                                         let tool_cid = cid.clone();
@@ -13239,7 +15092,13 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     .show_separator_line(false)
                                     .show_inside(ui, |ui| {
                                         ui.set_min_height(ui.available_height());
-                                        render_summary_ddl_panel(ui, tab, &colors, fonts);
+                                        if let Some(sql) = render_summary_ddl_panel(ui, tab, &colors, fonts) {
+                                            action = TabUiAction::OpenSqlInNewQuery {
+                                                connection_id: tab.connection_id.clone(),
+                                                database: Some(tab.database.clone()),
+                                                sql,
+                                            };
+                                        }
                                     });
                                 let line_x = ddl_panel_resp.response.rect.left();
                                 Some((line_x, full_rect, handle_id))
@@ -15728,13 +17587,19 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                 TableViewMode::Definition => {
                                     if let Some(definition) = &tab.definition {
                                         if let Some(create_sql) = &definition.create_sql {
-                                            render_definition_sql_view(
+                                            if let Some(sql) = render_definition_sql_view(
                                                 ui,
                                                 &tab.title,
                                                 create_sql,
                                                 colors,
                                                 fonts,
-                                            );
+                                            ) {
+                                                action = TabUiAction::OpenSqlInNewQuery {
+                                                    connection_id: tab.table.connection_id.clone(),
+                                                    database: tab.table.database.clone(),
+                                                    sql,
+                                                };
+                                            }
                                         } else {
                                             ui.label(tr!("当前对象没有可展示的 DDL"));
                                         }
@@ -17239,10 +19104,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
 
         if should_confirm {
-            let error = self.save_query_tab_cell_changes();
-            if error.is_some() {
-                self.status_level = StatusLevel::Error;
-            }
+            self.save_query_tab_cell_changes();
             self.pending_query_batch_save = false;
         } else if should_close {
             self.pending_query_batch_save = false;
@@ -18292,6 +20154,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             (format!("{}+[", MOD_KEY), tr!("标签页后退")),
                             (format!("{}+]", MOD_KEY), tr!("标签页前进")),
                             (format!("{}+R", MOD_KEY), tr!("执行查询")),
+                            (format!("{}+Enter", MOD_KEY), tr!("执行光标所在语句")),
                             (format!("{}+E", MOD_KEY), tr!("最近打开的标签页")),
                             (format!("{}+Shift+E", MOD_KEY), tr!("Explain 查询")),
                             (format!("{}+S", MOD_KEY), tr!("保存查询")),
@@ -18302,6 +20165,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             (format!("{}+-", MOD_KEY), tr!("缩小")),
                             (format!("{}+0", MOD_KEY), tr!("重置缩放")),
                             (format!("{}+J", MOD_KEY).into(), tr!("触发自动补全")),
+                            ("Shift+Click".into(), tr!("表名：查看 DDL")),
+                            (format!("{}+Click", MOD_KEY), tr!("SQL 表名：打开表")),
                             ("Escape".into(), tr!("关闭搜索/取消选择")),
                         ];
                         for (key, desc) in &shortcuts {
@@ -20133,6 +21998,15 @@ impl eframe::App for DesktopApp {
         self.poll_generate_data();
         self.poll_ai_streaming();
         self.maybe_request_autocomplete_columns_for_active_query();
+        self.ensure_schema_tables_for_active_query();
+        self.maybe_prefetch_active_database_columns();
+        // 供补全弹窗判断是否应显示“正在加载表...”提示
+        ctx.memory_mut(|mem| {
+            mem.data.insert_temp(
+                egui::Id::new("schema_loading"),
+                self.pending_schema_load.is_some() || !self.pending_metadata_cache_load.is_empty(),
+            )
+        });
 
         // Two-phase refresh: first frame shows "正在刷新", next frame does the work
         if let Some(reload_definition) = self.pending_refresh_active_table.take() {
@@ -20140,7 +22014,7 @@ impl eframe::App for DesktopApp {
             ctx.request_repaint();
         }
 
-        if self.pending_connection_tree.is_some()
+        let needs_fast_repaint = self.pending_connection_tree.is_some()
             || self.pending_query_execution.is_some()
             || self.pending_database_list.is_some()
             || self.ddl_pending_action.is_some()
@@ -20149,12 +22023,20 @@ impl eframe::App for DesktopApp {
             || self.pending_table_summary.is_some()
             || self.pending_schema_summary.is_some()
             || !self.pending_autocomplete_columns.is_empty()
+            || self.pending_query_batch_save_result.is_some()
+            || self.pending_structure_sql.is_some()
+            || self.pending_table_mutation.is_some()
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Table(t) if t.generate_data_running))
             || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::TableSummary(ts) if ts.stats_loading))
-            || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Query(t) if t.ai_is_streaming))
-        {
+            || self.tabs.iter().any(|t| matches!(t, WorkspaceTab::Query(t) if t.ai_is_streaming));
+        if needs_fast_repaint {
             // 后台任务进行中时主动请求后续帧，避免必须等鼠标再次移动才显示结果。
             ctx.request_repaint_after(Duration::from_millis(16));
+        } else if !self.pending_column_prefetch.is_empty()
+            || !self.pending_metadata_cache_load.is_empty()
+        {
+            // 预取/缓存回填属于后台慢任务，没必要 60fps 轮询，降低空闲时的 CPU 占用。
+            ctx.request_repaint_after(Duration::from_millis(120));
         }
         ctx.set_visuals(app_visuals(self.use_dark_theme, self.dark_variant, self.light_variant));
         ctx.memory_mut(|mem| mem.data.insert_temp(egui::Id::new("theme_variants"), (self.dark_variant, self.light_variant)));
@@ -20237,6 +22119,17 @@ impl eframe::App for DesktopApp {
             });
         } else {
             self.sidebar_esc_pressed = false;
+        }
+        // 文件面板：窗口重新获得焦点时刷新已展开目录；切换标签页时立即冲刷自动保存
+        let window_focused = ctx.input(|input| input.focused);
+        if window_focused && !self.files_panel_focused {
+            self.files_refresh_open_dirs();
+        }
+        self.files_panel_focused = window_focused;
+        if self.active_tab != self.last_active_tab_for_flush {
+            let previous = self.last_active_tab_for_flush;
+            self.flush_file_tab_at(previous);
+            self.last_active_tab_for_flush = self.active_tab;
         }
         let mut pending_update_action: Option<UpdateAction> = None;
         let sidebar = if self.sidebar_collapsed {
@@ -20773,6 +22666,47 @@ impl eframe::App for DesktopApp {
                 self.execute_explain_query(mode);
             }
         }
+        // Cmd/Ctrl+Enter: 执行光标所在语句（有选区时执行选区）
+        let query_editor_id = self.tabs.get(self.active_tab).and_then(|tab| match tab {
+            WorkspaceTab::Query(tab) => {
+                Some(egui::Id::from(format!("query-editor-{}", tab.id)))
+            }
+            _ => None,
+        });
+        let execute_statement_shortcut = query_editor_id
+            .is_some_and(|editor_id| ctx.memory(|memory| memory.has_focus(editor_id)))
+            && ctx.input_mut(|input| {
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
+            });
+        if execute_statement_shortcut {
+            let mode = match self.tabs.get(self.active_tab) {
+                Some(WorkspaceTab::Query(tab)) => {
+                    let selected = tab.cursor_range.and_then(|range| {
+                        if !range.is_empty() {
+                            Some(range.slice_str(&tab.sql).to_string())
+                        } else {
+                            None
+                        }
+                    });
+                    match selected {
+                        Some(selected) if !selected.trim().is_empty() => {
+                            Some(ExecuteMode::Selection(Some(selected)))
+                        }
+                        _ => match find_statement_at_cursor(&tab.sql, tab.cursor_range) {
+                            Some(statement) => Some(ExecuteMode::Explicit(statement)),
+                            None => Some(ExecuteMode::Whole),
+                        },
+                    }
+                }
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                if let Some(WorkspaceTab::Query(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.autocomplete.dismiss();
+                }
+                self.execute_current_query(mode);
+            }
+        }
         // Cmd+S: save active query
         let save_query = ctx.input_mut(|input| {
             input.consume_shortcut(&egui::KeyboardShortcut::new(
@@ -20830,6 +22764,8 @@ impl eframe::App for DesktopApp {
         egui::TopBottomPanel::bottom("statusbar")
             .exact_height(24.0)
             .show(ctx, |ui| self.render_status_bar(ui));
+        // 右侧文件面板：必须在 CentralPanel 之前声明
+        self.render_files_panel_panel(ctx);
         egui::CentralPanel::default().show(ctx, |ui| self.render_tabs(ui));
 
         // 树节点拖拽幽灵名称渲染和释放检测
@@ -20918,7 +22854,6 @@ impl eframe::App for DesktopApp {
                     ));
                     // 拖拽插入内容时不触发智能提示
                     tab.autocomplete.dismiss();
-                    tab.autocomplete.last_keystroke = None;
                     // 请求焦点并设置光标到插入内容之后
                     tab.editor_focus_requested = true;
                     tab.autocomplete_cursor_target = Some(new_char_idx);
@@ -21029,6 +22964,9 @@ impl eframe::App for DesktopApp {
                 self.pending_ai_test = Some(rx);
             }
         }
+        // 文件标签页：绑定同步 + 自动保存（编辑发生在 CentralPanel 渲染期间，故放在其后）
+        self.sync_file_binding_for_active_tab();
+        self.auto_save_file_tabs(ctx);
         self.render_connection_dialog(ctx);
         self.render_delete_confirm_dialog(ctx);
         self.render_saved_query_dialog(ctx);
@@ -21044,6 +22982,9 @@ impl eframe::App for DesktopApp {
         self.render_filter_history_dialog(ctx);
         self.render_sort_history_dialog(ctx);
         self.render_ai_settings_dialog(ctx);
+        self.render_file_conflict_dialog(ctx);
+        self.render_files_entry_dialog(ctx);
+        self.render_files_delete_confirm(ctx);
 
         // Cmd+D: new query tab (优先使用侧栏选中节点的上下文)
         let new_query = ctx.input_mut(|input| {
@@ -21223,6 +23164,10 @@ impl QueryTabState {
             connection_id,
             database: None,
             sql: String::new(),
+            file_path: None,
+            file_saved_text: None,
+            file_disk_mtime: None,
+            file_dirty_since: None,
             cursor_range: None,
             column_block: None,
             extra_cursors: Vec::new(),
@@ -21249,6 +23194,10 @@ impl QueryTabState {
             editor_focus_requested: true,
             editor_height: None,
             bottom_panel_collapsed: true,
+            bottom_panel_closed: false,
+            run_result_count: 0,
+            result_serials: Vec::new(),
+            next_result_serial: 1,
             saved_queries_panel_visible: true,
             saved_queries_panel_width: None,
             saved_query_tree_collapsed: HashSet::new(),
@@ -21257,6 +23206,7 @@ impl QueryTabState {
             saved_query_drag_target: None,
             folded: Vec::new(),
             fold_candidates: Vec::new(),
+            fold_candidates_sql_snapshot: String::new(),
             fold_display: None,
             fold_display_sql_snapshot: String::new(),
             selected_saved_query_id: None,
@@ -21266,6 +23216,10 @@ impl QueryTabState {
             selected_saved_query_database: None,
             autocomplete: AutocompleteState::default(),
             autocomplete_cursor_target: None,
+            limit_result_rows: true,
+            row_limit_applied: false,
+            last_execute_mode: None,
+            force_unlimited_once: false,
             abort_sender: None,
             explain_tree: None,
             is_explain: false,
@@ -21294,6 +23248,12 @@ impl QueryTabState {
 
     /// 重新计算折叠候选；根据现有 folded 保留仍有效的折叠。
     fn refresh_folds(&mut self) {
+        // 该函数每帧都会被调用；大 SQL 的括号扫描是 O(n²) 级，必须按内容缓存，
+        // 否则粘贴/打开大脚本后界面会明显卡死。
+        if self.fold_candidates_sql_snapshot == self.sql {
+            return;
+        }
+        self.fold_candidates_sql_snapshot = self.sql.clone();
         self.fold_candidates = crate::fold::find_fold_candidates(&self.sql);
         self.folded.retain(|f| {
             self.fold_candidates.iter().any(|c| {
@@ -21307,6 +23267,12 @@ impl QueryTabState {
             self.result_selections.push(QueryResultSelectionState::default());
         }
         &mut self.result_selections[self.selected_result_index]
+    }
+
+    /// 展开并重新打开底部结果面板（执行、切到消息/历史/AI 时调用）
+    fn open_bottom_panel(&mut self) {
+        self.bottom_panel_collapsed = false;
+        self.bottom_panel_closed = false;
     }
 }
 
@@ -21434,6 +23400,8 @@ enum SidebarAction {
     OpenConnection(String),
     ToggleNode(String, ExplorerNode),
     OpenTable { node: ExplorerNode, load_data: bool, force_new_tab: bool },
+    /// Shift+单击表/视图：打开表信息页并展示 DDL
+    OpenTableDdl { node: ExplorerNode },
     OpenRoutine { node: ExplorerNode, force_new_tab: bool },
     RefreshConnection(String),
     RefreshNode(String, ExplorerNode),
@@ -21459,6 +23427,8 @@ enum SidebarAction {
 enum TabUiAction {
     None,
     ExecuteQuery(ExecuteMode),
+    /// 结果区「显示全部」：跳过默认 LIMIT 500，按上次模式重跑
+    ExecuteQueryUnlimited,
     ExplainQuery(ExecuteMode),
     StopExecution,
     RefreshQueryHistory,
@@ -21513,6 +23483,28 @@ enum TabUiAction {
         database: Option<String>,
         schema: Option<String>,
         table: String,
+    },
+    /// Shift+单击表名：打开表信息页并展示 DDL
+    OpenTableDdl {
+        connection_id: String,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        is_view: bool,
+    },
+    /// Cmd/Ctrl+单击表名：打开表数据页
+    OpenTableData {
+        connection_id: String,
+        database: Option<String>,
+        schema: Option<String>,
+        table: String,
+        is_view: bool,
+    },
+    /// 在新建查询页打开一段 SQL（例如表/存储过程的 DDL）
+    OpenSqlInNewQuery {
+        connection_id: String,
+        database: Option<String>,
+        sql: String,
     },
     LocateInSidebar {
         connection_id: String,
@@ -22166,10 +24158,10 @@ fn resolve_partial_table_ref(
     let partial_table = &partial.table;
     let partial_schema = partial.schema.as_deref().unwrap_or("");
 
-    // 在 schema cache 中搜索匹配的 schema
+    // 在 schema cache 中搜索匹配的 schema（限定当前连接）
     let matching_schemas: Vec<String> = if partial_schema.ends_with('_') {
         schema_cache
-            .schema_names()
+            .schema_names_for(&partial.connection_id)
             .iter()
             .filter(|s| s.starts_with(partial_schema))
             .map(|s| s.to_string())
@@ -22181,7 +24173,7 @@ fn resolve_partial_table_ref(
     // 也搜索 database_tables（schema 名可能存为 database）
     let matching_databases: Vec<String> = if partial_schema.ends_with('_') {
         schema_cache
-            .database_names()
+            .database_names_for(&partial.connection_id)
             .iter()
             .filter(|d| d.starts_with(partial_schema))
             .map(|d| d.to_string())
@@ -22194,27 +24186,23 @@ fn resolve_partial_table_ref(
     let mut candidates: Vec<(Option<String>, String)> = Vec::new(); // (schema, table)
 
     for schema in &matching_schemas {
-        if let Some(tables) = schema_cache.tables_for_schema(schema) {
-            for t in tables {
-                if t.starts_with(partial_table) {
-                    candidates.push((Some(schema.clone()), t.clone()));
-                }
+        for t in schema_cache.tables_for_schema(&partial.connection_id, schema) {
+            if t.starts_with(partial_table) {
+                candidates.push((Some(schema.clone()), t));
             }
         }
     }
     for db in &matching_databases {
-        if let Some(tables) = schema_cache.tables_for_database(db) {
-            for t in tables {
-                if t.starts_with(partial_table) {
-                    candidates.push((Some(db.clone()), t.clone()));
-                }
+        for t in schema_cache.tables_for_database(&partial.connection_id, db) {
+            if t.starts_with(partial_table) {
+                candidates.push((Some(db.clone()), t));
             }
         }
     }
 
-    // 如果没有 schema/database 匹配，尝试在全局表名中搜索
+    // 如果没有 schema/database 匹配，尝试在连接内全部表名中搜索
     if candidates.is_empty() && partial_schema.is_empty() {
-        for t in schema_cache.table_names() {
+        for (t, _is_view) in schema_cache.table_names_for(Some(&partial.connection_id), None) {
             if t.starts_with(partial_table) {
                 candidates.push((None, t.to_string()));
             }
@@ -22638,6 +24626,64 @@ struct ResultTableActionResult {
     action: TabUiAction,
 }
 
+/// 结果单元格值查看器状态（双击单元格打开，只读）
+#[derive(Clone)]
+struct QueryCellViewerState {
+    column: String,
+    row_index: usize,
+    value: Option<String>,
+}
+
+fn render_query_cell_viewer(ui: &mut egui::Ui, tab_id: &str) {
+    let id = egui::Id::new(("query-cell-viewer", tab_id));
+    let Some(state) = ui.data(|data| data.get_temp::<QueryCellViewerState>(id)) else {
+        return;
+    };
+    let palette = mac_ui_palette_from_ui(ui);
+    let mut open = true;
+    egui::Window::new(tr!("单元格值"))
+        .id(egui::Id::new(("query-cell-viewer-window", tab_id)))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(560.0)
+        .default_height(320.0)
+        .show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{} · {}", state.column, tr!("第 {} 行", state.row_index + 1)))
+                        .size(11.5)
+                        .color(palette.weak_text),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(tr!("复制")).clicked() {
+                        ui.ctx().copy_text(state.value.clone().unwrap_or_else(|| "NULL".to_string()));
+                        ui.label(RichText::new(tr!("已复制 ✓")).size(11.0));
+                    }
+                });
+            });
+            ui.separator();
+            egui::ScrollArea::both()
+                .id_salt(format!("query-cell-viewer-scroll-{}", tab_id))
+                .auto_shrink([false, false])
+                .show(ui, |ui| match &state.value {
+                    Some(value) if !value.is_empty() => {
+                        ui.add(
+                            egui::Label::new(RichText::new(value).monospace())
+                                .wrap_mode(egui::TextWrapMode::Extend)
+                                .selectable(true),
+                        );
+                    }
+                    _ => {
+                        ui.label(RichText::new("(NULL)").italics().color(palette.weak_text));
+                    }
+                });
+        });
+    if !open {
+        ui.data_mut(|data| data.remove::<QueryCellViewerState>(id));
+    }
+}
+
 fn render_result_table(
     ui: &mut egui::Ui,
     tab_id: &str,
@@ -23012,6 +25058,19 @@ fn render_result_table(
                                             false,
                                             None,
                                         );
+                                        // 双击单元格：打开只读值查看器（DataGrip 式查看完整值）
+                                        if response.double_clicked() {
+                                            ui.data_mut(|data| {
+                                                data.insert_temp(
+                                                    egui::Id::new(("query-cell-viewer", tab_id)),
+                                                    QueryCellViewerState {
+                                                        column: column.clone(),
+                                                        row_index: index,
+                                                        value: cell_value.as_text().map(|text| text.to_string()),
+                                                    },
+                                                );
+                                            });
+                                        }
                                         // 矩形选区交互
                                         let pointer_pressed = ui.input(|i| i.pointer.primary_pressed());
                                         let pointer_down = ui.input(|i| i.pointer.primary_down());
@@ -23285,6 +25344,7 @@ fn render_result_table(
             }
             sort_click_result
         });
+    render_query_cell_viewer(ui, tab_id);
     let action = if let Some(row_act) = pending_row_action.into_inner() {
         row_act
     } else if let Some((copy_act, col_name, col_type)) = pending_header_copy.into_inner() {
@@ -27095,14 +29155,14 @@ fn render_summary_ddl_panel(
     tab: &TableSummaryTabState,
     colors: &ui_theme::ThemeColors,
     fonts: &ui_theme::FontSizes,
-) {
+) -> Option<String> {
     let palette = mac_ui_palette_from_ui(ui);
     if let Some(ddl_text) = &tab.ddl_text {
         let title = match &tab.ddl_target {
             Some(DdlTarget::Table(node)) | Some(DdlTarget::Routine(node)) => node.name.clone(),
             None => String::new(),
         };
-        render_definition_sql_view(ui, &title, ddl_text, colors, fonts);
+        render_definition_sql_view(ui, &title, ddl_text, colors, fonts)
     } else if tab.ddl_loading {
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
@@ -27110,33 +29170,65 @@ fn render_summary_ddl_panel(
             ui.add_space(8.0);
             ui.label(RichText::new(tr!("正在加载定义...")).color(palette.weak_text));
         });
+        None
     } else if let Some(error) = &tab.ddl_error {
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
             ui.label(RichText::new(format!("{}: {}", tr!("加载失败"), error)).color(palette.danger));
         });
+        None
     } else {
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
             ui.label(RichText::new(tr!("请先在表格中选择一个对象")).color(palette.weak_text));
         });
+        None
     }
 }
 
-fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, colors: &ui_theme::ThemeColors, fonts: &ui_theme::FontSizes) {
+fn render_definition_sql_view(
+    ui: &mut egui::Ui,
+    title: &str,
+    create_sql: &str,
+    colors: &ui_theme::ThemeColors,
+    fonts: &ui_theme::FontSizes,
+) -> Option<String> {
     let palette = mac_ui_palette_from_ui(ui);
     let editor = editor_palette_from_ui(ui);
     let code_font_size = 12.0;
-    let formatted_sql = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| format_definition_sql(create_sql))) {
-        Ok(sql) => sql,
-        Err(_) => {
-            tracing::error!("format_definition_sql panic, 使用原始SQL");
-            create_sql.to_string()
+    // DDL 格式化按内容哈希缓存：这个函数每帧都会调用，大表 DDL（几十上百 KB）
+    // 每帧重新格式化会明显拖慢界面。
+    let formatted_sql = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        create_sql.hash(&mut hasher);
+        let sql_hash = hasher.finish();
+        let cache_id = egui::Id::new(("ddl-formatted-sql", title));
+        let cached = ui
+            .data(|data| data.get_temp::<(u64, String)>(cache_id))
+            .filter(|(hash, _)| *hash == sql_hash)
+            .map(|(_, sql)| sql);
+        match cached {
+            Some(sql) => sql,
+            None => {
+                let sql = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    format_definition_sql(create_sql)
+                })) {
+                    Ok(sql) => sql,
+                    Err(_) => {
+                        tracing::error!("format_definition_sql panic, 使用原始SQL");
+                        create_sql.to_string()
+                    }
+                };
+                ui.data_mut(|data| data.insert_temp(cache_id, (sql_hash, sql.clone())));
+                sql
+            }
         }
     };
     let line_count = formatted_sql.lines().count().max(1);
     let viewport_width = ui.available_width().max(0.0);
     let viewport_height = ui.available_height().max(220.0);
+    let mut open_in_editor = None;
 
     egui::Frame::new()
         .fill(palette.card_bg)
@@ -27150,11 +29242,17 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
                 .stroke(Stroke::NONE)
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
-                    let copy_btn = mini_button(ui, tr!("📋 复制"), mini_borderless_style(colors, fonts.sm, colors.subtle_button_text));
-                    if copy_btn.clicked() {
-                        ui.ctx().copy_text(formatted_sql.clone());
-                        show_copied_tooltip(ui, copy_btn.rect.center());
-                    }
+                    ui.horizontal(|ui| {
+                        let copy_btn = mini_button(ui, tr!("📋 复制"), mini_borderless_style(colors, fonts.sm, colors.subtle_button_text));
+                        if copy_btn.clicked() {
+                            ui.ctx().copy_text(formatted_sql.clone());
+                            show_copied_tooltip(ui, copy_btn.rect.center());
+                        }
+                        let open_btn = mini_button(ui, tr!("在编辑器中打开"), mini_borderless_style(colors, fonts.sm, colors.subtle_button_text));
+                        if open_btn.clicked() {
+                            open_in_editor = Some(formatted_sql.clone());
+                        }
+                    });
                 });
 
             ui.add_space(2.0);
@@ -27198,6 +29296,8 @@ fn render_definition_sql_view(ui: &mut egui::Ui, title: &str, create_sql: &str, 
                         });
                 });
         });
+
+    open_in_editor
 }
 
 fn format_definition_sql(sql: &str) -> String {
@@ -31307,6 +33407,110 @@ fn apply_saved_table_sort(result: &mut QueryResult, sort_state: &mut TableSortSt
     sort_query_result_rows(result, sort_state);
 }
 
+/// 追加一个新的结果页并切换到它；历史结果页保留在标签里，可手动关闭。
+fn push_query_result(tab: &mut QueryTabState, result: QueryResult, statement: String) {
+    tab.multi_results.push(result);
+    tab.multi_statements.push(statement);
+    tab.result_serials.push(tab.next_result_serial);
+    tab.next_result_serial += 1;
+    let index = tab.multi_results.len() - 1;
+    while tab.result_selections.len() <= index {
+        tab.result_selections.push(QueryResultSelectionState::default());
+    }
+    tab.selected_result_index = index;
+    let mut display = tab.multi_results[index].clone();
+    apply_saved_table_sort(&mut display, &mut tab.result_sort);
+    tab.result = Some(display);
+}
+
+/// 结果页批量关闭的范围（以右键点击的结果页为锚点）
+#[derive(Clone, Copy, PartialEq)]
+enum QueryResultCloseScope {
+    Current,
+    Left,
+    Right,
+    Others,
+    All,
+}
+
+/// 关闭结果页并同步语句、选区、当前结果与编辑上下文；被关闭的数据会被真正丢弃。
+fn close_query_results(tab: &mut QueryTabState, anchor: usize, scope: QueryResultCloseScope) {
+    if tab.multi_results.is_empty() {
+        return;
+    }
+    let previous_selected = tab.selected_result_index;
+    let keep = |index: usize| -> bool {
+        match scope {
+            QueryResultCloseScope::Current => index != anchor,
+            QueryResultCloseScope::Left => index >= anchor,
+            QueryResultCloseScope::Right => index <= anchor,
+            QueryResultCloseScope::Others => index == anchor,
+            QueryResultCloseScope::All => false,
+        }
+    };
+
+    let old_results = std::mem::take(&mut tab.multi_results);
+    let old_statements = std::mem::take(&mut tab.multi_statements);
+    let old_serials = std::mem::take(&mut tab.result_serials);
+    let old_selections = std::mem::take(&mut tab.result_selections);
+
+    let mut results = Vec::new();
+    let mut statements = Vec::new();
+    let mut serials = Vec::new();
+    let mut selections = Vec::new();
+    let mut selected_in_new: Option<usize> = None;
+    for (index, result) in old_results.into_iter().enumerate() {
+        if !keep(index) {
+            continue;
+        }
+        if index == previous_selected {
+            selected_in_new = Some(results.len());
+        }
+        results.push(result);
+        if let Some(statement) = old_statements.get(index) {
+            statements.push(statement.clone());
+        }
+        if let Some(serial) = old_serials.get(index) {
+            serials.push(*serial);
+        }
+        if let Some(selection) = old_selections.get(index) {
+            selections.push(selection.clone());
+        }
+    }
+
+    if results.is_empty() {
+        // 全部关闭：清空并收缩容量，释放结果占用的内存
+        tab.multi_results = Vec::new();
+        tab.multi_statements = Vec::new();
+        tab.result_serials = Vec::new();
+        tab.result_selections = Vec::new();
+        tab.selected_result_index = 0;
+        tab.next_result_serial = 1;
+        tab.result = None;
+        tab.edit_context = None;
+        tab.pending_edit_context_analysis = false;
+        tab.active_bottom_tab = QueryBottomTab::Messages;
+        return;
+    }
+
+    tab.multi_results = results;
+    tab.multi_statements = statements;
+    tab.result_serials = serials;
+    tab.result_selections = selections;
+    tab.selected_result_index = selected_in_new
+        .unwrap_or_else(|| anchor.min(tab.multi_results.len().saturating_sub(1)));
+    let mut display = tab.multi_results[tab.selected_result_index].clone();
+    apply_saved_table_sort(&mut display, &mut tab.result_sort);
+    tab.result = Some(display);
+    // 结果页变化后重新分析可编辑上下文
+    tab.pending_edit_context_analysis = true;
+}
+
+/// 关闭单个结果页。
+fn close_query_result(tab: &mut QueryTabState, index: usize) {
+    close_query_results(tab, index, QueryResultCloseScope::Current);
+}
+
 impl TableFilterOperator {
     const ALL: [Self; 21] = [
         Self::Eq,
@@ -33100,6 +35304,278 @@ fn current_line_number(sql: &str, cursor_range: Option<egui::text::CCursorRange>
     line
 }
 
+/// 查询编辑器默认行数上限：没有 LIMIT 的 SELECT 自动追加。
+const DEFAULT_QUERY_ROW_LIMIT: usize = 500;
+
+/// 把持久化元数据缓存条目回填到内存 SchemaCache。
+/// 表名即使没有列信息也要注册——它是表名补全的数据来源。
+pub(crate) fn apply_cached_metadata_entries(
+    schema_cache: &mut SchemaCache,
+    connection_id: &str,
+    entries: &[CachedEntry],
+) {
+    for entry in entries {
+        schema_cache.add_table(
+            connection_id,
+            entry.database.as_deref(),
+            entry.schema.as_deref(),
+            entry.table.clone(),
+            entry.is_view,
+        );
+        if let Some(ref db) = entry.database {
+            schema_cache.add_database(connection_id, db.clone());
+        }
+        if let Some(ref schema) = entry.schema {
+            schema_cache.add_schema(connection_id, schema.clone());
+        }
+        if !entry.columns.is_empty() {
+            schema_cache.add_columns(
+                connection_id,
+                entry.database.as_deref(),
+                entry.schema.as_deref(),
+                entry.table.clone(),
+                entry.columns.clone(),
+            );
+        }
+    }
+}
+
+/// 给没有 LIMIT 的只读查询追加默认 LIMIT。
+/// 返回 None 表示不追加：非 SELECT/WITH 只读查询、已有顶层 LIMIT、带行锁（FOR UPDATE/SHARE）、
+/// Mongo 非 find 链（aggregate 等不做改写）。
+fn apply_default_row_limit(statement: &str, kind: DatabaseKind) -> Option<String> {
+    let trimmed = statement.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let body = trimmed.trim_end_matches(';').trim_end();
+    if body.is_empty() {
+        return None;
+    }
+    let lower = body.to_ascii_lowercase();
+
+    if kind == DatabaseKind::MongoDb {
+        // 只处理 find 链式调用；已有 .limit( 时尊重用户设置
+        if lower.contains(".find(")
+            && !lower.contains(".limit(")
+            && !lower.contains(".toarray(")
+        {
+            return Some(format!("{body}.limit({DEFAULT_QUERY_ROW_LIMIT})"));
+        }
+        return None;
+    }
+
+    // 只读查询：SELECT，或顶层不含 INSERT/UPDATE/DELETE/MERGE 的 WITH 查询
+    let is_select_like = lower.starts_with("select")
+        || (lower.starts_with("with")
+            && !contains_top_level_keyword(body, "insert")
+            && !contains_top_level_keyword(body, "update")
+            && !contains_top_level_keyword(body, "delete")
+            && !contains_top_level_keyword(body, "merge"));
+    if !is_select_like {
+        return None;
+    }
+    // 顶层已有 LIMIT，或带行锁（任意位置，规避尾随注释）时不追加
+    if contains_top_level_keyword(body, "limit") {
+        return None;
+    }
+    if ["for update", "for share", "for no key update", "for key share"]
+        .iter()
+        .any(|lock| contains_top_level_keyword(body, lock))
+        || ends_with_row_lock(&lower)
+    {
+        return None;
+    }
+    Some(format!("{body}\nLIMIT {DEFAULT_QUERY_ROW_LIMIT}"))
+}
+
+fn ends_with_row_lock(lower: &str) -> bool {
+    let tail = lower.trim_end_matches(';').trim_end();
+    if tail.ends_with("for update")
+        || tail.ends_with("for share")
+        || tail.ends_with("for no key update")
+        || tail.ends_with("for key share")
+    {
+        return true;
+    }
+    // FOR UPDATE NOWAIT / SKIP LOCKED
+    (tail.ends_with("nowait") || tail.ends_with("skip locked"))
+        && (tail.contains("for update") || tail.contains("for share"))
+}
+
+/// 在跳过字符串/反引号/注释，且只在括号外（顶层）查找关键字（大小写不敏感）。
+fn contains_top_level_keyword(sql: &str, keyword: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied().unwrap_or(0);
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            if b == b'*' && next == b'/' {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_single {
+            if b == b'\\' && next != 0 {
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                if next == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if b == b'\\' && next != 0 {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_backtick {
+            if b == b'`' {
+                in_backtick = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\'' => {
+                in_single = true;
+                i += 1;
+                continue;
+            }
+            b'"' => {
+                in_double = true;
+                i += 1;
+                continue;
+            }
+            b'`' => {
+                in_backtick = true;
+                i += 1;
+                continue;
+            }
+            b'-' if next == b'-' => {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            b'#' => {
+                in_line_comment = true;
+                i += 1;
+                continue;
+            }
+            b'/' if next == b'*' => {
+                in_block_comment = true;
+                i += 2;
+                continue;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0
+            && i + keyword.len() <= bytes.len()
+            && bytes[i..i + keyword.len()].eq_ignore_ascii_case(keyword)
+        {
+            let before_ok = i == 0 || {
+                let prev = bytes[i - 1];
+                !(prev.is_ascii_alphanumeric() || prev == b'_')
+            };
+            let after = i + keyword.len();
+            let after_ok = after >= bytes.len() || {
+                let next = bytes[after];
+                !(next.is_ascii_alphanumeric() || next == b'_')
+            };
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_table_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '.' | '`' | '"')
+}
+
+/// 取光标处（或左侧紧邻）的对象标识符，返回 (限定名, 表名)：
+/// `public.users` → (Some("public"), "users")，`` `users` `` → (None, "users")。
+fn table_reference_token_at(sql: &str, char_index: usize) -> Option<(Option<String>, String)> {
+    let chars: Vec<char> = sql.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let mut idx = char_index.min(chars.len());
+    if idx >= chars.len() || !is_table_name_char(chars[idx]) {
+        if idx == 0 {
+            return None;
+        }
+        idx -= 1;
+    }
+    if !is_table_name_char(chars[idx]) {
+        return None;
+    }
+    let mut start = idx;
+    while start > 0 && is_table_name_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = idx + 1;
+    while end < chars.len() && is_table_name_char(chars[end]) {
+        end += 1;
+    }
+    let raw: String = chars[start..end].iter().collect();
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !matches!(c, '`' | '"' | '\''))
+        .collect();
+    let parts: Vec<&str> = cleaned.split('.').filter(|part| !part.is_empty()).collect();
+    match parts.len() {
+        0 => None,
+        1 => Some((None, parts[0].to_string())),
+        _ => Some((
+            Some(parts[parts.len() - 2].to_string()),
+            parts[parts.len() - 1].to_string(),
+        )),
+    }
+}
+
 /// 从光标位置查找所在 SQL 语句（以分号为界）
 fn find_statement_at_cursor(sql: &str, cursor_range: Option<egui::text::CCursorRange>) -> Option<String> {
     let range = cursor_range?;
@@ -34136,7 +36612,7 @@ fn toolbar_dropdown(
     items: &[(&str, bool)],
 ) -> Option<usize> {
     let palette = mac_ui_palette_from_ui(ui);
-    toolbar_dropdown_impl(ui, id, label, width, items, palette.secondary_button_stroke, 22.0, palette.radius_lg, false)
+    toolbar_dropdown_impl(ui, id, label, width, items, palette.secondary_button_stroke, 22.0, palette.radius_lg, false, false)
 }
 
 /// 带自定义尺寸/圆角的下拉框：AI 设置弹窗使用更高控件与更小圆角
@@ -34150,11 +36626,11 @@ fn toolbar_dropdown_sized(
     corner_radius: f32,
 ) -> Option<usize> {
     let palette = mac_ui_palette_from_ui(ui);
-    toolbar_dropdown_impl(ui, id, label, width, items, palette.secondary_button_stroke, height, corner_radius, true)
+    toolbar_dropdown_impl(ui, id, label, width, items, palette.secondary_button_stroke, height, corner_radius, true, false)
 }
 
-/// 带自定义边框色的下拉框：连接/数据库选择器使用更淡的边框
-fn toolbar_dropdown_with_border(
+/// 带搜索过滤的下拉：打开后直接键入即可按名称过滤，↑/↓ 选择，Enter 确认，Esc 关闭。
+fn toolbar_searchable_dropdown(
     ui: &mut egui::Ui,
     id: egui::Id,
     label: &str,
@@ -34163,7 +36639,20 @@ fn toolbar_dropdown_with_border(
     border_color: Color32,
 ) -> Option<usize> {
     let palette = mac_ui_palette_from_ui(ui);
-    toolbar_dropdown_impl(ui, id, label, width, items, border_color, 22.0, palette.radius_lg, false)
+    toolbar_dropdown_impl(ui, id, label, width, items, border_color, 22.0, palette.radius_lg, false, true)
+}
+
+fn dropdown_filtered_indices(items: &[(&str, bool)], query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return (0..items.len()).collect();
+    }
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, (label, _))| label.to_lowercase().contains(&q))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn toolbar_dropdown_impl(
@@ -34176,6 +36665,7 @@ fn toolbar_dropdown_impl(
     height: f32,
     corner_radius: f32,
     left_align: bool,
+    searchable: bool,
 ) -> Option<usize> {
     let palette = mac_ui_palette_from_ui(ui);
     let btn = if left_align {
@@ -34222,7 +36712,14 @@ fn toolbar_dropdown_impl(
 
     let is_open = ui.data_mut(|d| d.get_temp::<bool>(id).unwrap_or(false));
     if btn.clicked() {
-        ui.data_mut(|d| d.insert_temp(id, !is_open));
+        let now_open = !is_open;
+        ui.data_mut(|d| {
+            d.insert_temp(id, now_open);
+            if now_open {
+                d.insert_temp(id.with("search"), String::new());
+                d.insert_temp(id.with("hl"), 0usize);
+            }
+        });
     }
     // 点击其它区域时关闭
     if is_open && ui.input(|i| i.pointer.any_released()) && !btn.hovered() {
@@ -34239,12 +36736,98 @@ fn toolbar_dropdown_impl(
         return None;
     }
 
+    // 搜索模式：打开后直接键入即可过滤，无需先点输入框
+    let mut result = None;
+    let mut search_query = String::new();
+    let mut highlighted = 0usize;
+    let mut scroll_highlight = false;
+    if searchable {
+        search_query = ui.data_mut(|d| d.get_temp::<String>(id.with("search")).unwrap_or_default());
+        highlighted = ui.data_mut(|d| d.get_temp::<usize>(id.with("hl")).unwrap_or(0));
+        let mut filtered_len = dropdown_filtered_indices(items, &search_query).len();
+
+        let mut typed = String::new();
+        let mut backspace = false;
+        let mut move_down = false;
+        let mut move_up = false;
+        let mut commit = false;
+        let mut close = false;
+        ui.input_mut(|input| {
+            let plain_text = !input.modifiers.command && !input.modifiers.alt;
+            input.events.retain(|event| match event {
+                egui::Event::Text(text) if plain_text && !text.is_empty() => {
+                    typed.push_str(text);
+                    false
+                }
+                egui::Event::Key {
+                    key: egui::Key::Backspace,
+                    pressed: true,
+                    ..
+                } => {
+                    backspace = true;
+                    false
+                }
+                egui::Event::Key {
+                    key: egui::Key::Delete,
+                    pressed: true,
+                    ..
+                } => false,
+                _ => true,
+            });
+            move_down = input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+            move_up = input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+            commit = input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+            close = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+        });
+
+        if !typed.is_empty() {
+            search_query.push_str(&typed);
+        } else if backspace {
+            search_query.pop();
+        }
+        ui.data_mut(|d| d.insert_temp(id.with("search"), search_query.clone()));
+        if !typed.is_empty() || backspace {
+            filtered_len = dropdown_filtered_indices(items, &search_query).len();
+            highlighted = 0;
+        }
+        if move_down || move_up {
+            if filtered_len > 0 {
+                if move_down {
+                    highlighted = (highlighted + 1).min(filtered_len - 1);
+                } else {
+                    highlighted = highlighted.saturating_sub(1);
+                }
+                scroll_highlight = true;
+            }
+        }
+        if filtered_len > 0 {
+            highlighted = highlighted.min(filtered_len - 1);
+        } else {
+            highlighted = 0;
+        }
+        ui.data_mut(|d| d.insert_temp(id.with("hl"), highlighted));
+
+        if commit {
+            if let Some(&original) = dropdown_filtered_indices(items, &search_query).get(highlighted) {
+                result = Some(original);
+            }
+        }
+        if close {
+            ui.data_mut(|d| d.insert_temp(id, false));
+        }
+    }
+
+    let filtered = if searchable {
+        dropdown_filtered_indices(items, &search_query)
+    } else {
+        (0..items.len()).collect()
+    };
+
     let below = btn.rect.left_bottom() + egui::vec2(0.0, 4.0);
     let area = egui::Area::new(id)
         .order(egui::Order::Foreground)
         .fixed_pos(below)
         .interactable(true);
-    let mut result = None;
     area.show(ui.ctx(), |ui| {
         egui::Frame::new()
             .fill(palette.card_bg)
@@ -34252,69 +36835,84 @@ fn toolbar_dropdown_impl(
             .corner_radius(palette.radius_lg)
             .inner_margin(egui::Margin::symmetric(4, 4))
             .show(ui, |ui| {
-                let max_visible = 15;
                 let row_h = 26.0;
-                let total = items.len();
-                let visible = total.min(max_visible);
-                let list_h = visible as f32 * row_h;
+                let max_visible = 15;
                 ui.set_width(width - 8.0);
-                if total > max_visible {
+                if searchable {
+                    let search_hint = if search_query.is_empty() {
+                        tr!("输入以搜索…")
+                    } else {
+                        search_query.as_str()
+                    };
+                    let search_color = if search_query.is_empty() {
+                        palette.weak_text
+                    } else {
+                        palette.text
+                    };
+                    let (search_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 24.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().text(
+                        egui::pos2(search_rect.left() + 10.0, search_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        search_hint,
+                        FontId::new(palette.fonts.sm, FontFamily::Proportional),
+                        search_color,
+                    );
+                    ui.painter().hline(
+                        search_rect.x_range(),
+                        search_rect.bottom(),
+                        Stroke::new(1.0, palette.border),
+                    );
+                    ui.add_space(2.0);
+                }
+
+                if filtered.is_empty() {
+                    let (empty_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_h),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().text(
+                        egui::pos2(empty_rect.left() + 10.0, empty_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        tr!("没有匹配项"),
+                        FontId::new(palette.fonts.sm, FontFamily::Proportional),
+                        palette.weak_text,
+                    );
+                } else if filtered.len() > max_visible {
+                    let list_h = max_visible as f32 * row_h;
                     ui.set_min_height(list_h);
                     ui.set_max_height(list_h);
                     egui::ScrollArea::vertical()
                         .max_height(list_h)
-                        .show_rows(ui, row_h, total, |ui, row_range| {
+                        .show_rows(ui, row_h, filtered.len(), |ui, row_range| {
                             ui.set_width(width - 8.0);
-                            for i in row_range {
-                                let (item_label, selected) = items[i];
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h),
-                                    egui::Sense::click(),
+                            for row in row_range {
+                                paint_dropdown_row(
+                                    ui,
+                                    items,
+                                    filtered[row],
+                                    searchable && row == highlighted,
+                                    row_h,
+                                    &palette,
+                                    scroll_highlight,
+                                    &mut result,
                                 );
-                                let (bg, text_color) = if response.hovered() {
-                                    (palette.selection_bg, palette.selection_text)
-                                } else if selected {
-                                    (palette.subtle_button_bg, palette.accent_button_text)
-                                } else {
-                                    (Color32::TRANSPARENT, palette.text)
-                                };
-                                ui.painter().rect_filled(rect, palette.radius_md, bg);
-                                ui.painter().text(
-                                    egui::pos2(rect.left() + 10.0, rect.center().y),
-                                    egui::Align2::LEFT_CENTER,
-                                    item_label,
-                                    FontId::new(palette.fonts.md, FontFamily::Proportional),
-                                    text_color,
-                                );
-                                if response.clicked() {
-                                    result = Some(i);
-                                }
                             }
                         });
                 } else {
-                    for (i, (item_label, selected)) in items.iter().enumerate() {
-                        let (rect, response) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), row_h),
-                            egui::Sense::click(),
+                    for row in 0..filtered.len() {
+                        paint_dropdown_row(
+                            ui,
+                            items,
+                            filtered[row],
+                            searchable && row == highlighted,
+                            row_h,
+                            &palette,
+                            scroll_highlight,
+                            &mut result,
                         );
-                        let (bg, text_color) = if response.hovered() {
-                            (palette.selection_bg, palette.selection_text)
-                        } else if *selected {
-                            (palette.subtle_button_bg, palette.accent_button_text)
-                        } else {
-                            (Color32::TRANSPARENT, palette.text)
-                        };
-                        ui.painter().rect_filled(rect, palette.radius_md, bg);
-                        ui.painter().text(
-                            egui::pos2(rect.left() + 10.0, rect.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            item_label,
-                            FontId::new(palette.fonts.md, FontFamily::Proportional),
-                            text_color,
-                        );
-                        if response.clicked() {
-                            result = Some(i);
-                        }
                     }
                 }
                 // 记录浮层矩形，用于判断外部点击
@@ -34325,6 +36923,46 @@ fn toolbar_dropdown_impl(
         ui.data_mut(|d| d.insert_temp(id, false));
     }
     result
+}
+
+/// 绘制下拉列表的一行（选中态 / hover 态 / 高亮态）。
+#[allow(clippy::too_many_arguments)]
+fn paint_dropdown_row(
+    ui: &mut egui::Ui,
+    items: &[(&str, bool)],
+    index: usize,
+    highlighted: bool,
+    row_h: f32,
+    palette: &MacUiPalette,
+    scroll_to_highlight: bool,
+    result: &mut Option<usize>,
+) {
+    let (item_label, selected) = items[index];
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), row_h),
+        egui::Sense::click(),
+    );
+    let (bg, text_color) = if response.hovered() || highlighted {
+        (palette.selection_bg, palette.selection_text)
+    } else if selected {
+        (palette.subtle_button_bg, palette.accent_button_text)
+    } else {
+        (Color32::TRANSPARENT, palette.text)
+    };
+    ui.painter().rect_filled(rect, palette.radius_md, bg);
+    ui.painter().text(
+        egui::pos2(rect.left() + 10.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        item_label,
+        FontId::new(palette.fonts.md, FontFamily::Proportional),
+        text_color,
+    );
+    if highlighted && scroll_to_highlight {
+        response.scroll_to_me(None);
+    }
+    if response.clicked() {
+        *result = Some(index);
+    }
 }
 
 /// 从当前预览页数据增量更新各列提示值缓存，仅保留去重数 ≤ 20 的列（排除 NULL）。
@@ -35367,6 +38005,68 @@ fn tab_icon_symbol(tab: &impl TabKindMarker) -> &'static str {
     tab.tab_icon()
 }
 
+/// 文件面板工具栏的图标按钮（无边框，悬停显示提示）。
+fn files_panel_icon_button(ui: &mut egui::Ui, symbol: &str, tooltip: &str) -> bool {
+    ui.add(egui::Button::new(RichText::new(symbol).size(13.0)).frame(false))
+        .on_hover_text(tooltip.to_string())
+        .clicked()
+}
+
+/// 复制目录（递归）。
+fn copy_dir_recursive(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = destination.join(entry.file_name());
+        if entry.metadata()?.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// 在目标目录中生成不冲突的文件名：`name.sql` → `name - 副本.sql`。
+fn unique_dest_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let path = std::path::Path::new(name);
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| name.to_string());
+    let extension = path.extension().map(|ext| ext.to_string_lossy().to_string());
+    for index in 1..1000 {
+        let suffix = if index == 1 {
+            " - 副本".to_string()
+        } else {
+            format!(" - 副本 ({index})")
+        };
+        let file_name = match &extension {
+            Some(extension) => format!("{stem}{suffix}.{extension}"),
+            None => format!("{stem}{suffix}"),
+        };
+        let candidate = dir.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(format!(
+        "{stem}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default()
+    ))
+}
+
 trait TabKindMarker {
     fn tab_icon(&self) -> &'static str;
 }
@@ -35597,15 +38297,6 @@ fn editor_palette_from_ui(ui: &egui::Ui) -> EditorPalette {
     editor_palette(ui.visuals(), dv, lv)
 }
 
-fn sql_highlight_job(sql: &str, visuals: &egui::Visuals, dark_variant: ui_theme::DarkVariant, light_variant: ui_theme::LightVariant) -> egui::text::LayoutJob {
-    sql_highlight_job_with_font_size(sql, visuals, 13.0, dark_variant, light_variant)
-}
-
-fn sql_highlight_job_from_ui(ui: &egui::Ui, sql: &str) -> egui::text::LayoutJob {
-    let (dv, lv) = read_theme_variants(ui);
-    sql_highlight_job(sql, ui.visuals(), dv, lv)
-}
-
 fn sql_highlight_job_with_word_wrap(
     sql: &str,
     visuals: &egui::Visuals,
@@ -35826,7 +38517,6 @@ fn check_autocomplete_triggers(
     ui: &egui::Ui,
     editor_output: &egui::text_edit::TextEditOutput,
     tab: &mut QueryTabState,
-    db_kind: Option<DatabaseKind>,
     fonts: &ui_theme::FontSizes,
 ) {
     // 多光标模式下禁用智能提示
@@ -35842,13 +38532,10 @@ fn check_autocomplete_triggers(
     });
     if pasted {
         tab.autocomplete.dismiss();
-        tab.autocomplete.last_keystroke = None;
         return;
     }
 
-    // 删除/撤销/剪切内容时不触发智能提示（Backspace/Delete、Cmd/Ctrl+Z 撤销、
-    // Event::Cut 或 Cmd/Ctrl+X 剪切）。这些操作会移除文本而非键入，
-    // 若仍触发 300ms debounce 会在删掉字符后弹出提示框。
+    // 删除/撤销/剪切内容时不触发智能提示
     let destructive_edit = ui.input(|i| {
         i.events.iter().any(|e| {
             matches!(e, egui::Event::Cut)
@@ -35865,14 +38552,10 @@ fn check_autocomplete_triggers(
     });
     if destructive_edit {
         tab.autocomplete.dismiss();
-        tab.autocomplete.last_keystroke = None;
         return;
     }
 
-    // 鼠标点击/选中不触发智能提示。点击、拖选、双击选词只移动光标/选区，
-    // 不产生新的输入，但会把光标停在新位置——若 300ms debounce 恰好到期，
-    // 会按新光标位置重新弹出提示框。这里拦截鼠标按下并清掉 debounce 计时。
-    // 注意：跳过 popup 内的点击，否则点击建议行会被误拦截。
+    // 鼠标点击/选中不触发智能提示。注意：跳过 popup 内的点击，否则点击建议行会被误拦截。
     let mouse_click = ui.input(|i| {
         i.events.iter().find_map(|e| {
             match e {
@@ -35897,7 +38580,6 @@ fn check_autocomplete_triggers(
         };
         if !inside_popup {
             tab.autocomplete.dismiss();
-            tab.autocomplete.last_keystroke = None;
             return;
         }
     }
@@ -35910,97 +38592,61 @@ fn check_autocomplete_triggers(
 
     let ctx = ui.ctx();
 
-    // Cmd+J shortcut
+    // Cmd+J 手动触发
     let cmd_j = ctx.input_mut(|input| {
         input.consume_shortcut(&egui::KeyboardShortcut::new(
             egui::Modifiers::COMMAND,
             egui::Key::J,
         )) || (input.modifiers.command && input.key_pressed(egui::Key::J))
     });
-    if cmd_j {
-        tab.autocomplete.trigger_requested = true;
-    }
 
-    // Detect if a `.` was just typed — immediate trigger
     let cursor = editor_output
         .cursor_range
         .map(|r| r.primary.index)
         .unwrap_or(0);
-    if cursor > 0 && tab.sql.as_bytes().get(cursor.saturating_sub(1)) == Some(&b'.') {
-        if editor_output.response.changed() {
-            tab.autocomplete.trigger_requested = true;
-        }
+    let changed = editor_output.response.changed();
+    let just_typed_dot = changed
+        && cursor > 0
+        && tab.sql.as_bytes().get(cursor.saturating_sub(1)) == Some(&b'.');
+
+    // 逐键即时触发：每次文本变化都刷新候选；弹窗已可见时，
+    // 光标移动（方向键等）也同步刷新前缀与锚点。
+    if !(changed || cmd_j || just_typed_dot || tab.autocomplete.visible) {
+        return;
     }
 
-    // Auto-trigger on typing (300ms debounce)
-    if editor_output.response.changed() {
-        let now = Instant::now();
-        tab.autocomplete.last_keystroke = Some(now);
-        // Dismiss popup when a space is typed — user is moving to a new token
-        let cursor = editor_output.cursor_range.map(|r| r.primary.index).unwrap_or(0);
-        if cursor > 0 && tab.sql.as_bytes().get(cursor - 1) == Some(&b' ') {
-            tab.autocomplete.dismiss();
-        }
-    }
+    tab.cursor_range = editor_output.cursor_range;
+    let prefix = SqlContextParser::current_token_prefix(&tab.sql, cursor);
+    let prefix_start = cursor.saturating_sub(prefix.chars().count());
 
-    // Check debounced auto-trigger
-    if let Some(last) = tab.autocomplete.last_keystroke {
-        if last.elapsed() >= Duration::from_millis(300) {
-            let cursor = editor_output
-                .cursor_range
-                .map(|r| r.primary.index)
-                .unwrap_or(0);
-            // 刚输入 `.` 时不 dismiss，让 dot trigger 生效
-            let just_typed_dot = cursor > 0
-                && tab.sql.as_bytes().get(cursor.saturating_sub(1)) == Some(&b'.');
-            let prefix = SqlContextParser::current_token_prefix(&tab.sql, cursor);
-            let min_prefix_len =
-                autocomplete_min_prefix_len(&tab.sql, cursor, db_kind);
-            if prefix.len() >= min_prefix_len {
-                tab.autocomplete.trigger_requested = true;
-                tab.autocomplete.last_keystroke = None; // reset
-            } else if !just_typed_dot {
-                tab.autocomplete.dismiss();
-            }
-        }
-    }
-
-    // Execute trigger if requested
-    if tab.autocomplete.trigger_requested {
-        tab.cursor_range = editor_output.cursor_range;
-        let cursor = editor_output.cursor_range.map(|r| r.primary.index).unwrap_or(0);
-        let prefix =
-            SqlContextParser::current_token_prefix(&tab.sql, cursor);
-        let prefix_start = cursor.saturating_sub(prefix.chars().count());
-
-        tab.autocomplete.prefix = prefix;
-        tab.autocomplete.prefix_start_index = prefix_start;
+    tab.autocomplete.prefix = prefix;
+    tab.autocomplete.prefix_start_index = prefix_start;
+    if cmd_j || changed || just_typed_dot {
         tab.autocomplete.selected_index = 0;
+        tab.autocomplete.clicked_index = None;
         tab.autocomplete.visible = true;
-
-        // Anchor position: 使用 galley 计算光标实际屏幕位置，放在当前光标下一行
-        let galley = &editor_output.galley;
-        let galley_offset = editor_output.galley_pos.to_vec2();
-
-        let cursor_screen_rect = if let Some(cursor_range) = &editor_output.cursor_range {
-            let font_id = FontId::new(fonts.code, FontFamily::Monospace);
-            let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
-            let gutter_row_height = row_height + QUERY_EDITOR_LINE_SPACING;
-            let cursor_rect = egui::text_selection::text_cursor_state::cursor_rect(
-                galley, &cursor_range.primary, gutter_row_height,
-            );
-            cursor_rect.translate(galley_offset)
-        } else {
-            editor_output.response.rect
-        };
-
-        // 放在光标所在行的下方（下一行起始位置）
-        let anchor_x = cursor_screen_rect.left();
-        let anchor_y = cursor_screen_rect.bottom();
-        tab.autocomplete.anchor_pos = Some(egui::pos2(anchor_x, anchor_y));
-
-        tab.autocomplete.trigger_requested = false;
     }
+
+    // Anchor position: 使用 galley 计算光标实际屏幕位置，放在当前光标下一行
+    let galley = &editor_output.galley;
+    let galley_offset = editor_output.galley_pos.to_vec2();
+
+    let cursor_screen_rect = if let Some(cursor_range) = &editor_output.cursor_range {
+        let font_id = FontId::new(fonts.code, FontFamily::Monospace);
+        let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id));
+        let gutter_row_height = row_height + QUERY_EDITOR_LINE_SPACING;
+        let cursor_rect = egui::text_selection::text_cursor_state::cursor_rect(
+            galley, &cursor_range.primary, gutter_row_height,
+        );
+        cursor_rect.translate(galley_offset)
+    } else {
+        editor_output.response.rect
+    };
+
+    // 放在光标所在行的下方（下一行起始位置）
+    let anchor_x = cursor_screen_rect.left();
+    let anchor_y = cursor_screen_rect.bottom();
+    tab.autocomplete.anchor_pos = Some(egui::pos2(anchor_x, anchor_y));
 }
 
 fn is_column_autocomplete_context(context: &SqlContext) -> bool {
@@ -36029,6 +38675,7 @@ fn build_query_autocomplete_suggestions(
         cursor,
         schema_cache,
         tab.connection_id.as_deref(),
+        tab.database.as_deref(),
         db_kind,
         Some(autocomplete_usage),
     );
@@ -36048,7 +38695,10 @@ fn build_query_autocomplete_suggestions(
     else {
         return suggestions;
     };
-    if schema_cache.columns_for_table(&table_ref.table).is_some() {
+    if schema_cache
+        .columns_for_table(Some(connection_id), tab.database.as_deref(), &table_ref.table)
+        .is_some()
+    {
         return suggestions;
     }
     let load_key = DesktopApp::autocomplete_table_load_key(&table_ref);
@@ -36228,17 +38878,64 @@ fn render_query_editor(
     let current_match_bg = colors.search_current_match_bg;
     let current_match_stroke = colors.search_current_match_stroke;
 
+    // SQL 高亮结果按（文本内容 + 主题 + 行高）缓存：layouter 每帧都会被调用，
+    // 大脚本下每帧重新分词/建 TextFormat 会明显占用 CPU。
+    let highlight_cache_id = egui::Id::new(("sql-highlight-job", &tab.id));
     let mut layouter = |ui: &egui::Ui,
                         buf: &dyn egui::TextBuffer,
                         wrap_width: f32| {
-        let mut job = sql_highlight_job_from_ui(ui, buf.as_str());
+        use std::hash::{Hash, Hasher};
+        let text = buf.as_str();
+        let (dv, lv) = read_theme_variants(ui);
+        let dark = ui.visuals().dark_mode;
+        let line_height_bits = gutter_row_height.to_bits();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let text_hash = hasher.finish();
+        let cached = ui.data(|data| {
+            data.get_temp::<(
+                u64,
+                bool,
+                ui_theme::DarkVariant,
+                ui_theme::LightVariant,
+                u32,
+                egui::text::LayoutJob,
+            )>(highlight_cache_id)
+        });
+        let mut job = match cached {
+            Some((hash, cached_dark, cached_dv, cached_lv, cached_line_h, job))
+                if hash == text_hash
+                    && cached_dark == dark
+                    && cached_dv == dv
+                    && cached_lv == lv
+                    && cached_line_h == line_height_bits =>
+            {
+                job
+            }
+            _ => {
+                let mut job = sql_highlight_job_with_font_size(
+                    text,
+                    ui.visuals(),
+                    13.0,
+                    dv,
+                    lv,
+                );
+                for section in &mut job.sections {
+                    section.format.line_height = Some(gutter_row_height);
+                    // 垂直居中：配合本地 epaint patch，让字距在字形上下均匀分布
+                    // （否则默认 Bottom 对齐会把额外行距全堆在行底，与行号中心错位）
+                    section.format.valign = egui::Align::Center;
+                }
+                ui.data_mut(|data| {
+                    data.insert_temp(
+                        highlight_cache_id,
+                        (text_hash, dark, dv, lv, line_height_bits, job.clone()),
+                    )
+                });
+                job
+            }
+        };
         job.wrap.max_width = wrap_width;
-        for section in &mut job.sections {
-            section.format.line_height = Some(gutter_row_height);
-            // 垂直居中：配合本地 epaint patch，让字距在字形上下均匀分布
-            // （否则默认 Bottom 对齐会把额外行距全堆在行底，与行号中心错位）
-            section.format.valign = egui::Align::Center;
-        }
         ui.fonts_mut(|fonts| fonts.layout_job(job))
     };
 
@@ -36364,6 +39061,90 @@ fn render_query_editor(
                             if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
                                 state.cursor.set_char_range(saved_cursor_display);
                                 state.store(ui.ctx(), editor_id);
+                            }
+                        }
+
+                        // Shift+单击 SQL 里的表名 → 看 DDL；Cmd/Ctrl+单击 → 打开表
+                        let modifier_click = ui.input(|i| {
+                            if i.pointer.primary_clicked()
+                                && (i.modifiers.shift || i.modifiers.command)
+                            {
+                                Some((i.pointer.interact_pos(), i.modifiers.shift))
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some((Some(pos), ddl_mode)) = modifier_click {
+                            if editor_rect.contains(pos) {
+                                if let Some(connection_id) = tab.connection_id.clone() {
+                                    let galley_local = pos - output.galley_pos;
+                                    let clicked = output.galley.cursor_from_pos(galley_local);
+                                    let sql_index = tab
+                                        .fold_display
+                                        .as_ref()
+                                        .map(|d| d.display_to_sql(clicked.index))
+                                        .unwrap_or(clicked.index);
+                                    if let Some((qualifier, table)) =
+                                        table_reference_token_at(&tab.sql, sql_index)
+                                    {
+                                        let database = tab.database.clone();
+                                        let resolved = match qualifier.as_deref() {
+                                            Some(q) if schema_cache.is_known_table(
+                                                Some(&connection_id),
+                                                Some(q),
+                                                database.as_deref(),
+                                                &table,
+                                            ) =>
+                                            {
+                                                Some((database.clone(), Some(q.to_string())))
+                                            }
+                                            Some(q) if schema_cache.is_known_table(
+                                                Some(&connection_id),
+                                                None,
+                                                Some(q),
+                                                &table,
+                                            ) =>
+                                            {
+                                                Some((Some(q.to_string()), None))
+                                            }
+                                            Some(_) => None,
+                                            None if schema_cache.is_known_table(
+                                                Some(&connection_id),
+                                                None,
+                                                database.as_deref(),
+                                                &table,
+                                            ) =>
+                                            {
+                                                Some((database.clone(), None))
+                                            }
+                                            None => None,
+                                        };
+                                        if let Some((db, schema)) = resolved {
+                                            let is_view = schema_cache.is_view_of(
+                                                Some(&connection_id),
+                                                db.as_deref(),
+                                                &table,
+                                            );
+                                            *action = if ddl_mode {
+                                                TabUiAction::OpenTableDdl {
+                                                    connection_id,
+                                                    database: db,
+                                                    schema,
+                                                    table,
+                                                    is_view,
+                                                }
+                                            } else {
+                                                TabUiAction::OpenTableData {
+                                                    connection_id,
+                                                    database: db,
+                                                    schema,
+                                                    table,
+                                                    is_view,
+                                                }
+                                            };
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -36960,19 +39741,42 @@ fn render_query_editor(
 
                                 // --- Autocomplete trigger detection ---
                                 if output.response.has_focus() {
-                                    check_autocomplete_triggers(ui, &output, tab, db_kind, fonts);
+                                    check_autocomplete_triggers(ui, &output, tab, fonts);
                                 }
                             });  // ScrollArea.show 结束，返回 ScrollAreaOutput
                     
                     // --- Autocomplete popup rendering (inside Frame, outside ScrollArea) ---
                     if tab.autocomplete.visible {
-                        let suggestions = build_query_autocomplete_suggestions(
+                        let mut suggestions = build_query_autocomplete_suggestions(
                             tab,
                             schema_cache,
                             db_kind,
                             autocomplete_usage,
                             loading_autocomplete_columns,
                         );
+                        // 表清单还在后台加载时给出明确反馈，避免“什么都不弹”像功能坏了
+                        if suggestions.is_empty() {
+                            let schema_loading = ui.data(|data| {
+                                data.get_temp::<bool>(egui::Id::new("schema_loading"))
+                                    .unwrap_or(false)
+                            });
+                            if schema_loading {
+                                suggestions.push(AutocompleteSuggestion::new(
+                                    tr!("正在加载表...").to_string(),
+                                    SuggestionKind::Loading,
+                                ));
+                            } else if tab
+                                .connection_id
+                                .as_deref()
+                                .is_some_and(|connection_id| !schema_cache.has_tables(connection_id))
+                            {
+                                // 表清单彻底为空：提示用户手动刷新，而不是静默无候选
+                                suggestions.push(AutocompleteSuggestion::new(
+                                    tr!("未加载到表，请在侧边栏刷新连接").to_string(),
+                                    SuggestionKind::Loading,
+                                ));
+                            }
+                        }
 
                         if suggestions.is_empty() {
                             tab.autocomplete.dismiss();
@@ -38529,6 +41333,113 @@ mod tests {
         );
     }
 
+    // ── 连接/数据库下拉的搜索过滤 ──
+    #[test]
+    fn dropdown_search_filters_case_insensitive_substring() {
+        let items = [
+            ("localhost", false),
+            ("10.91.51.10", false),
+            ("10.91.51.11", false),
+            ("Abc_Db", false),
+        ];
+        assert_eq!(dropdown_filtered_indices(&items, ""), vec![0, 1, 2, 3]);
+        assert_eq!(dropdown_filtered_indices(&items, "51.1"), vec![1, 2]);
+        assert_eq!(dropdown_filtered_indices(&items, "LOCAL"), vec![0]);
+        assert_eq!(dropdown_filtered_indices(&items, "abc_"), vec![3]);
+        assert!(dropdown_filtered_indices(&items, "nope").is_empty());
+    }
+
+    // ── Ctrl+Enter 执行光标所在语句：按未引用的分号切分 ──
+    #[test]
+    fn statement_at_cursor_splits_by_unquoted_semicolon() {
+        let sql = "SELECT 1;\nSELECT ';' AS s;\nSELECT 3;";
+        let char_index = |needle: &str| -> usize {
+            sql[..sql.find(needle).expect("needle")].chars().count()
+        };
+
+        assert_eq!(
+            find_statement_at_cursor(sql, Some(one(char_index("1;")))).as_deref(),
+            Some("SELECT 1")
+        );
+        // 字符串里的分号不能切断语句
+        assert_eq!(
+            find_statement_at_cursor(sql, Some(one(char_index("AS s")))).as_deref(),
+            Some("SELECT ';' AS s")
+        );
+        assert_eq!(
+            find_statement_at_cursor(sql, Some(one(char_index("SELECT 3")))).as_deref(),
+            Some("SELECT 3")
+        );
+    }
+
+    // ── 默认行数限制：只给没有 LIMIT 的 SELECT 追加 ──
+    #[test]
+    fn default_row_limit_only_applies_to_plain_select() {
+        assert_eq!(
+            apply_default_row_limit("SELECT * FROM users", DatabaseKind::MySql).as_deref(),
+            Some("SELECT * FROM users\nLIMIT 500")
+        );
+        // 尾部分号会被去掉
+        assert_eq!(
+            apply_default_row_limit("select * from users;", DatabaseKind::Postgres).as_deref(),
+            Some("select * from users\nLIMIT 500")
+        );
+        // 已有 LIMIT 不重复追加
+        assert!(apply_default_row_limit("SELECT * FROM users LIMIT 10", DatabaseKind::MySql).is_none());
+        // 子查询里的 LIMIT 不算顶层 LIMIT，外层仍需限制
+        assert_eq!(
+            apply_default_row_limit(
+                "SELECT * FROM t WHERE id IN (SELECT id FROM u LIMIT 10)",
+                DatabaseKind::MySql
+            )
+            .as_deref(),
+            Some("SELECT * FROM t WHERE id IN (SELECT id FROM u LIMIT 10)\nLIMIT 500")
+        );
+        // WITH ... SELECT 追加；WITH ... UPDATE 不追加
+        assert!(apply_default_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", DatabaseKind::Postgres).is_some());
+        assert!(apply_default_row_limit("WITH c AS (SELECT 1) UPDATE t SET a = 1", DatabaseKind::Postgres).is_none());
+        // 字符串 / 注释里的 limit 不算
+        assert!(apply_default_row_limit("SELECT 'limit' AS x FROM t", DatabaseKind::MySql).is_some());
+        assert!(apply_default_row_limit("SELECT * -- limit 10\nFROM t", DatabaseKind::MySql).is_some());
+        // 行锁、非查询不加
+        assert!(apply_default_row_limit("SELECT * FROM t FOR UPDATE", DatabaseKind::MySql).is_none());
+        assert!(apply_default_row_limit("SELECT * FROM t FOR UPDATE -- lock", DatabaseKind::MySql).is_none());
+        assert!(apply_default_row_limit("UPDATE t SET a = 1", DatabaseKind::MySql).is_none());
+        assert!(apply_default_row_limit("SHOW TABLES", DatabaseKind::MySql).is_none());
+        assert!(apply_default_row_limit("EXPLAIN SELECT * FROM t", DatabaseKind::MySql).is_none());
+        // Mongo find 链
+        assert_eq!(
+            apply_default_row_limit("db.users.find({})", DatabaseKind::MongoDb).as_deref(),
+            Some("db.users.find({}).limit(500)")
+        );
+        assert!(apply_default_row_limit("db.users.find({}).limit(10)", DatabaseKind::MongoDb).is_none());
+    }
+
+    // ── Shift+单击表名：从 SQL 文本中提取表引用 ──
+    #[test]
+    fn table_reference_token_reads_qualified_name() {
+        let sql = "SELECT * FROM public.users u JOIN `orders` o ON u.id = o.id";
+        let users = sql.find("users").unwrap();
+        let users_char = sql[..users].chars().count();
+        assert_eq!(
+            table_reference_token_at(sql, users_char + 2),
+            Some((Some("public".to_string()), "users".to_string()))
+        );
+        // 点在词尾（光标落在词后一个位置）也能取到整词
+        let users_end = sql[..users + "users".len()].chars().count();
+        assert_eq!(
+            table_reference_token_at(sql, users_end),
+            Some((Some("public".to_string()), "users".to_string()))
+        );
+        // 反引号会被去掉
+        let orders = sql.find("orders").unwrap();
+        let orders_char = sql[..orders].chars().count();
+        assert_eq!(
+            table_reference_token_at(sql, orders_char + 1),
+            Some((None, "orders".to_string()))
+        );
+    }
+
     // ── MongoDB 数据页筛选：字符串列的值即使看起来像数字也必须加引号 ──
 
     fn mongo_string_column_definition() -> TableDefinition {
@@ -38587,6 +41498,348 @@ mod tests {
         assert_eq!(
             cmd,
             "db.st_ng_aicapay_bal_v1.find({\"transactionOrderNo\": \"2026083102310175600000000\"}).limit(1000).skip(0)"
+        );
+    }
+
+    /// 折叠候选按 SQL 内容缓存：内容未变时不重复扫描（大脚本下每帧重扫会卡顿）。
+    #[test]
+    fn refresh_folds_skips_rescan_when_sql_unchanged() {
+        let mut tab = QueryTabState::new(None);
+        tab.sql = "SELECT (\n  1\n), (\n  2\n)".to_string();
+        tab.refresh_folds();
+        assert!(!tab.fold_candidates.is_empty());
+
+        tab.fold_candidates.clear();
+        tab.refresh_folds();
+        assert!(tab.fold_candidates.is_empty(), "SQL 未变化时不应重扫");
+
+        tab.sql.push('\n');
+        tab.refresh_folds();
+        assert!(!tab.fold_candidates.is_empty(), "SQL 变化后应重新计算");
+    }
+
+    /// 集成链路：元数据缓存回填 SchemaCache 后，查询页在 FROM 后应提示表名。
+    #[test]
+    fn query_tab_suggests_tables_from_metadata_cache() {
+        let entries = vec![CachedEntry {
+            database: Some("shop".into()),
+            schema: None,
+            table: "orders".into(),
+            is_view: false,
+            columns: vec![],
+        }];
+        let mut cache = SchemaCache::new();
+        apply_cached_metadata_entries(&mut cache, "conn-1", &entries);
+
+        let mut tab = QueryTabState::new(Some("conn-1".to_string()));
+        tab.database = Some("shop".into());
+        tab.sql = "SELECT * FROM ord".to_string();
+        tab.cursor_range = Some(one(17));
+
+        let suggestions = build_query_autocomplete_suggestions(
+            &tab,
+            &cache,
+            None,
+            &AutocompleteUsageMemory::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            suggestions.iter().any(|s| s.label == "orders"),
+            "候选: {:?}",
+            suggestions.iter().map(|s| s.label.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    // ── 右侧文件面板：目录扫描只保留子目录与 *.sql，隐藏项忽略 ──
+    #[test]
+    fn files_read_dir_keeps_folders_and_sql_files_sorted() {
+        let root = std::env::temp_dir().join(format!(
+            "freedb-files-panel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(root.join("b_dir")).unwrap();
+        std::fs::create_dir_all(root.join("a_dir")).unwrap();
+        std::fs::write(root.join("z.sql"), "SELECT 1;").unwrap();
+        std::fs::write(root.join("A.SQL"), "SELECT 2;").unwrap();
+        std::fs::write(root.join("notes.txt"), "ignored").unwrap();
+        std::fs::write(root.join(".hidden.sql"), "SELECT 3;").unwrap();
+
+        let entries = DesktopApp::files_read_dir(&root);
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["a_dir", "b_dir", "A.SQL", "z.sql"]);
+        assert!(entries[0].is_dir);
+        assert!(entries[1].is_dir);
+        assert!(!entries[2].is_dir);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn test_temp_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "freedb-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+
+    // ── 文件面板：复制时自动生成不冲突的文件名 ──
+    #[test]
+    fn unique_dest_path_appends_copy_suffix() {
+        let root = test_temp_dir("files-copy-name");
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(unique_dest_path(&root, "fresh.sql"), root.join("fresh.sql"));
+        std::fs::write(root.join("report.sql"), "select 1;").unwrap();
+        assert_eq!(
+            unique_dest_path(&root, "report.sql"),
+            root.join("report - 副本.sql")
+        );
+        std::fs::write(root.join("report - 副本.sql"), "select 2;").unwrap();
+        assert_eq!(
+            unique_dest_path(&root, "report.sql"),
+            root.join("report - 副本 (2).sql")
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── 文件面板：粘贴目录时递归复制子目录与文件 ──
+    #[test]
+    fn copy_dir_recursive_copies_nested_entries() {
+        let root = test_temp_dir("files-copy-dir");
+        let source = root.join("scripts");
+        std::fs::create_dir_all(source.join("nested")).unwrap();
+        std::fs::write(source.join("a.sql"), "select 1;").unwrap();
+        std::fs::write(source.join("nested/b.sql"), "select 2;").unwrap();
+        let destination = root.join("scripts - 副本");
+
+        copy_dir_recursive(&source, &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("a.sql")).unwrap(),
+            "select 1;"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("nested/b.sql")).unwrap(),
+            "select 2;"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── 文件面板：新建名称校验（默认留空，直接输入） ──
+    #[test]
+    fn files_name_validation_rejects_empty_and_separators() {
+        assert!(DesktopApp::files_validate_name("").is_err());
+        assert!(DesktopApp::files_validate_name("   ").is_err());
+        assert!(DesktopApp::files_validate_name("a/b.sql").is_err());
+        assert!(DesktopApp::files_validate_name("a\\b.sql").is_err());
+        assert!(DesktopApp::files_validate_name("..").is_err());
+        assert_eq!(
+            DesktopApp::files_validate_name("  report.sql  ").unwrap(),
+            "report.sql"
+        );
+    }
+
+    // ── 多语句结果：单个结果页可关闭，选中下标与当前结果保持有效 ──
+    #[test]
+    fn closing_query_result_keeps_selection_in_range() {
+        let mut tab = QueryTabState::new(None);
+        for _ in 0..3 {
+            tab.multi_results.push(QueryResult::empty(""));
+            tab.multi_statements.push("select 1".to_string());
+        }
+        tab.result = Some(tab.multi_results[2].clone());
+        tab.selected_result_index = 2;
+
+        // 关闭选中结果之前的一项：选中项前移一位
+        close_query_result(&mut tab, 0);
+        assert_eq!(tab.multi_results.len(), 2);
+        assert_eq!(tab.multi_statements.len(), 2);
+        assert_eq!(tab.selected_result_index, 1);
+        assert!(tab.result.is_some());
+
+        // 关闭当前选中的最后一项：下标回落到新的末尾
+        close_query_result(&mut tab, 1);
+        assert_eq!(tab.multi_results.len(), 1);
+        assert_eq!(tab.selected_result_index, 0);
+        assert!(tab.result.is_some());
+
+        // 关闭最后一个结果：清空结果并切到消息页
+        close_query_result(&mut tab, 0);
+        assert!(tab.multi_results.is_empty());
+        assert!(tab.multi_statements.is_empty());
+        assert!(tab.result.is_none());
+        assert!(matches!(tab.active_bottom_tab, QueryBottomTab::Messages));
+    }
+
+    // ── 每次执行追加新的结果页，并自动切到最新一个 ──
+    #[test]
+    fn pushing_query_result_appends_and_selects_newest() {
+        let mut tab = QueryTabState::new(None);
+        push_query_result(&mut tab, QueryResult::empty(""), "select 1".to_string());
+        assert_eq!(tab.multi_results.len(), 1);
+        assert_eq!(tab.selected_result_index, 0);
+
+        push_query_result(&mut tab, QueryResult::empty(""), "select 2".to_string());
+        assert_eq!(tab.multi_results.len(), 2);
+        assert_eq!(
+            tab.multi_statements,
+            vec!["select 1".to_string(), "select 2".to_string()]
+        );
+        assert_eq!(tab.selected_result_index, 1);
+        assert_eq!(tab.result_selections.len(), 2);
+        assert_eq!(tab.result_serials, vec![1, 2]);
+        assert!(tab.result.is_some());
+
+        // 关闭历史结果后不重新编号：剩余结果仍叫「结果2」
+        close_query_result(&mut tab, 0);
+        assert_eq!(tab.result_serials, vec![2]);
+        assert_eq!(tab.selected_result_index, 0);
+        push_query_result(&mut tab, QueryResult::empty(""), "select 3".to_string());
+        assert_eq!(tab.result_serials, vec![2, 3]);
+    }
+
+    // ── 结果页右键批量关闭：关闭左侧 / 右侧 / 其他 / 所有 ──
+    #[test]
+    fn closing_result_ranges_keeps_expected_tabs() {
+        fn build_tab() -> QueryTabState {
+            let mut tab = QueryTabState::new(None);
+            for index in 0..5 {
+                push_query_result(
+                    &mut tab,
+                    QueryResult::empty(""),
+                    format!("select {index}"),
+                );
+            }
+            tab
+        }
+
+        let mut tab = build_tab();
+        tab.selected_result_index = 2;
+        close_query_results(&mut tab, 2, QueryResultCloseScope::Left);
+        assert_eq!(tab.result_serials, vec![3, 4, 5]);
+        assert_eq!(tab.selected_result_index, 0);
+        assert_eq!(tab.multi_statements.len(), 3);
+
+        let mut tab = build_tab();
+        tab.selected_result_index = 2;
+        close_query_results(&mut tab, 1, QueryResultCloseScope::Right);
+        assert_eq!(tab.result_serials, vec![1, 2]);
+        assert_eq!(tab.selected_result_index, 1);
+
+        let mut tab = build_tab();
+        tab.selected_result_index = 2;
+        close_query_results(&mut tab, 4, QueryResultCloseScope::Others);
+        assert_eq!(tab.result_serials, vec![5]);
+        assert_eq!(tab.selected_result_index, 0);
+
+        let mut tab = build_tab();
+        close_query_results(&mut tab, 0, QueryResultCloseScope::All);
+        assert!(tab.multi_results.is_empty());
+        assert_eq!(tab.multi_results.capacity(), 0);
+        assert!(tab.multi_statements.is_empty());
+        assert!(tab.result_serials.is_empty());
+        assert!(tab.result_selections.is_empty());
+        assert!(tab.result.is_none());
+        assert_eq!(tab.next_result_serial, 1);
+
+        // 关闭所有后重新查询只出现新结果，被关闭的历史不会复活
+        push_query_result(&mut tab, QueryResult::empty(""), "select 9".to_string());
+        assert_eq!(tab.result_serials, vec![1]);
+        assert_eq!(tab.multi_statements.len(), 1);
+    }
+
+    /// 端到端集成：连接树写表清单 → 重启后读取元数据缓存 → 回填 SchemaCache
+    /// → 查询页 FROM 后提示表名；列缓存同理。
+    #[test]
+    fn end_to_end_metadata_cache_to_table_suggestions() {
+        let cache_db = metadata_cache::MetadataCache::in_memory().unwrap();
+        cache_db
+            .save_table_list(
+                "conn-1",
+                &[
+                    CachedEntry {
+                        database: Some("shop".into()),
+                        schema: None,
+                        table: "orders".into(),
+                        is_view: false,
+                        columns: vec![],
+                    },
+                    CachedEntry {
+                        database: Some("shop".into()),
+                        schema: None,
+                        table: "customers".into(),
+                        is_view: false,
+                        columns: vec![],
+                    },
+                ],
+            )
+            .unwrap();
+        cache_db
+            .merge_for_connection(
+                "conn-1",
+                &[CachedEntry {
+                    database: Some("shop".into()),
+                    schema: None,
+                    table: "orders".into(),
+                    is_view: false,
+                    columns: vec![ColumnDefinition {
+                        name: "id".into(),
+                        data_type: "int".into(),
+                        nullable: false,
+                        primary_key: true,
+                        unique: false,
+                        auto_increment: false,
+                        on_update_current_timestamp: false,
+                        default_value: None,
+                        comment: None,
+                    }],
+                }],
+            )
+            .unwrap();
+
+        // 等价于启动时 ensure_metadata_cache 的后台读取结果
+        let entries = cache_db.load_for_connection("conn-1").unwrap();
+        let mut schema = SchemaCache::new();
+        apply_cached_metadata_entries(&mut schema, "conn-1", &entries);
+        assert!(schema.has_tables("conn-1"));
+
+        let mut tab = QueryTabState::new(Some("conn-1".to_string()));
+        tab.database = Some("shop".into());
+        tab.sql = "SELECT * FROM ord".to_string();
+        tab.cursor_range = Some(one(17));
+        let tables = build_query_autocomplete_suggestions(
+            &tab,
+            &schema,
+            None,
+            &AutocompleteUsageMemory::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            tables.iter().any(|s| s.label == "orders"),
+            "候选: {:?}",
+            tables.iter().map(|s| s.label.as_str()).collect::<Vec<_>>()
+        );
+
+        // 列也能补全
+        tab.sql = "SELECT * FROM orders WHERE i".to_string();
+        tab.cursor_range = Some(one(28));
+        let columns = build_query_autocomplete_suggestions(
+            &tab,
+            &schema,
+            None,
+            &AutocompleteUsageMemory::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            columns.iter().any(|s| s.label == "id"),
+            "候选: {:?}",
+            columns.iter().map(|s| s.label.as_str()).collect::<Vec<_>>()
         );
     }
 }

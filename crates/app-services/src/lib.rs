@@ -248,6 +248,13 @@ impl AppServices {
         }
     }
 
+    /// 只保存表清单（表名/视图标记），保留已有列缓存。
+    pub fn save_metadata_table_list(&self, connection_id: &str, entries: &[CachedEntry]) {
+        if let Err(error) = self.metadata_cache.save_table_list(connection_id, entries) {
+            warn!(error = %error, "failed to save metadata table list");
+        }
+    }
+
     pub fn merge_metadata_cache(&self, connection_id: &str, entries: &[CachedEntry]) {
         if let Err(error) = self.metadata_cache.merge_for_connection(connection_id, entries) {
             warn!(error = %error, "failed to merge metadata cache");
@@ -297,6 +304,45 @@ impl AppServices {
             .load_table_definition(&profile, &password, table)
             .await
             .map_err(into_anyhow)
+    }
+
+    /// 批量加载多张表的定义，供补全预取使用。
+    ///
+    /// 连接 profile 与密码只解析一次：逐表调用 `load_table_definition` 会让每张表
+    /// 都去读一次连接配置和密码存储（共享 SQLite 连接），批量预取时会把 UI 线程
+    /// 抢锁拖慢。
+    pub async fn load_table_definitions(
+        &self,
+        connection_id: &str,
+        tables: &[TableRef],
+    ) -> Vec<(TableRef, Result<TableDefinition, String>)> {
+        let prepared = self
+            .require_connection(connection_id)
+            .and_then(|profile| {
+                self.require_saved_password(&profile)
+                    .map(|password| (profile, password))
+            });
+        let (profile, password) = match prepared {
+            Ok(pair) => pair,
+            Err(error) => {
+                let message = error.to_string();
+                return tables
+                    .iter()
+                    .cloned()
+                    .map(|table| (table, Err(message.clone())))
+                    .collect();
+            }
+        };
+        let mut results = Vec::with_capacity(tables.len());
+        for table in tables {
+            let definition = self
+                .session_manager
+                .load_table_definition(&profile, &password, table)
+                .await
+                .map_err(|error| error.to_string());
+            results.push((table.clone(), definition));
+        }
+        results
     }
 
     pub async fn load_routine_definition(&self, routine: &core_domain::RoutineRef) -> Result<core_domain::RoutineDefinition> {
