@@ -400,6 +400,8 @@ struct QueryExecutionLoadResult {
     result: Result<QueryResult, String>,
     is_last: bool,
     is_explain: bool,
+    /// 该结果是否由用户「停止」产生（取消不是失败，不标红）
+    cancelled: bool,
 }
 
 struct BatchSaveResult {
@@ -1052,8 +1054,8 @@ struct QueryTabState {
     last_execute_mode: Option<ExecuteMode>,
     /// 下一次执行跳过默认行数限制（一次性）
     force_unlimited_once: bool,
-    #[allow(dead_code)]
-    abort_sender: Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::oneshot::Sender<()>>>>,
+    /// 执行中为 Some；置位即中断当前在途语句
+    cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     explain_tree: Option<Vec<ExplainNode>>,
     is_explain: bool,
     explain_view_mode: ExplainViewMode,
@@ -1153,7 +1155,7 @@ impl Clone for QueryTabState {
             row_limit_applied: self.row_limit_applied,
             last_execute_mode: self.last_execute_mode.clone(),
             force_unlimited_once: self.force_unlimited_once,
-            abort_sender: self.abort_sender.clone(),
+            cancel_flag: self.cancel_flag.clone(),
             explain_tree: self.explain_tree.clone(),
             is_explain: self.is_explain,
             explain_view_mode: self.explain_view_mode.clone(),
@@ -3263,7 +3265,7 @@ impl DesktopApp {
                                         if query_tab.run_result_count > 0 {
                                             query_tab.active_bottom_tab = QueryBottomTab::Results;
                                         }
-                                        query_tab.abort_sender = None;
+                                        query_tab.cancel_flag = None;
                                         keep_receiver = false;
                                         // 只为本次执行产生的结果页准备编辑上下文触发器
                                         if query_tab.run_result_count > 0 {
@@ -3289,14 +3291,24 @@ impl DesktopApp {
                                     }
                                 }
                                 Err(err) => {
-                                    query_tab.error = Some(err.clone());
-                                    query_tab.messages.push(format!("{}: {}", message.statement, err));
+                                    let text = if message.statement.is_empty() {
+                                        err.clone()
+                                    } else {
+                                        format!("{}: {}", message.statement, err)
+                                    };
+                                    query_tab.messages.push(text);
                                     query_tab.active_bottom_tab = QueryBottomTab::Messages;
                                     query_tab.open_bottom_panel();
-                                    query_tab.abort_sender = None;
+                                    // 取消不是失败：不标红、不记入 tab.error
+                                    if message.cancelled {
+                                        self.status_message = tr!("已停止执行").into();
+                                    } else {
+                                        query_tab.error = Some(err.clone());
+                                        self.status_message = tr!("执行失败").into();
+                                        self.status_level = StatusLevel::Error;
+                                    }
+                                    query_tab.cancel_flag = None;
                                     keep_receiver = false;
-                                    self.status_message = tr!("执行失败").into();
-                                    self.status_level = StatusLevel::Error;
                                     let (history, saved_queries, all_saved_queries) =
                                         load_query_library(&services, &message.connection_id);
                                     query_tab.history = history;
@@ -6363,6 +6375,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         self.active_tab = new_tab;
     }
 
+    /// Dashboard 标签固定占用第一个位置，任何重排之后都归位
+    fn pin_dashboard_first(&mut self) {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, WorkspaceTab::Dashboard))
+        {
+            if index > 0 {
+                let dashboard = self.tabs.remove(index);
+                self.tabs.insert(0, dashboard);
+                if self.active_tab == index {
+                    self.active_tab = 0;
+                } else if self.active_tab < index {
+                    self.active_tab += 1;
+                }
+            }
+        }
+    }
+
     fn tab_back(&mut self) {
         if let Some(prev) = self.tab_back_stack.pop() {
             if prev < self.tabs.len() {
@@ -6418,7 +6449,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         // 关闭前清理异步资源：取消正在执行的查询、丢弃关联的 pending 操作
         let tab_id = self.tabs[index].tab_id().map(|s| s.to_owned());
         if let WorkspaceTab::Query(q) = &mut self.tabs[index] {
-            q.abort_sender.take();
+            q.request_cancel();
         }
         if let Some(id) = &tab_id {
             self.cleanup_pending_for_tab(id);
@@ -6986,36 +7017,25 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let services = self.services.clone();
         let handle = self.runtime.handle().clone();
         let (sender, receiver) = mpsc::channel();
-        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.pending_query_execution = Some(receiver);
-        query_tab.abort_sender = Some(std::sync::Arc::new(tokio::sync::Mutex::new(abort_tx)));
+        query_tab.cancel_flag = Some(cancel.clone());
         self.status_message = tr!("正在执行...").into();
         let explain_flag = is_explain;
 
         handle.spawn(async move {
-            let mut abort_rx = abort_rx;
             let total = statements.len();
             let mut idx: usize = 0;
+            let mut last_statement = String::new();
             // 逐条执行：每条完成即推送结果，保持用户变量持久性
-            services
+            let completed = services
                 .execute_sql_batch_streaming(
                     &connection_id,
                     database.as_deref(),
                     statements.clone(),
+                    cancel,
                     |statement, result| {
-                        // 检查是否被取消
-                        if abort_rx.try_recv().is_ok() {
-                            let _ = sender.send(QueryExecutionLoadResult {
-                                tab_id: tab_id.clone(),
-                                connection_id: connection_id.clone(),
-                                sql: statement.clone(),
-                                statement: statement.clone(),
-                                result: Err(tr!("已取消").to_string()),
-                                is_last: true,
-                                is_explain: false,
-                            });
-                            return false;
-                        }
+                        last_statement = statement.clone();
                         let result = result.map_err(|e| e.to_string());
                         let is_err = result.is_err();
                         let is_last = idx == total - 1 || is_err;
@@ -7027,12 +7047,26 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             result,
                             is_last,
                             is_explain: explain_flag,
+                            cancelled: false,
                         });
                         idx += 1;
                         !is_err
                     },
                 )
                 .await;
+            // 被取消时补一条收尾消息，让结果区显示「已取消」并恢复工具栏状态
+            if !completed {
+                let _ = sender.send(QueryExecutionLoadResult {
+                    tab_id,
+                    connection_id,
+                    sql: last_statement.clone(),
+                    statement: last_statement,
+                    result: Err(tr!("已取消").to_string()),
+                    is_last: true,
+                    is_explain: explain_flag,
+                    cancelled: true,
+                });
+            }
         });
     }
 
@@ -9172,6 +9206,15 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         let palette = MacUiPalette::from(&self.theme);
         let mut pending_active_tab = None;
         let mut pending_close_tab = None;
+        let mut pending_move_to_end = None;
+        let mut pending_move_to_start = None;
+        let mut pending_close_left = None;
+        // Dashboard 固定占用第一个标签位，其余标签的“移动到最左侧”只能排到它之后
+        let leftmost_slot = if matches!(self.tabs.first(), Some(WorkspaceTab::Dashboard)) {
+            1
+        } else {
+            0
+        };
         let mut drag_source = self.tab_drag_source;
         let mut drag_target = self.tab_drag_target;
         let mut drag_target_rect = None; // 保存拖拽目标的响应区域
@@ -9314,6 +9357,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                         pending_active_tab = Some(index);
                                                         ui.close();
                                                     }
+                                                    if index > leftmost_slot && ui.button(tr!("关闭左侧标签")).clicked() {
+                                                        pending_close_left = Some(index);
+                                                        ui.close();
+                                                    }
                                                     if ui.button(tr!("关闭右侧标签")).clicked() {
                                                         pending_close_tab = Some(index);
                                                         pending_active_tab = Some(index);
@@ -9323,6 +9370,17 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                     if ui.button(tr!("关闭全部")).clicked() {
                                                         pending_close_tab = Some(usize::MAX);
                                                         pending_active_tab = Some(usize::MAX);
+                                                        ui.close();
+                                                    }
+                                                    ui.separator();
+                                                    if index > leftmost_slot && ui.button(tr!("移动到最左侧")).clicked() {
+                                                        pending_move_to_start = Some(index);
+                                                        ui.close();
+                                                    }
+                                                    if !matches!(tab, WorkspaceTab::Dashboard)
+                                                        && ui.button(tr!("移动到最右侧")).clicked()
+                                                    {
+                                                        pending_move_to_end = Some(index);
                                                         ui.close();
                                                     }
                                                 });
@@ -9396,6 +9454,8 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                     } else if src > self.active_tab && insert_at <= self.active_tab {
                         self.active_tab += 1;
                     }
+                    // Dashboard 不允许被拖到其他位置
+                    self.pin_dashboard_first();
                 }
             }
             drag_source = None;
@@ -9469,7 +9529,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 // 关闭全部 → 回到 Dashboard
                 for tab in self.tabs.iter_mut() {
                     if let WorkspaceTab::Query(q) = tab {
-                        q.abort_sender.take();
+                        q.request_cancel();
                     }
                 }
                 let ids: Vec<String> = self.tabs.iter().filter_map(|t| t.tab_id().map(|s| s.to_owned())).collect();
@@ -9487,7 +9547,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 for (i, tab) in self.tabs.iter_mut().enumerate() {
                     if i == keep_index { continue; }
                     if let WorkspaceTab::Query(q) = tab {
-                        q.abort_sender.take();
+                        q.request_cancel();
                     }
                 }
                 let ids: Vec<String> = self.tabs.iter().enumerate()
@@ -9506,7 +9566,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 // 关闭右侧标签: keep 0..=keep_index, remove all after
                 for tab in self.tabs.iter_mut().skip(keep_index + 1) {
                     if let WorkspaceTab::Query(q) = tab {
-                        q.abort_sender.take();
+                        q.request_cancel();
                     }
                 }
                 let ids: Vec<String> = self.tabs.iter().skip(keep_index + 1)
@@ -9530,6 +9590,58 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                 self.navigate_to_tab(index);
             }
             _ => {}
+        }
+        // 关闭左侧标签：保留 index 及其右侧的标签；Dashboard 固定占第一个位置，不参与关闭
+        if let Some(index) = pending_close_left {
+            let start = leftmost_slot;
+            if index > start {
+                for tab in self.tabs.iter_mut().take(index).skip(start) {
+                    if let WorkspaceTab::Query(q) = tab {
+                        q.request_cancel();
+                    }
+                }
+                let ids: Vec<String> = self.tabs.iter().take(index).skip(start)
+                    .filter_map(|t| t.tab_id().map(|s| s.to_owned()))
+                    .collect();
+                for id in &ids {
+                    self.cleanup_pending_for_tab(id);
+                }
+                let removed = index - start;
+                self.tabs.drain(start..index);
+                self.active_tab = if self.active_tab < index {
+                    start
+                } else {
+                    self.active_tab - removed
+                };
+            }
+        }
+        // 移动到最左侧：把标签挪到最左（Dashboard 固定占第一个位置，其余标签排在其后）
+        if let Some(index) = pending_move_to_start {
+            if index > leftmost_slot {
+                let tab = self.tabs.remove(index);
+                self.tabs.insert(leftmost_slot, tab);
+                if self.active_tab == index {
+                    self.active_tab = leftmost_slot;
+                } else if (leftmost_slot..index).contains(&self.active_tab) {
+                    self.active_tab += 1;
+                }
+                self.tab_scroll_offset = 0.0;
+            }
+        }
+        // 移动到最右侧：把标签挪到末尾并滚动到可见位置
+        if let Some(index) = pending_move_to_end {
+            if index + 1 < self.tabs.len() {
+                let tab = self.tabs.remove(index);
+                self.tabs.push(tab);
+                if self.active_tab == index {
+                    self.active_tab = self.tabs.len() - 1;
+                } else if index < self.active_tab {
+                    self.active_tab -= 1;
+                }
+                // Dashboard 不允许被挪到末尾
+                self.pin_dashboard_first();
+                self.scroll_tabs_to_end = true;
+            }
         }
         ui.add_space(8.0);
         // 在渲染前确保当前查询页的元数据缓存已加载
@@ -10374,10 +10486,10 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             TabUiAction::ExecuteQueryUnlimited => self.execute_last_query_unlimited(),
             TabUiAction::ExplainQuery(mode) => self.execute_explain_query(mode),
             TabUiAction::StopExecution => {
+                // 只置位，不丢弃标志：收尾消息到达后才清空，避免取消未完成就能再次执行
                 if let Some(WorkspaceTab::Query(query_tab)) = self.tabs.get_mut(self.active_tab) {
-                    query_tab.abort_sender.take();
+                    query_tab.request_cancel();
                 }
-                self.pending_query_execution = None;
                 self.status_message = tr!("已停止执行").into();
             }
             TabUiAction::ExportActiveResult(format) => self.export_active_result(format),
@@ -12553,7 +12665,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                             ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
                             // 第一行：执行按钮
                             ui.horizontal(|ui| {
-                                let is_executing = tab.abort_sender.is_some();
+                                let is_executing = tab.cancel_flag.is_some();
                                 let exec_all_enabled = !is_executing;
                                 let exec_sel_enabled = !is_executing;
 
@@ -23157,6 +23269,13 @@ impl eframe::App for DesktopApp {
 }
 
 impl QueryTabState {
+    /// 请求中断当前在途语句；标志位保留到执行任务回传收尾消息后由 UI 清空
+    fn request_cancel(&mut self) {
+        if let Some(flag) = &self.cancel_flag {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn new(connection_id: Option<String>) -> Self {
         Self {
             id: format!("query-{}", uuid::Uuid::new_v4()),
@@ -23220,7 +23339,7 @@ impl QueryTabState {
             row_limit_applied: false,
             last_execute_mode: None,
             force_unlimited_once: false,
-            abort_sender: None,
+            cancel_flag: None,
             explain_tree: None,
             is_explain: false,
             explain_view_mode: ExplainViewMode::Tree,
@@ -39506,7 +39625,7 @@ fn render_query_editor(
                                 }
 
                                 // 右键菜单：执行选中SQL
-                                let is_executing = tab.abort_sender.is_some();
+                                let is_executing = tab.cancel_flag.is_some();
                                 output.response.context_menu(|ui| {
                                     ctx_menu_style(ui);
                                     let has_selection = tab.cursor_range
@@ -39832,7 +39951,7 @@ fn render_query_editor(
 
     // 行号跟随 TextEdit 实际 galley 行位置绘制，避免长文本时自估算累计误差
     {
-        let is_executing = tab.abort_sender.is_some();
+        let is_executing = tab.cancel_flag.is_some();
         let painter = ui.painter();
         let clip_painter = painter.with_clip_rect(gutter_rect);
         clip_painter.rect_filled(gutter_rect, 0.0, palette.gutter_bg);

@@ -12,9 +12,20 @@ use core_domain::{
 use driver_api::DatabaseDriver;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
+
+/// 轮询取消标志：100ms 粒度足以让「停止」立即生效，比额外维护通知通道简单
+async fn wait_cancel(cancel: &Arc<AtomicBool>) {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
 
 /// 内联重试+连接池复用循环。
 ///
@@ -297,6 +308,11 @@ impl SessionManager {
 
     /// 逐条执行 SQL，每条完成即通过回调返回结果（用于实时推送消息）
     /// 遇到临时性连接错误时自动重连并重试当前语句（最多 max_retries 次）
+    ///
+    /// `cancel` 置位后立即中断在途语句：丢弃执行的 Future 并驱逐该连接的缓存，
+    /// 句柄释放时 socket 关闭，数据库侧随之终止该语句。
+    ///
+    /// 返回 `true` 表示全部语句执行完毕，`false` 表示被取消或回调要求提前停止。
     pub async fn execute_sql_batch_streaming(
         &self,
         profile: &ConnectionProfile,
@@ -304,8 +320,9 @@ impl SessionManager {
         connection_id: &str,
         database: Option<&str>,
         statements: Vec<String>,
+        cancel: Arc<AtomicBool>,
         mut on_result: impl FnMut(String, AppResult<QueryResult>) -> bool,
-    ) {
+    ) -> bool {
         let db_owned = database.or(profile.default_database.as_deref());
         let db: Option<&str> = db_owned;
         let mut handle = match self.pool.acquire(profile, password, db).await {
@@ -314,14 +331,15 @@ impl SessionManager {
                 for stmt in statements {
                     if !on_result(stmt, Err(e.clone_error())) { break; }
                 }
-                return;
+                return false;
             }
         };
         for stmt in statements {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
             let mut attempt = 0u32;
             loop {
-                let mut guard = handle.lock().await;
-                let h: &mut driver_api::ConnectionHandle = &mut *guard;
                 let d: &dyn DatabaseDriver = match profile.kind {
                     DatabaseKind::Postgres => &self.pool.postgres,
                     DatabaseKind::MySql => &self.pool.mysql,
@@ -333,10 +351,24 @@ impl SessionManager {
                     database: db.map(|s| s.to_string()),
                     sql: stmt.clone(),
                 };
-                match d.execute_sql(h, exec).await {
+                // 与取消信号竞争：取消时直接丢弃在途语句的 Future，而不是等它返回
+                let outcome = {
+                    let mut guard = handle.lock().await;
+                    let h: &mut driver_api::ConnectionHandle = &mut *guard;
+                    tokio::select! {
+                        result = d.execute_sql(h, exec) => Some(result),
+                        _ = wait_cancel(&cancel) => None,
+                    }
+                };
+                let Some(result) = outcome else {
+                    // 在途语句的连接状态不可知，整体驱逐；句柄释放后 socket 关闭
+                    self.pool.evict(&profile.id);
+                    tracing::info!(connection_id = %profile.id, "查询已取消，驱逐连接");
+                    return false;
+                };
+                match result {
                     Ok(result) => {
-                        drop(guard);
-                        if !on_result(stmt, Ok(result)) { return; }
+                        if !on_result(stmt, Ok(result)) { return false; }
                         break;
                     }
                     Err(e) if self.is_retryable(&e) && attempt < self.retry.max_retries => {
@@ -349,7 +381,6 @@ impl SessionManager {
                             error = %e,
                             "操作失败（可重试），驱逐连接后重连"
                         );
-                        drop(guard);
                         self.pool.evict(&profile.id);
                         self.set_reconnecting(connection_id, Some(&e));
                         sleep(Duration::from_millis(backoff)).await;
@@ -358,19 +389,19 @@ impl SessionManager {
                             Err(acquire_err) => {
                                 tracing::error!(connection_id = %profile.id, error = %acquire_err, "重连失败");
                                 on_result(stmt, Err(acquire_err));
-                                return;
+                                return false;
                             }
                         }
                     }
                     Err(e) => {
-                        drop(guard);
-                        if !on_result(stmt, Err(e)) { return; }
+                        if !on_result(stmt, Err(e)) { return false; }
                         break;
                     }
                 }
             }
         }
         self.set_connected(connection_id);
+        true
     }
 
     pub async fn apply_table_changes(

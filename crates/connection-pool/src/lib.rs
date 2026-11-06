@@ -5,12 +5,25 @@ use driver_mysql::MySqlDriver;
 use driver_postgres::PostgresDriver;
 use driver_sqlite::SqliteDriver;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout, Duration};
 
 const POOL_MAX_PER_KEY: usize = 5;
 const PING_TIMEOUT_SECS: u64 = 3;
+/// 空闲超过该时长（毫秒）的连接在复用前先验活。
+/// 合盖休眠、切换网络（公司 Wi-Fi ↔ 家庭网络）后，池里的 TCP 连接会变成半开死连接，
+/// 此时写进 socket 不会有任何报错，读则永远等不到回包。复用前 ping 一次即可发现并重建。
+const IDLE_REVERIFY_MS: u64 = 10_000;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 fn pool_key(profile_id: &str, kind: DatabaseKind, database: Option<&str>) -> String {
     match kind {
@@ -28,8 +41,31 @@ fn pool_key(profile_id: &str, kind: DatabaseKind, database: Option<&str>) -> Str
 
 type ConnHandle = Arc<AsyncMutex<ConnectionHandle>>;
 
+/// 池中一条连接：句柄 + 最近一次确认可用的时间戳（毫秒）。
+/// 使用墙钟而非 `Instant`，因为 macOS/Linux 的单调时钟在系统休眠期间不推进，
+/// 睡一夜后算出的空闲时长会偏小，正好漏掉需要验活的场景。
+struct PooledConn {
+    handle: ConnHandle,
+    verified_at_ms: AtomicU64,
+}
+
+impl PooledConn {
+    fn new(handle: ConnHandle) -> Self {
+        Self { handle, verified_at_ms: AtomicU64::new(now_ms()) }
+    }
+
+    /// 已确认可用的最后时刻，验活成功后调用
+    fn touch(&self) {
+        self.verified_at_ms.store(now_ms(), Ordering::Relaxed);
+    }
+
+    fn idle_ms(&self) -> u64 {
+        now_ms().saturating_sub(self.verified_at_ms.load(Ordering::Relaxed))
+    }
+}
+
 pub struct ConnectionPool {
-    entries: Arc<std::sync::Mutex<HashMap<String, Vec<ConnHandle>>>>,
+    entries: Arc<std::sync::Mutex<HashMap<String, Vec<Arc<PooledConn>>>>>,
     pub postgres: PostgresDriver,
     pub mysql: MySqlDriver,
     pub mongodb: MongoDbDriver,
@@ -95,18 +131,33 @@ impl ConnectionPool {
 
         let mut backoff_ms = 50u64;
         loop {
-            // 复用空闲连接（不做逐次 ping，keepalive 已定期清理死连接，操作失败时上层处理重连）
+            // 复用空闲连接。频繁使用的连接不做逐次 ping；只有久未确认的连接才先验活，
+            // 避免写进休眠/换网后已失效的 socket 导致查询永久挂起。
             let snapshot = self.snapshot(&key);
-            for handle in &snapshot {
-                if handle.try_lock().is_ok() {
-                    tracing::debug!(key = %key, "连接池命中，复用空闲连接");
-                    return Ok(handle.clone());
+            let mut dropped_dead = false;
+            for entry in &snapshot {
+                let Ok(mut guard) = entry.handle.try_lock() else { continue };
+                if entry.idle_ms() > IDLE_REVERIFY_MS && !self.timed_ping(&mut guard).await {
+                    drop(guard);
+                    tracing::info!(key = %key, "空闲连接已失效，丢弃后重建");
+                    self.remove(&key, entry);
+                    dropped_dead = true;
+                    continue;
                 }
+                entry.touch();
+                drop(guard);
+                tracing::debug!(key = %key, "连接池命中，复用空闲连接");
+                return Ok(entry.handle.clone());
+            }
+            // 刚丢弃过死连接，重新取快照，避免用过期计数误判池已满
+            if dropped_dead {
+                continue;
             }
 
             // 池已满，等待连接释放
-            if snapshot.len() >= POOL_MAX_PER_KEY {
-                tracing::debug!(key = %key, pool_size = snapshot.len(), "连接池已满，等待空闲连接");
+            let size = self.len(&key);
+            if size >= POOL_MAX_PER_KEY {
+                tracing::debug!(key = %key, pool_size = size, "连接池已满，等待空闲连接");
                 sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(5000);
                 continue;
@@ -115,15 +166,15 @@ impl ConnectionPool {
             // 建新连接
             tracing::info!(key = %key, host = %profile.host, port = profile.port, "连接池新建连接");
             let new = self.provider(profile.kind).connect(profile, password, effective_db).await?;
-            let handle = Arc::new(AsyncMutex::new(new));
-            self.push(&key, handle.clone());
-            return Ok(handle);
+            let entry = Arc::new(PooledConn::new(Arc::new(AsyncMutex::new(new))));
+            self.push(&key, entry.clone());
+            return Ok(entry.handle.clone());
         }
     }
 
     // ── 内部操作 ──
 
-    fn snapshot(&self, key: &str) -> Vec<ConnHandle> {
+    fn snapshot(&self, key: &str) -> Vec<Arc<PooledConn>> {
         self.entries
             .lock()
             .unwrap()
@@ -132,19 +183,23 @@ impl ConnectionPool {
             .unwrap_or_default()
     }
 
-    fn push(&self, key: &str, handle: ConnHandle) {
+    fn len(&self, key: &str) -> usize {
+        self.entries.lock().unwrap().get(key).map_or(0, |v| v.len())
+    }
+
+    fn push(&self, key: &str, entry: Arc<PooledConn>) {
         self.entries
             .lock()
             .unwrap()
             .entry(key.to_string())
             .or_default()
-            .push(handle);
+            .push(entry);
     }
 
-    fn remove(&self, key: &str, target: &ConnHandle) {
+    fn remove(&self, key: &str, target: &Arc<PooledConn>) {
         let mut map = self.entries.lock().unwrap();
         if let Some(vec) = map.get_mut(key) {
-            vec.retain(|h| !Arc::ptr_eq(h, target));
+            vec.retain(|e| !Arc::ptr_eq(e, target));
         }
     }
 
@@ -181,13 +236,12 @@ impl ConnectionPool {
             database
         };
         let key = pool_key(&profile.id, profile.kind, effective_db);
-        let count = self.entries.lock().unwrap().get(&key).map_or(0, |v| v.len());
-        if count >= 2 {
+        if self.len(&key) >= 2 {
             return Ok(());
         }
         tracing::info!(key = %key, "预热连接池");
         let conn = self.provider(profile.kind).connect(profile, password, effective_db).await?;
-        self.push(&key, Arc::new(AsyncMutex::new(conn)));
+        self.push(&key, Arc::new(PooledConn::new(Arc::new(AsyncMutex::new(conn)))));
         Ok(())
     }
 
@@ -211,15 +265,19 @@ impl ConnectionPool {
                 .lock()
                 .unwrap()
                 .iter()
-                .flat_map(|(k, v)| v.iter().map(|h| (k.clone(), h.clone())))
+                .flat_map(|(k, v)| v.iter().map(|e| (k.clone(), e.clone())))
                 .collect()
         };
-        for (key, handle) in snapshot {
-            if let Ok(mut guard) = handle.try_lock() {
-                if self.timed_ping(&mut guard).await { continue; }
+        for (key, entry) in snapshot {
+            // 正在被查询占用的连接 try_lock 会失败，跳过；这类连接由 acquire 的验活兜底
+            if let Ok(mut guard) = entry.handle.try_lock() {
+                if self.timed_ping(&mut guard).await {
+                    entry.touch();
+                    continue;
+                }
                 drop(guard);
                 tracing::info!(key = %key, "keepalive ping 失败，清理死连接");
-                self.remove(&key, &handle);
+                self.remove(&key, &entry);
             }
         }
     }
