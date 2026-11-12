@@ -1046,7 +1046,7 @@ struct QueryTabState {
     autocomplete: AutocompleteState,
     /// Pending cursor position after autocomplete commit (char index).
     autocomplete_cursor_target: Option<usize>,
-    /// 是否为没有 LIMIT 的 SELECT 自动追加 LIMIT 500（工具栏可切换）
+    /// 是否为没有 LIMIT 的 SELECT 自动追加 LIMIT 1000（工具栏可切换）
     limit_result_rows: bool,
     /// 本次执行是否真的追加了默认行数限制
     row_limit_applied: bool,
@@ -6864,7 +6864,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         }
     }
 
-    /// 解除默认 500 行限制，按上次执行模式重跑一次
+    /// 解除默认 1000 行限制，按上次执行模式重跑一次
     fn execute_last_query_unlimited(&mut self) {
         if self.pending_query_execution.is_some() {
             self.status_message = tr!("当前已有语句正在执行").into();
@@ -6984,7 +6984,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             statements
         };
 
-        // 默认给没有 LIMIT 的只读查询追加 LIMIT 500（工具栏「限制 500 行」可关闭）
+        // 默认给没有 LIMIT 的只读查询追加 LIMIT 1000（工具栏「限制 1000 行」可关闭）
         let (statements, row_limit_applied) =
             if query_tab.limit_result_rows && !is_explain && !skip_row_limit {
             let mut applied = false;
@@ -7005,7 +7005,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
         query_tab.row_limit_applied = row_limit_applied;
         if row_limit_applied {
             query_tab.messages.push(
-                tr!("已默认限制前 500 行；可在工具栏取消「限制 500 行」以查询全部").into(),
+                tr!("已默认限制前 1000 行；可在工具栏取消「限制 1000 行」以查询全部").into(),
             );
         }
 
@@ -12919,16 +12919,16 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                     tab.messages.push(tr!("已选择数据库: {}", tab.database.as_deref().unwrap_or(tr!("(无)"))));
                                 }
 
-                                // 默认行数限制：对没有 LIMIT 的 SELECT 自动追加 LIMIT 500
+                                // 默认行数限制：对没有 LIMIT 的 SELECT 自动追加 LIMIT 1000
                                 ui.add_space(16.0);
                                 ui.checkbox(
                                     &mut tab.limit_result_rows,
-                                    RichText::new(tr!("限制 500 行"))
+                                    RichText::new(tr!("限制 1000 行"))
                                         .size(chrome.fonts.sm)
                                         .color(chrome.weak_text),
                                 )
                                 .on_hover_text(tr!(
-                                    "对没有 LIMIT 的 SELECT 自动追加 LIMIT 500；取消勾选可查询全部"
+                                    "对没有 LIMIT 的 SELECT 自动追加 LIMIT 1000；取消勾选可查询全部"
                                 ));
                             });
                         });
@@ -13304,7 +13304,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                                 let base = if tab.row_limit_applied
                                                     && result.rows.len() >= DEFAULT_QUERY_ROW_LIMIT
                                                 {
-                                                    format!("{} · {}", base, tr!("限制 500 行"))
+                                                    format!("{} · {}", base, tr!("限制 1000 行"))
                                                 } else {
                                                     base
                                                 };
@@ -13335,7 +13335,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                             action = TabUiAction::ExportActiveResult(ExportFormat::Xlsx);
                                         }
                                     }
-                                    // 结果被默认 500 行限制时，提供一键重跑全部
+                                    // 结果被默认 1000 行限制时，提供一键重跑全部
                                     if tab.active_bottom_tab == QueryBottomTab::Results
                                         && tab.row_limit_applied
                                         && tab
@@ -13350,7 +13350,7 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
                                         );
                                         if btn
                                             .on_hover_text(tr!(
-                                                "解除默认 500 行限制，按上次执行方式重跑"
+                                                "解除默认 1000 行限制，按上次执行方式重跑"
                                             ))
                                             .clicked()
                                         {
@@ -23547,7 +23547,7 @@ enum SidebarAction {
 enum TabUiAction {
     None,
     ExecuteQuery(ExecuteMode),
-    /// 结果区「显示全部」：跳过默认 LIMIT 500，按上次模式重跑
+    /// 结果区「显示全部」：跳过默认 LIMIT 1000，按上次模式重跑
     ExecuteQueryUnlimited,
     ExplainQuery(ExecuteMode),
     StopExecution,
@@ -35425,7 +35425,7 @@ fn current_line_number(sql: &str, cursor_range: Option<egui::text::CCursorRange>
 }
 
 /// 查询编辑器默认行数上限：没有 LIMIT 的 SELECT 自动追加。
-const DEFAULT_QUERY_ROW_LIMIT: usize = 500;
+const DEFAULT_QUERY_ROW_LIMIT: usize = 1000;
 
 /// 把持久化元数据缓存条目回填到内存 SchemaCache。
 /// 表名即使没有列信息也要注册——它是表名补全的数据来源。
@@ -41497,12 +41497,12 @@ mod tests {
     fn default_row_limit_only_applies_to_plain_select() {
         assert_eq!(
             apply_default_row_limit("SELECT * FROM users", DatabaseKind::MySql).as_deref(),
-            Some("SELECT * FROM users\nLIMIT 500")
+            Some("SELECT * FROM users\nLIMIT 1000")
         );
         // 尾部分号会被去掉
         assert_eq!(
             apply_default_row_limit("select * from users;", DatabaseKind::Postgres).as_deref(),
-            Some("select * from users\nLIMIT 500")
+            Some("select * from users\nLIMIT 1000")
         );
         // 已有 LIMIT 不重复追加
         assert!(apply_default_row_limit("SELECT * FROM users LIMIT 10", DatabaseKind::MySql).is_none());
@@ -41513,7 +41513,7 @@ mod tests {
                 DatabaseKind::MySql
             )
             .as_deref(),
-            Some("SELECT * FROM t WHERE id IN (SELECT id FROM u LIMIT 10)\nLIMIT 500")
+            Some("SELECT * FROM t WHERE id IN (SELECT id FROM u LIMIT 10)\nLIMIT 1000")
         );
         // WITH ... SELECT 追加；WITH ... UPDATE 不追加
         assert!(apply_default_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", DatabaseKind::Postgres).is_some());
@@ -41530,7 +41530,7 @@ mod tests {
         // Mongo find 链
         assert_eq!(
             apply_default_row_limit("db.users.find({})", DatabaseKind::MongoDb).as_deref(),
-            Some("db.users.find({}).limit(500)")
+            Some("db.users.find({}).limit(1000)")
         );
         assert!(apply_default_row_limit("db.users.find({}).limit(10)", DatabaseKind::MongoDb).is_none());
     }
