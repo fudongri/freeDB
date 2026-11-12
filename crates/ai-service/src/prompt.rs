@@ -29,7 +29,11 @@ pub fn build_messages(system: &str, user_prompt: &str) -> Vec<ChatMessage> {
 
 pub fn optimize_prompt(statement: &str) -> String {
     format!(
-        "请优化以下数据库查询语句的性能。说明优化原因和预期效果。\n\n当前语句：\n{}",
+        "请评估以下数据库查询语句，不要无条件重写。\n\
+         - 如果它已经足够简洁合理（没有可避免的全表扫描、索引失效、多余子查询等问题），\
+         直接回答「无需优化」，用一两句话说明理由即可，不要为了凑数编造优化建议。\n\
+         - 只有确实存在可改进之处时，才给出优化后的语句，并说明优化原因和预期效果。\n\n\
+         当前语句：\n{}",
         statement
     )
 }
@@ -106,6 +110,13 @@ mod tests {
         let prompt = optimize_prompt("SELECT * FROM t");
         assert!(prompt.contains("SELECT * FROM t"));
         assert!(prompt.contains("优化"));
+    }
+
+    #[test]
+    fn optimize_prompt_allows_no_suggestion() {
+        let prompt = optimize_prompt("SELECT id FROM t WHERE id = 1");
+        assert!(prompt.contains("无需优化"));
+        assert!(prompt.contains("不要为了凑数编造优化建议"));
     }
 
     #[test]
