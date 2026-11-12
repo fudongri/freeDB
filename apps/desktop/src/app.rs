@@ -6950,8 +6950,9 @@ fn sidebar_node_qualified_name(node: &ExplorerNode) -> String {
             return;
         }
 
-        // 上一轮的结果页保留在结果标签里（可手动关闭），本次执行追加新的结果页；
-        // 执行期间继续显示上一次选中的结果，避免表格闪烁
+        // 清空上一轮的结果页，避免多次执行后结果标签不断累积；
+        // 本次执行内部的多条语句仍各自占用一个结果页
+        close_query_results(query_tab, 0, QueryResultCloseScope::All);
         query_tab.executed_statements.clear();
         query_tab.run_result_count = 0;
         query_tab.error = None;
